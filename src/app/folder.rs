@@ -1,27 +1,35 @@
 //! Folder View: browse a folder of scans, convert (individually or as a roll)
 //! and batch-edit / export the selection.
 
-use eframe::egui::{self, Color32, RichText, Sense};
+use eframe::egui::{self, Color32, RichText, Sense, pos2, vec2};
 
-use super::widgets::{self, section};
+use super::widgets::{self, Icon, icon_button, theme};
 use super::{NlpApp, ProxyState};
 use crate::engine::settings::*;
 
+/// One-line hint shown under the scan source.
 pub fn source_instructions(s: Source) -> &'static str {
     match s {
         Source::DigitalCamera => {
-            "DIGITAL CAMERA SCANS\n1. Film base is neutralised automatically (or sample the border in the Editor's Convert tab).\n2. Crop, or set the border buffer to exclude non-film areas.\n3. Click CONVERT."
+            "The film base is neutralised automatically, or sample the unexposed border."
         }
-        Source::VueScanRaw => {
-            "VUESCAN / SILVERFAST DNG\n1. Sample the film border (Editor › Convert › Sample film base) or use Auto.\n2. Exclude non-film areas with crop / border buffer.\n3. Click CONVERT."
-        }
-        Source::TifScan => {
-            "TIF SCANS (gamma 1.8 / 2.2)\n1. Do NOT white balance TIF scans — film base is set to Off.\n2. Exclude non-film areas with crop / border buffer.\n3. Click CONVERT."
-        }
+        Source::VueScanRaw => "Sample the film border, or leave the film base on Auto.",
+        Source::TifScan => "TIF scans are not white balanced: the film base stays off.",
         Source::LinearScan => {
-            "LINEAR TIF SCANS (gamma 1.0)\n1. Run Tools › TIF Scan Prep first and convert the -prepped files.\n2. Do NOT white balance.\n3. Click CONVERT."
+            "Prepare linear scans first with `nlp_studio scan-prep`, then convert the -prepped files."
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum CellAction {
+    Open,
+    Convert,
+    ConvertRoll,
+    Export,
+    Copy,
+    Paste,
+    Unconvert,
 }
 
 impl NlpApp {
@@ -31,79 +39,129 @@ impl NlpApp {
 
     /// Start screen shown before anything is opened.
     fn welcome_ui(&mut self, ui: &mut egui::Ui) {
-        use widgets::{Icon, icon_button, theme};
-        egui::Panel::top("welcome_toolbar")
-            .exact_size(54.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::TOOLBAR)
-                    .stroke(egui::Stroke::new(1.0, theme::LINE))
-                    .inner_margin(egui::Margin::symmetric(12, 0)),
-            )
-            .show(ui, |ui| {
-                let rect = ui.max_rect();
-                let p = ui.painter();
-                p.text(
-                    egui::pos2(rect.center().x, rect.center().y - 8.0),
-                    egui::Align2::CENTER_CENTER,
-                    "Welcome to NLP Studio",
-                    egui::FontId::proportional(15.0),
-                    theme::TEXT,
-                );
-                p.text(
-                    egui::pos2(rect.center().x, rect.center().y + 10.0),
-                    egui::Align2::CENTER_CENTER,
-                    "Select a photo or folder to begin.",
-                    egui::FontId::proportional(12.5),
-                    theme::MUTED,
-                );
-                ui.horizontal_centered(|ui| {
-                    if icon_button(ui, Icon::Folder, "Open photo or folder…", false, true).clicked() {
-                        self.choose_anything();
-                    }
-                });
-            });
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+        let last = self
+            .defaults
+            .last_folder
+            .clone()
+            .filter(|p| p.is_dir());
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::SIDEBAR))
+            .frame(egui::Frame::new().fill(theme::BG))
             .show(ui, |ui| {
                 let avail = ui.max_rect();
-                let resp = ui.allocate_rect(avail, Sense::click());
-                let p = ui.painter();
-                let zone = avail.shrink(40.0);
-                if hovering {
-                    p.rect_filled(zone, 16.0, Color32::from_rgb(226, 236, 252));
-                    p.rect_stroke(
-                        zone,
-                        16.0,
-                        egui::Stroke::new(2.0, theme::ACCENT),
-                        egui::StrokeKind::Inside,
+                let zone_w = (avail.width() - 64.0).clamp(280.0, 560.0);
+                let zone_h = (avail.height() * 0.36).clamp(180.0, 280.0);
+                let content_h = 64.0 + 28.0 + zone_h + 24.0 + 30.0 + 44.0;
+                ui.add_space(((avail.height() - content_h) * 0.45).max(24.0));
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("NLP Studio")
+                            .font(theme::medium(26.0))
+                            .color(theme::TEXT),
                     );
-                } else if resp.hovered() {
-                    p.rect_filled(zone, 16.0, Color32::from_rgb(240, 240, 242));
-                }
-                let text = if hovering {
-                    "Drop to open"
-                } else {
-                    "Click to choose a photo or folder, or drag here"
-                };
-                p.text(
-                    avail.center(),
-                    egui::Align2::CENTER_CENTER,
-                    text,
-                    egui::FontId::proportional(16.0),
-                    if hovering {
-                        theme::ACCENT
+                    ui.label(RichText::new("Film negative conversion").color(theme::MUTED));
+                    ui.add_space(28.0);
+
+                    let (zone, resp) =
+                        ui.allocate_exact_size(vec2(zone_w, zone_h), Sense::click());
+                    let p = ui.painter();
+                    let (fill, stroke, fg) = if hovering {
+                        (
+                            theme::ACCENT.gamma_multiply(0.12),
+                            egui::Stroke::new(1.5, theme::ACCENT),
+                            theme::ACCENT,
+                        )
+                    } else if resp.hovered() {
+                        (
+                            theme::PANEL,
+                            egui::Stroke::new(1.0, Color32::from_white_alpha(28)),
+                            theme::TEXT,
+                        )
                     } else {
-                        theme::MUTED
-                    },
-                );
-                if resp.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                if resp.clicked() {
-                    self.choose_anything();
-                }
+                        (
+                            Color32::TRANSPARENT,
+                            egui::Stroke::new(1.0, Color32::from_white_alpha(20)),
+                            theme::MUTED,
+                        )
+                    };
+                    p.rect(zone, 14.0, fill, stroke, egui::StrokeKind::Inside);
+                    let c = zone.center();
+                    widgets::paint_icon(
+                        p,
+                        egui::Rect::from_center_size(c - vec2(0.0, 26.0), vec2(34.0, 34.0)),
+                        Icon::Folder,
+                        fg,
+                    );
+                    p.text(
+                        c + vec2(0.0, 14.0),
+                        egui::Align2::CENTER_CENTER,
+                        if hovering {
+                            "Drop to open"
+                        } else {
+                            "Drop a folder or scans here"
+                        },
+                        theme::medium(15.0),
+                        if hovering { theme::ACCENT } else { theme::TEXT },
+                    );
+                    p.text(
+                        c + vec2(0.0, 36.0),
+                        egui::Align2::CENTER_CENTER,
+                        "or click to browse",
+                        egui::FontId::proportional(12.5),
+                        theme::MUTED,
+                    );
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if resp.clicked() {
+                        self.choose_anything();
+                    }
+
+                    ui.add_space(24.0);
+                    let bw = 132.0;
+                    let row = egui::Rect::from_center_size(
+                        pos2(avail.center().x, ui.cursor().top() + 15.0),
+                        vec2(bw * 2.0 + 8.0, 30.0),
+                    );
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(row)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| {
+                            if ui.add_sized([bw, 30.0], widgets::ghost("Open folder…")).clicked() {
+                                self.choose_folder();
+                            }
+                            if ui.add_sized([bw, 30.0], widgets::ghost("Open images…")).clicked() {
+                                self.choose_files();
+                            }
+                        },
+                    );
+                    ui.add_space(14.0);
+                    if let Some(dir) = last {
+                        let name = dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| dir.display().to_string());
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(format!("Reopen {name}")).color(theme::ACCENT),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text(dir.display().to_string())
+                            .clicked()
+                        {
+                            self.open_folder(&dir);
+                        }
+                    }
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Camera RAW · TIFF · JPEG · PNG")
+                            .small()
+                            .color(theme::FAINT),
+                    );
+                });
             });
     }
 
@@ -114,102 +172,154 @@ impl NlpApp {
         }
         let ctx = ui.ctx().clone();
         self.folder_shortcuts(&ctx);
-        egui::Panel::top("folder_top").show(ui, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.heading("NLP Studio");
-                ui.separator();
-                if ui.button("📂 Open Folder…").clicked() {
-                    self.choose_folder();
-                }
-                if ui
-                    .button("Open Image…")
-                    .on_hover_text("Open one or more pictures without the rest of the folder")
-                    .clicked()
-                {
-                    self.choose_files();
-                }
-                if let Some(f) = &self.folder {
-                    ui.label(RichText::new(f.display().to_string()).weak());
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let can_open = self.selected.first().is_some();
-                    if ui
-                        .add_enabled(can_open, egui::Button::new("Open in Editor ▶"))
-                        .on_hover_text("Enter / double-click")
-                        .clicked()
-                    {
-                        if let Some(&i) = self.selected.first() {
-                            self.open_editor(i);
+        let cmd = egui::Modifiers::COMMAND;
+        let export_key = widgets::shortcut(&ctx, cmd, egui::Key::E);
+        egui::Panel::top("folder_top")
+            .exact_size(44.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin::symmetric(10, 0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let r = icon_button(ui, Icon::Folder, "Open…", false, true);
+                    egui::Popup::menu(&r).show(|ui| {
+                        if ui.button("Open folder…").clicked() {
+                            self.choose_folder();
                         }
+                        if ui.button("Open images…").clicked() {
+                            self.choose_files();
+                        }
+                    });
+                    if let Some(f) = &self.folder {
+                        let name = f
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| f.display().to_string());
+                        ui.label(RichText::new(name).font(theme::medium(13.5)))
+                            .on_hover_text(f.display().to_string());
                     }
-                    ui.add(
-                        egui::Slider::new(&mut self.thumb_size, 110.0..=340.0).show_value(false),
-                    )
-                    .on_hover_text("Thumbnail size");
-                    ui.label("🔍");
-                    if self.jobs.busy() > 0 {
-                        ui.add(egui::Spinner::new());
-                        ui.label(RichText::new(format!("{} task(s)", self.jobs.busy())).weak());
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let n = self.selected.len();
+                        if n > 0 {
+                            if ui
+                                .add(widgets::primary("Export"))
+                                .on_hover_text(format!("Export positive copies ({export_key})"))
+                                .clicked()
+                            {
+                                self.open_export_dialog(self.sel_vec());
+                            }
+                            if n >= 2
+                                && ui
+                                    .add(widgets::ghost("Convert as roll"))
+                                    .on_hover_text(
+                                        "Analyse the selection together for one consistent roll balance",
+                                    )
+                                    .clicked()
+                            {
+                                self.convert(self.sel_vec(), true);
+                            }
+                            if ui
+                                .add(widgets::ghost("Convert"))
+                                .on_hover_text("Analyse each selected frame on its own")
+                                .clicked()
+                            {
+                                self.convert(self.sel_vec(), false);
+                            }
+                        }
+                        if n == 0 {
+                            ui.label(
+                                RichText::new("Select frames to convert or export · double-click to edit")
+                                    .small()
+                                    .color(theme::FAINT),
+                            );
+                        }
+                        if self.jobs.busy() > 0 {
+                            ui.add_space(4.0);
+                            ui.add(egui::Spinner::new().size(14.0).color(theme::MUTED));
+                        }
+                    });
                 });
             });
-            ui.add_space(4.0);
-        });
 
-        egui::Panel::bottom("folder_status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let conv = self.frames.iter().filter(|f| f.sc.is_converted()).count();
-                ui.label(format!(
-                    "{} frames · {} converted · {} selected",
-                    self.frames.len(),
-                    conv,
-                    self.selected.len()
-                ));
-                ui.separator();
-                if ui.small_button("Select all").clicked() {
-                    self.selected = (0..self.frames.len()).collect();
-                }
-                if ui.small_button("Select none").clicked() {
-                    self.selected.clear();
-                }
-                let has_sel = !self.selected.is_empty();
-                if ui.add_enabled(has_sel, egui::Button::new("Export…").small()).clicked() {
-                    self.open_export_dialog(self.sel_vec());
-                }
-                if self.export_total > 0 && self.export_done < self.export_total {
-                    ui.separator();
-                    ui.add(
-                        egui::ProgressBar::new(self.export_done as f32 / self.export_total as f32)
-                            .desired_width(180.0)
-                            .text(format!(
-                                "Exporting {}/{}",
-                                self.export_done, self.export_total
-                            )),
-                    );
-                }
+        egui::Panel::bottom("folder_status")
+            .exact_size(28.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin::symmetric(14, 0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    let conv = self.frames.iter().filter(|f| f.sc.is_converted()).count();
+                    let mut status =
+                        format!("{} frames · {} converted", self.frames.len(), conv);
+                    if !self.selected.is_empty() {
+                        status += &format!(" · {} selected", self.selected.len());
+                    }
+                    ui.label(RichText::new(status).small().color(theme::MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().slider_width = 90.0;
+                        ui.add(
+                            egui::Slider::new(&mut self.thumb_size, 110.0..=340.0)
+                                .show_value(false),
+                        )
+                        .on_hover_text("Thumbnail size");
+                        if self.export_total > 0 && self.export_done < self.export_total {
+                            ui.add_space(12.0);
+                            ui.add(
+                                egui::ProgressBar::new(
+                                    self.export_done as f32 / self.export_total as f32,
+                                )
+                                .desired_width(120.0)
+                                .desired_height(4.0)
+                                .fill(theme::ACCENT),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "Exporting {}/{}",
+                                    self.export_done, self.export_total
+                                ))
+                                .small()
+                                .color(theme::MUTED),
+                            );
+                        }
+                    });
+                });
             });
-        });
 
-        egui::CentralPanel::default().show(ui, |ui| self.grid(ui));
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin::same(16)),
+            )
+            .show(ui, |ui| self.grid(ui));
     }
 
     fn folder_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let (all, enter, copy, paste) = ctx.input(|i| {
+        let (all, none, enter, copy, paste, export) = ctx.input(|i| {
             (
                 i.modifiers.command && i.key_pressed(egui::Key::A),
+                i.key_pressed(egui::Key::Escape),
                 i.key_pressed(egui::Key::Enter),
                 i.modifiers.command && i.key_pressed(egui::Key::C),
                 i.modifiers.command && i.key_pressed(egui::Key::V),
+                i.modifiers.command && i.key_pressed(egui::Key::E),
             )
         });
         if all {
             self.selected = (0..self.frames.len()).collect();
         }
-        if enter {
+        if none && self.export_targets.is_none() {
+            self.selected.clear();
+        }
+        if enter && self.export_targets.is_none() {
             if let Some(&i) = self.selected.first() {
                 self.open_editor(i);
             }
@@ -219,6 +329,9 @@ impl NlpApp {
         }
         if paste {
             self.paste_settings();
+        }
+        if export {
+            self.open_export_dialog(self.sel_vec());
         }
     }
 
@@ -253,168 +366,164 @@ impl NlpApp {
     }
 
     fn grid(&mut self, ui: &mut egui::Ui) {
-        if self.frames.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(ui.available_height() * 0.35);
-                    ui.heading("Open a folder of negative scans");
-                    ui.label(
-                        RichText::new(
-                            "Camera RAW (DNG, CR2/CR3, NEF, ARW, RAF …), TIFF, JPEG and PNG",
-                        )
-                        .weak(),
-                    );
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("📂 Open Folder…").clicked() {
-                            self.choose_folder();
-                        }
-                        if ui.button("Open Image…").clicked() {
-                            self.choose_files();
-                        }
-                    });
-                });
-            });
-            return;
-        }
+        let ctx = ui.ctx().clone();
+        let cmd = egui::Modifiers::COMMAND;
+        let keys = [
+            widgets::shortcut(&ctx, egui::Modifiers::NONE, egui::Key::Enter),
+            widgets::shortcut(&ctx, cmd, egui::Key::E),
+            widgets::shortcut(&ctx, cmd, egui::Key::C),
+            widgets::shortcut(&ctx, cmd, egui::Key::V),
+        ];
         let cell = self.thumb_size;
+        let name_h = 22.0;
+        let now = ui.input(|i| i.time);
         let mut clicked: Option<(usize, egui::Modifiers)> = None;
         let mut double: Option<usize> = None;
-        let mut ctx_action: Option<(usize, &'static str)> = None;
+        let mut ctx_action: Option<(usize, CellAction)> = None;
+        let multi = self.selected.len() >= 2;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                    ui.spacing_mut().item_spacing = vec2(14.0, 14.0);
                     for (i, f) in self.frames.iter().enumerate() {
                         let sel = self.selected.contains(&i);
                         let (rect, resp) =
-                            ui.allocate_exact_size(egui::vec2(cell, cell + 22.0), Sense::click());
+                            ui.allocate_exact_size(vec2(cell, cell + name_h), Sense::click());
                         if !ui.is_rect_visible(rect) {
                             continue;
                         }
                         let p = ui.painter();
-                        let bg = if sel {
-                            Color32::from_rgb(206, 224, 252)
-                        } else if resp.hovered() {
-                            Color32::from_rgb(228, 228, 232)
-                        } else {
-                            Color32::from_rgb(238, 238, 240)
-                        };
-                        p.rect_filled(rect, 8.0, bg);
-                        if sel {
-                            p.rect_stroke(
-                                rect,
-                                8.0,
-                                egui::Stroke::new(1.5, widgets::theme::ACCENT),
-                                egui::StrokeKind::Inside,
-                            );
+                        let square = egui::Rect::from_min_size(rect.min, vec2(cell, cell));
+                        if resp.hovered() && !sel {
+                            p.rect_filled(square, 6.0, Color32::from_white_alpha(5));
                         }
-                        let img_rect = egui::Rect::from_min_size(
-                            rect.min + egui::vec2(6.0, 6.0),
-                            egui::vec2(cell - 12.0, cell - 12.0),
-                        );
+                        let img_area = square.shrink(6.0);
+                        let mut frame_rect = img_area;
                         match (&f.thumb, &f.proxy) {
                             (Some(t), _) => {
                                 let ts = t.size_vec2();
-                                let s = (img_rect.width() / ts.x).min(img_rect.height() / ts.y);
-                                let r = egui::Rect::from_center_size(img_rect.center(), ts * s);
-                                p.image(
-                                    t.id(),
-                                    r,
-                                    egui::Rect::from_min_max(
-                                        egui::pos2(0.0, 0.0),
-                                        egui::pos2(1.0, 1.0),
+                                let s = (img_area.width() / ts.x).min(img_area.height() / ts.y);
+                                // Bottom-aligned so the name sits right under the image.
+                                let size = ts * s;
+                                frame_rect = egui::Rect::from_min_size(
+                                    pos2(
+                                        img_area.center().x - size.x / 2.0,
+                                        img_area.bottom() - size.y,
                                     ),
-                                    Color32::WHITE,
+                                    size,
                                 );
+                                egui::Image::new((t.id(), ts))
+                                    .corner_radius(3.0)
+                                    .paint_at(ui, frame_rect);
                             }
                             (None, ProxyState::Failed(e)) => {
                                 resp.clone().on_hover_text(e);
-                                p.text(
-                                    img_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "cannot read",
-                                    egui::FontId::proportional(13.0),
-                                    Color32::from_rgb(200, 50, 40),
+                                p.rect_filled(img_area, 3.0, theme::PANEL);
+                                widgets::paint_icon(
+                                    p,
+                                    egui::Rect::from_center_size(
+                                        img_area.center(),
+                                        vec2(24.0, 24.0),
+                                    ),
+                                    Icon::Warn,
+                                    theme::ERR,
                                 );
                             }
                             _ => {
-                                p.text(
-                                    img_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "loading…",
-                                    egui::FontId::proportional(13.0),
-                                    Color32::GRAY,
-                                );
+                                // Loading shimmer.
+                                let a = (((now * 2.4 + i as f64 * 0.35).sin() * 0.5 + 0.5)
+                                    * 10.0) as u8
+                                    + 6;
+                                p.rect_filled(img_area, 3.0, Color32::from_white_alpha(a));
+                                ui.ctx().request_repaint();
                             }
                         }
-                        let name_pos = egui::pos2(rect.left() + 8.0, rect.bottom() - 13.0);
-                        p.text(
-                            name_pos,
-                            egui::Align2::LEFT_CENTER,
-                            &f.name,
-                            egui::FontId::proportional(12.0),
-                            ui.visuals().text_color(),
-                        );
-                        let mut badges = Vec::new();
-                        if f.sc.is_converted() {
-                            badges.push(("✔", widgets::theme::OK));
+                        if sel {
+                            p.rect_stroke(
+                                frame_rect.expand(3.0),
+                                5.0,
+                                egui::Stroke::new(2.0, theme::ACCENT),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+
+                        // Name row with status markers on the right.
+                        let row_y = rect.bottom() - name_h / 2.0 + 1.0;
+                        let mut x = rect.right() - 8.0;
+                        if f.exporting {
+                            let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
+                            p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::WARN.gamma_multiply(a));
+                            x -= 12.0;
+                            ui.ctx().request_repaint();
                         }
                         if f.is_roll() {
-                            badges.push(("ROLL", widgets::theme::ACCENT));
-                        }
-                        if f.exporting {
-                            badges.push(("EXPORT", widgets::theme::WARN));
-                        }
-                        let mut x = rect.right() - 8.0;
-                        for (b, c) in badges {
-                            let g = p.text(
-                                egui::pos2(x, rect.bottom() - 13.0),
-                                egui::Align2::RIGHT_CENTER,
-                                b,
-                                egui::FontId::proportional(11.0),
-                                c,
+                            let g = p.layout_no_wrap(
+                                "Roll".into(),
+                                egui::FontId::proportional(10.0),
+                                theme::MUTED,
                             );
-                            x = g.left() - 6.0;
+                            let chip = egui::Rect::from_min_max(
+                                pos2(x - g.size().x - 10.0, row_y - 8.0),
+                                pos2(x, row_y + 8.0),
+                            );
+                            p.rect_stroke(
+                                chip,
+                                8.0,
+                                egui::Stroke::new(1.0, Color32::from_white_alpha(40)),
+                                egui::StrokeKind::Inside,
+                            );
+                            p.galley(chip.center() - g.size() / 2.0, g, theme::MUTED);
+                            x = chip.left() - 6.0;
                         }
+                        if f.sc.is_converted() {
+                            p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::OK);
+                            x -= 12.0;
+                        }
+                        let name_x = rect.left() + 6.0;
+                        let mut job = egui::text::LayoutJob::simple_singleline(
+                            f.name.clone(),
+                            egui::FontId::proportional(11.5),
+                            if sel { theme::TEXT } else { theme::MUTED },
+                        );
+                        job.wrap = egui::text::TextWrapping::truncate_at_width(
+                            (x - name_x - 4.0).max(10.0),
+                        );
+                        let g = p.layout_job(job);
+                        p.galley(
+                            pos2(name_x, row_y - g.size().y / 2.0),
+                            g,
+                            theme::MUTED,
+                        );
+
                         if resp.double_clicked() {
                             double = Some(i);
                         } else if resp.clicked() {
                             clicked = Some((i, ui.input(|inp| inp.modifiers)));
                         }
+                        let has_clip = self.clipboard.is_some();
                         resp.context_menu(|ui| {
-                            if ui.button("Open in Editor").clicked() {
-                                ctx_action = Some((i, "open"));
-                                ui.close();
-                            }
-                            if ui.button("Convert").clicked() {
-                                ctx_action = Some((i, "convert"));
-                                ui.close();
-                            }
-                            if ui.button("Export positive copies").clicked() {
-                                ctx_action = Some((i, "export"));
-                                ui.close();
-                            }
+                            let mut item = |ui: &mut egui::Ui, text: &str, key: &str, a, on| {
+                                let b = egui::Button::new(text).shortcut_text(
+                                    RichText::new(key).color(theme::FAINT),
+                                );
+                                if ui.add_enabled(on, b).clicked() {
+                                    ctx_action = Some((i, a));
+                                    ui.close();
+                                }
+                            };
+                            item(ui, "Open in editor", &keys[0], CellAction::Open, true);
                             ui.separator();
-                            if ui.button("Copy settings").clicked() {
-                                ctx_action = Some((i, "copy"));
-                                ui.close();
+                            item(ui, "Convert", "", CellAction::Convert, true);
+                            if multi && sel {
+                                item(ui, "Convert as roll", "", CellAction::ConvertRoll, true);
                             }
-                            if ui
-                                .add_enabled(
-                                    self.clipboard.is_some(),
-                                    egui::Button::new("Paste settings"),
-                                )
-                                .clicked()
-                            {
-                                ctx_action = Some((i, "paste"));
-                                ui.close();
-                            }
-                            if ui.button("Unconvert").clicked() {
-                                ctx_action = Some((i, "unconvert"));
-                                ui.close();
-                            }
+                            item(ui, "Export…", &keys[1], CellAction::Export, true);
+                            ui.separator();
+                            item(ui, "Copy settings", &keys[2], CellAction::Copy, true);
+                            item(ui, "Paste settings", &keys[3], CellAction::Paste, has_clip);
+                            ui.separator();
+                            item(ui, "Unconvert", "", CellAction::Unconvert, true);
                         });
                     }
                 });
@@ -449,14 +558,13 @@ impl NlpApp {
             }
             self.active = Some(i);
             match act {
-                "open" => self.open_editor(i),
-                "convert" => self.convert(self.sel_vec(), false),
-                "roll" => self.convert(self.sel_vec(), true),
-                "export" => self.open_export_dialog(self.sel_vec()),
-                "copy" => self.copy_settings(),
-                "paste" => self.paste_settings(),
-                "unconvert" => self.unconvert(&self.sel_vec()),
-                _ => {}
+                CellAction::Open => self.open_editor(i),
+                CellAction::Convert => self.convert(self.sel_vec(), false),
+                CellAction::ConvertRoll => self.convert(self.sel_vec(), true),
+                CellAction::Export => self.open_export_dialog(self.sel_vec()),
+                CellAction::Copy => self.copy_settings(),
+                CellAction::Paste => self.paste_settings(),
+                CellAction::Unconvert => self.unconvert(&self.sel_vec()),
             }
         }
     }
@@ -464,43 +572,43 @@ impl NlpApp {
 
 pub fn lut_folder_ui(app: &mut NlpApp, ui: &mut egui::Ui) {
     use crate::engine::lut::LutLibrary;
-    section(ui, "ENHANCED PROFILE LUTS", |ui| {
-        let dir = LutLibrary::global()
-            .read()
-            .ok()
-            .and_then(|l| l.dir().map(|d| d.to_path_buf()));
-        match &dir {
-            Some(d) => {
-                ui.label(
-                    RichText::new("✔ Using the plugin's 3D LUTs from:")
-                        .small()
-                        .color(widgets::theme::OK),
-                );
-                ui.label(RichText::new(d.display().to_string()).small().weak());
-            }
-            None => {
-                ui.label(RichText::new("⚠ 'NLP Enhanced Settings' folder not found — using built-in approximations of the looks.").small().color(widgets::theme::WARN));
-            }
+    let dir = LutLibrary::global()
+        .read()
+        .ok()
+        .and_then(|l| l.dir().map(|d| d.to_path_buf()));
+    match &dir {
+        Some(d) => {
+            widgets::status_line(ui, Icon::Check, theme::OK, "Using the plugin's 3D LUTs")
+                .on_hover_text(d.display().to_string());
         }
-        if ui
-            .button("Choose LUT folder…")
-            .on_hover_text("The plugin's LR Files/CameraRaw/Settings/NLP Enhanced Settings folder")
-            .clicked()
-        {
-            if let Some(p) = super::picker::pick_folder(None, Some("Choose")) {
-                let r = LutLibrary::global().write().map(|mut l| l.set_dir(p));
-                match r {
-                    Ok(Ok(())) => {
-                        app.toast("LUT folder set", false);
-                        for f in app.frames.iter_mut() {
-                            f.thumb_dirty = true;
-                        }
-                        app.editor.invalidate();
+        None => {
+            widgets::status_line(
+                ui,
+                Icon::Warn,
+                theme::WARN,
+                "Plugin LUT folder not found, so built-in approximations are used.",
+            );
+        }
+    }
+    ui.add_space(4.0);
+    if ui
+        .add(widgets::ghost("Choose LUT folder…"))
+        .on_hover_text("The plugin's LR Files/CameraRaw/Settings/NLP Enhanced Settings folder")
+        .clicked()
+    {
+        if let Some(p) = super::picker::pick_folder(None, Some("Choose")) {
+            let r = LutLibrary::global().write().map(|mut l| l.set_dir(p));
+            match r {
+                Ok(Ok(())) => {
+                    app.toast("LUT folder set", false);
+                    for f in app.frames.iter_mut() {
+                        f.thumb_dirty = true;
                     }
-                    Ok(Err(e)) => app.toast(format!("{e:#}"), true),
-                    Err(_) => {}
+                    app.editor.invalidate();
                 }
+                Ok(Err(e)) => app.toast(format!("{e:#}"), true),
+                Err(_) => {}
             }
         }
-    });
+    }
 }

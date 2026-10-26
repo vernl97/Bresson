@@ -1,4 +1,4 @@
-//! One file chooser that accepts either image files or a folder.
+//! Native file and folder choosers (NSOpenPanel on macOS, `rfd` elsewhere).
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +11,7 @@ pub fn pick_files_or_folder(start: Option<&Path>) -> Vec<PathBuf> {
     use objc2_foundation::{NSString, NSURL};
 
     let Some(mtm) = MainThreadMarker::new() else {
-        return fallback(start);
+        return rfd_pick_folder(start, None).into_iter().collect();
     };
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseFiles(true);
@@ -143,23 +143,9 @@ fn rfd_pick_files(start: Option<&Path>) -> Vec<PathBuf> {
     d.pick_files().unwrap_or_default()
 }
 
+/// Other platforms have no combined file-or-folder chooser; the welcome
+/// screen offers "Open images…" separately, so choose a folder here.
 #[cfg(not(target_os = "macos"))]
 pub fn pick_files_or_folder(start: Option<&Path>) -> Vec<PathBuf> {
-    fallback(start)
-}
-
-/// Platforms without a combined chooser: pick files, or a folder if cancelled.
-fn fallback(start: Option<&Path>) -> Vec<PathBuf> {
-    let mut d = rfd::FileDialog::new().set_title("Open image(s) — cancel to choose a folder");
-    if let Some(s) = start {
-        d = d.set_directory(s);
-    }
-    if let Some(files) = d.pick_files() {
-        return files;
-    }
-    let mut d = rfd::FileDialog::new().set_title("Open a folder of scans");
-    if let Some(s) = start {
-        d = d.set_directory(s);
-    }
-    d.pick_folder().into_iter().collect()
+    rfd_pick_folder(start, None).into_iter().collect()
 }

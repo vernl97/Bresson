@@ -378,37 +378,7 @@ impl NlpApp {
                 settings: self.frames[i].sc.settings.clone(),
             })
             .collect();
-        let n = idx.len();
-        self.toast(
-            if as_roll {
-                format!("Converting {n} frame(s) as a roll…")
-            } else {
-                format!("Converting {n} frame(s)…")
-            },
-            false,
-        );
         self.jobs.spawn(move || jobs::convert(items, as_roll));
-    }
-
-    /// Synchronous re-analysis of one frame (after Convert-tab changes).
-    #[allow(dead_code)]
-    pub fn reanalyze(&mut self, i: usize) {
-        let src = self.frames[i].proxy().or_else(|| {
-            self.editor
-                .src
-                .clone()
-                .filter(|_| self.editor.path.as_ref() == Some(&self.frames[i].path))
-        });
-        let Some(src) = src else { return };
-        let f = &mut self.frames[i];
-        let s = f.sc.settings.clone();
-        let base = pipeline::resolve_base(&src, &s, None);
-        let neg = pipeline::prepare_negative(&src, &s, base);
-        f.sc.analysis = Some(pipeline::analyze(&neg, &s, base));
-        if f.sc.settings.wb_mode != WbMode::Custom {
-            f.apply_wb_mode();
-        }
-        self.mark_changed(i);
     }
 
     pub fn unconvert(&mut self, idx: &[usize]) {
@@ -430,11 +400,6 @@ impl NlpApp {
         }
         self.editor.export_open = true;
         self.export_targets = Some(targets);
-    }
-
-    #[allow(dead_code)]
-    pub fn export(&mut self, idx: Vec<usize>) {
-        self.export_with_settings(idx, self.defaults.export.clone());
     }
 
     pub fn export_with_settings(&mut self, idx: Vec<usize>, ex: ExportSettings) {
@@ -477,6 +442,7 @@ impl NlpApp {
     }
 
     pub fn export_dialog(&mut self, ctx: &egui::Context) {
+        use widgets::theme;
         if self.editor.export_open && self.export_targets.is_none() {
             if let Some(i) = self.active {
                 self.export_targets = Some(vec![i]);
@@ -507,190 +473,111 @@ impl NlpApp {
         let mut go = false;
         let mut should_close = false;
         let mut picked_dir: Option<PathBuf> = None;
+        let mut save = false;
+        let count = targets.len();
 
-        let r = egui::Modal::new(egui::Id::new("export_modal")).show(ctx, |ui| {
-            ui.set_width(480.0);
+        let frame = egui::Frame::new()
+            .fill(theme::PANEL)
+            .stroke(egui::Stroke::new(1.0, theme::LINE))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::same(22))
+            .shadow(ctx.global_style().visuals.window_shadow);
+        let r = egui::Modal::new(egui::Id::new("export_modal"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                let title = if count == 1 {
+                    "Export 1 image".to_string()
+                } else {
+                    format!("Export {count} images")
+                };
+                ui.label(
+                    egui::RichText::new(title)
+                        .font(theme::medium(16.0))
+                        .color(theme::TEXT),
+                );
+                ui.add_space(16.0);
 
-            // Header
-            ui.heading(
-                egui::RichText::new("Export")
-                    .size(20.0)
-                    .strong()
-                    .color(widgets::theme::TEXT),
-            );
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(14.0);
-
-            // Row 1: Format and Color Space side-by-side
-            ui.columns(2, |cols| {
-                cols[0].vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("Format")
-                            .size(13.0)
-                            .color(widgets::theme::TEXT),
+                let ex = &mut self.defaults.export;
+                ui.columns(2, |cols| {
+                    save |= widgets::fl_combo(
+                        &mut cols[0],
+                        "Format",
+                        &mut ex.format,
+                        ExportFormat::ALL,
+                        ExportFormat::label,
+                        "",
                     );
-                    ui.add_space(4.0);
-                    egui::ComboBox::from_id_salt("export_format")
-                        .width(ui.available_width() - 4.0)
-                        .selected_text(self.defaults.export.format.label())
-                        .show_ui(ui, |ui| {
-                            for &fmt in ExportFormat::ALL {
-                                if ui
-                                    .selectable_value(
-                                        &mut self.defaults.export.format,
-                                        fmt,
-                                        fmt.label(),
-                                    )
-                                    .clicked()
-                                {
-                                    let _ = crate::engine::sidecar::save_defaults(&self.defaults);
-                                }
-                            }
-                        });
+                    save |= widgets::fl_combo(
+                        &mut cols[1],
+                        "Colour space",
+                        &mut ex.space,
+                        OutputSpace::ALL,
+                        OutputSpace::label,
+                        "",
+                    );
                 });
 
-                cols[1].vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("Color Space")
-                            .size(13.0)
-                            .color(widgets::theme::TEXT),
+                if ex.format == ExportFormat::Jpeg {
+                    ui.add_space(6.0);
+                    save |= widgets::fl_slider_u8_origin(
+                        ui,
+                        "Quality",
+                        &mut ex.jpeg_quality,
+                        1..=100,
+                        95,
+                        Some(0.0),
+                        "JPEG compression quality (1-100)",
                     );
-                    ui.add_space(4.0);
-                    egui::ComboBox::from_id_salt("export_color_space")
-                        .width(ui.available_width() - 4.0)
-                        .selected_text(self.defaults.export.space.label())
-                        .show_ui(ui, |ui| {
-                            for &sp in OutputSpace::ALL {
-                                if ui
-                                    .selectable_value(
-                                        &mut self.defaults.export.space,
-                                        sp,
-                                        sp.label(),
-                                    )
-                                    .clicked()
-                                {
-                                    let _ = crate::engine::sidecar::save_defaults(&self.defaults);
-                                }
-                            }
-                        });
-                });
-            });
-
-            // JPEG Quality slider (visible only when JPEG format is chosen)
-            if self.defaults.export.format == ExportFormat::Jpeg {
-                ui.add_space(10.0);
-                if widgets::fl_slider_u8_origin(
-                    ui,
-                    "Quality",
-                    &mut self.defaults.export.jpeg_quality,
-                    1..=100,
-                    95,
-                    Some(0.0),
-                    "JPEG compression quality (1-100)",
-                ) {
-                    let _ = crate::engine::sidecar::save_defaults(&self.defaults);
                 }
-            }
 
-            // Row 2: Output Directory
-            ui.add_space(16.0);
-            ui.label(
-                egui::RichText::new("Output Directory")
-                    .size(13.0)
-                    .color(widgets::theme::TEXT),
-            );
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                let btn_w = 84.0;
-                let text_w = (ui.available_width() - btn_w - ui.spacing().item_spacing.x).max(60.0);
-                let display_str = display_dir.to_string_lossy();
-
-                ui.add_sized(
-                    [text_w, 28.0],
-                    egui::Label::new(
-                        egui::RichText::new(display_str.as_ref())
-                            .size(13.0)
-                            .color(widgets::theme::TEXT),
-                    )
-                    .truncate(),
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Destination")
+                        .small()
+                        .color(theme::MUTED),
+                );
+                let display_str = display_dir.to_string_lossy().to_string();
+                let field = egui::Button::new(
+                    egui::RichText::new(&display_str).color(theme::TEXT),
                 )
-                .on_hover_text(display_str.as_ref());
-
-                let choose_btn = egui::Button::new(
-                    egui::RichText::new("Choose...")
-                        .size(13.0)
-                        .color(widgets::theme::TEXT),
-                )
-                .corner_radius(6.0)
-                .min_size(egui::vec2(btn_w, 28.0));
-
-                if ui.add(choose_btn).clicked() {
-                    let start = Some(display_dir.as_path());
-                    if let Some(picked) = picker::pick_folder(start, Some("Choose")) {
+                .truncate()
+                .right_text(egui::RichText::new("Change…").color(theme::ACCENT))
+                .min_size(egui::vec2(ui.available_width(), 30.0));
+                if ui
+                    .add(field)
+                    .on_hover_text(&display_str)
+                    .clicked()
+                {
+                    if let Some(picked) = picker::pick_folder(Some(&display_dir), Some("Choose")) {
                         picked_dir = Some(picked);
                     }
                 }
-            });
 
-            // Row 3: Action Buttons (Cancel and Export N Images)
-            ui.add_space(26.0);
-            ui.horizontal(|ui| {
+                ui.add_space(22.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let count = targets.len();
-                    let export_label = if count == 1 {
-                        "Export 1 Image".to_string()
-                    } else {
-                        format!("Export {count} Images")
-                    };
-
-                    let export_btn = egui::Button::new(
-                        egui::RichText::new(export_label)
-                            .size(13.5)
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_rgb(11, 87, 208))
-                    .corner_radius(16.0)
-                    .min_size(egui::vec2(130.0, 32.0));
-
-                    let export_res = ui.add(export_btn);
-                    let ring_rect = export_res.rect.expand(2.0);
-                    ui.painter().rect_stroke(
-                        ring_rect,
-                        18.0,
-                        egui::Stroke::new(1.5, egui::Color32::from_rgb(11, 87, 208)),
-                        egui::StrokeKind::Outside,
-                    );
-
-                    if export_res.clicked()
+                    if ui
+                        .add(widgets::primary("Export").min_size(egui::vec2(96.0, 30.0)))
+                        .clicked()
                         || (!ui.ctx().egui_wants_keyboard_input()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                     {
                         go = true;
                     }
-
-                    ui.add_space(8.0);
-
-                    let cancel_btn = egui::Button::new(
-                        egui::RichText::new("Cancel")
-                            .size(13.5)
-                            .color(widgets::theme::TEXT),
-                    )
-                    .corner_radius(16.0)
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(205, 205, 208)))
-                    .min_size(egui::vec2(80.0, 32.0));
-
-                    if ui.add(cancel_btn).clicked()
+                    if ui
+                        .add(widgets::ghost("Cancel").min_size(egui::vec2(80.0, 30.0)))
+                        .clicked()
                         || ui.input(|i| i.key_pressed(egui::Key::Escape))
                     {
                         should_close = true;
                     }
                 });
             });
-        });
 
+        if save {
+            let _ = crate::engine::sidecar::save_defaults(&self.defaults);
+        }
         if let Some(picked) = picked_dir {
             self.defaults.export.output_dir = Some(picked);
             let _ = crate::engine::sidecar::save_defaults(&self.defaults);
@@ -899,6 +786,7 @@ impl NlpApp {
     }
 
     fn toasts_ui(&mut self, ctx: &egui::Context) {
+        use widgets::theme;
         let now = self.time;
         self.toasts.retain(|t| t.until > now);
         if self.toasts.is_empty() {
@@ -906,19 +794,39 @@ impl NlpApp {
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
         egui::Area::new(egui::Id::new("toasts"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -48.0])
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -44.0])
+            .interactable(false)
             .show(ctx, |ui| {
-                for t in self.toasts.iter().rev().take(5) {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_max_width(420.0);
-                        let c = if t.error {
-                            egui::Color32::from_rgb(200, 50, 40)
-                        } else {
-                            ui.visuals().text_color()
-                        };
-                        ui.label(egui::RichText::new(&t.text).color(c));
-                    });
-                }
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    let n = self.toasts.len();
+                    for t in self.toasts.iter().skip(n.saturating_sub(3)) {
+                        egui::Frame::new()
+                            .fill(theme::SURFACE)
+                            .stroke(egui::Stroke::new(1.0, theme::LINE))
+                            .corner_radius(16.0)
+                            .inner_margin(egui::Margin::symmetric(14, 7))
+                            .shadow(ui.visuals().popup_shadow)
+                            .show(ui, |ui| {
+                                ui.set_max_width(520.0);
+                                ui.horizontal(|ui| {
+                                    if t.error {
+                                        let (r, _) = ui.allocate_exact_size(
+                                            egui::vec2(8.0, 8.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().circle_filled(r.center(), 3.5, theme::ERR);
+                                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&t.text).color(theme::TEXT),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                            });
+                    }
+                });
             });
     }
 }
@@ -979,7 +887,8 @@ pub fn run(open: Option<PathBuf>) -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1480.0, 940.0])
             .with_min_inner_size([980.0, 640.0])
-            .with_title("NLP Studio"),
+            .with_title("NLP Studio")
+            .with_app_id("nlp-studio"),
         ..Default::default()
     };
     eframe::run_native(
@@ -1183,6 +1092,11 @@ mod ui_tests {
             h.state().view == View::Editor,
             "single file goes straight to the editor"
         );
+        // The Tones dropdown lives on the Edit tab, which needs a conversion.
+        if !h.state().frames[0].sc.is_converted() {
+            h.state_mut().convert(vec![0], false);
+            settle(&mut h, 60.0);
+        }
         let label = h.state().frames[0].sc.settings.tone_profile.label();
         h.get_by_value(label).click();
         h.run_steps(4);
