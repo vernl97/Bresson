@@ -4,6 +4,7 @@
 
 use eframe::egui::{self, Color32, Rect, Sense, Ui};
 
+#[allow(dead_code)]
 pub const LABEL_W: f32 = 92.0;
 
 pub fn gradient_rect(ui: &Ui, rect: Rect, a: Color32, b: Color32) {
@@ -18,6 +19,7 @@ pub fn gradient_rect(ui: &Ui, rect: Rect, a: Color32, b: Color32) {
 }
 
 /// Integer slider row (e.g. ranges 1..10).
+#[allow(dead_code)]
 pub fn slider_u8(
     ui: &mut Ui,
     label: &str,
@@ -48,6 +50,7 @@ pub fn slider_u8(
 }
 
 /// A dropdown with a ⟳ button that cycles to the next option.
+#[allow(dead_code)]
 pub fn combo<T: Copy + PartialEq>(
     ui: &mut Ui,
     label: &str,
@@ -504,12 +507,14 @@ pub fn fl_combo<T: Copy + PartialEq>(
 
 /// Slim slider: label + value on one row, track below. Double-click the
 /// track or click the label to reset; the value can be typed past the range.
-pub fn fl_slider(
+/// `origin` optionally defines where the track fill highlight starts (defaulting to `default`).
+pub fn fl_slider_origin(
     ui: &mut Ui,
     label: &str,
     v: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     default: f32,
+    origin: Option<f32>,
     decimals: usize,
     tip: &str,
     gradient: Option<(Color32, Color32)>,
@@ -586,7 +591,8 @@ pub fn fl_slider(
         Some((a, b)) => gradient_rect(ui, track.expand2(egui::vec2(0.0, 1.0)), a, b),
         None => {
             p.rect_filled(track, 1.0, theme::TRACK);
-            let z = to_x(default.clamp(lo, hi));
+            let fill_base = origin.unwrap_or(default);
+            let z = to_x(fill_base.clamp(lo, hi));
             let k = to_x(*v);
             let fill = Rect::from_min_max(
                 egui::pos2(z.min(k), track.top()),
@@ -614,6 +620,19 @@ pub fn fl_slider(
     changed
 }
 
+pub fn fl_slider(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    decimals: usize,
+    tip: &str,
+    gradient: Option<(Color32, Color32)>,
+) -> bool {
+    fl_slider_origin(ui, label, v, range, default, None, decimals, tip, gradient)
+}
+
 pub fn fl_slider_u8(
     ui: &mut Ui,
     label: &str,
@@ -622,13 +641,26 @@ pub fn fl_slider_u8(
     default: u8,
     tip: &str,
 ) -> bool {
+    fl_slider_u8_origin(ui, label, v, range, default, None, tip)
+}
+
+pub fn fl_slider_u8_origin(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut u8,
+    range: std::ops::RangeInclusive<u8>,
+    default: u8,
+    origin: Option<f32>,
+    tip: &str,
+) -> bool {
     let mut f = *v as f32;
-    let ch = fl_slider(
+    let ch = fl_slider_origin(
         ui,
         label,
         &mut f,
         *range.start() as f32..=*range.end() as f32,
         default as f32,
+        origin,
         0,
         tip,
         None,

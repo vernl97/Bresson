@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, pos2, vec2};
 
-use super::folder::{export_settings_ui, lut_folder_ui, source_instructions};
+use super::folder::{lut_folder_ui, source_instructions};
 use super::widgets::{
     self, Icon, fl_combo, fl_slider, fl_slider_u8, grad, header, icon_button, segmented, theme,
 };
@@ -106,7 +106,7 @@ pub struct Editor {
     zoom: Option<f32>,
     pan: egui::Vec2,
     crop: Option<CropEdit>,
-    export_open: bool,
+    pub export_open: bool,
     /// Conversion state seen last frame (to switch to Edit after converting).
     was_converted: Option<bool>,
     zoom_req: Option<ZoomReq>,
@@ -496,8 +496,6 @@ impl NlpApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::CANVAS))
             .show(ui, |ui| self.canvas(ui, i));
-
-        self.export_dialog(&ctx, i);
     }
 
     /// Returns true when the view changed and drawing should stop.
@@ -690,12 +688,12 @@ impl NlpApp {
                     ui,
                     Icon::Export,
                     "Export positive copy",
-                    self.editor.export_open,
+                    self.export_targets.is_some() || self.editor.export_open,
                     true,
                 )
                 .clicked()
                 {
-                    self.editor.export_open = true;
+                    self.open_export_dialog(vec![i]);
                 }
                 ui.add_space(14.0);
                 let cropping = self.editor.crop.is_some();
@@ -1426,48 +1424,6 @@ impl NlpApp {
         }
         if widgets::fold(ui, "LUT FOLDER") {
             lut_folder_ui(self, ui);
-        }
-    }
-
-    fn export_dialog(&mut self, ctx: &egui::Context, i: usize) {
-        if !self.editor.export_open {
-            return;
-        }
-        let mut ex = self.defaults.export.clone();
-        let mut go = false;
-        let r = egui::Modal::new(egui::Id::new("export_modal")).show(ctx, |ui| {
-            ui.set_width(380.0);
-            ui.heading("Export positive copy");
-            ui.label(RichText::new(&self.frames[i].name).color(theme::MUTED));
-            ui.add_space(6.0);
-            export_settings_ui(ui, &mut ex);
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    self.editor.export_open = false;
-                }
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new("Export").color(Color32::WHITE))
-                            .fill(theme::ACCENT),
-                    )
-                    .clicked()
-                {
-                    go = true;
-                }
-            });
-        });
-        if r.should_close() {
-            self.editor.export_open = false;
-        }
-        if ex != self.defaults.export {
-            self.defaults.export = ex;
-            let _ = crate::engine::sidecar::save_defaults(&self.defaults);
-        }
-        if go {
-            self.editor.export_open = false;
-            self.save_frame(i);
-            self.export(vec![i]);
         }
     }
 

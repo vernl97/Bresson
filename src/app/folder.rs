@@ -3,7 +3,7 @@
 
 use eframe::egui::{self, Color32, RichText, Sense};
 
-use super::widgets::{self, combo, section, slider_u8};
+use super::widgets::{self, section};
 use super::{NlpApp, ProxyState};
 use crate::engine::settings::*;
 
@@ -53,13 +53,13 @@ impl NlpApp {
                 p.text(
                     egui::pos2(rect.center().x, rect.center().y + 10.0),
                     egui::Align2::CENTER_CENTER,
-                    "Select a folder to begin.",
+                    "Select a photo or folder to begin.",
                     egui::FontId::proportional(12.5),
                     theme::MUTED,
                 );
                 ui.horizontal_centered(|ui| {
-                    if icon_button(ui, Icon::Folder, "Open folder…", false, true).clicked() {
-                        self.choose_folder();
+                    if icon_button(ui, Icon::Folder, "Open photo or folder…", false, true).clicked() {
+                        self.choose_anything();
                     }
                 });
             });
@@ -85,7 +85,7 @@ impl NlpApp {
                 let text = if hovering {
                     "Drop to open"
                 } else {
-                    "Click to choose a file/folder or drag here"
+                    "Click to choose a photo or folder, or drag here"
                 };
                 p.text(
                     avail.center(),
@@ -172,6 +172,10 @@ impl NlpApp {
                 }
                 if ui.small_button("Select none").clicked() {
                     self.selected.clear();
+                }
+                let has_sel = !self.selected.is_empty();
+                if ui.add_enabled(has_sel, egui::Button::new("Export…").small()).clicked() {
+                    self.open_export_dialog(self.sel_vec());
                 }
                 if self.export_total > 0 && self.export_done < self.export_total {
                     ui.separator();
@@ -454,7 +458,7 @@ impl NlpApp {
                 "open" => self.open_editor(i),
                 "convert" => self.convert(self.sel_vec(), false),
                 "roll" => self.convert(self.sel_vec(), true),
-                "export" => self.export(self.sel_vec()),
+                "export" => self.open_export_dialog(self.sel_vec()),
                 "copy" => self.copy_settings(),
                 "paste" => self.paste_settings(),
                 "unconvert" => self.unconvert(&self.sel_vec()),
@@ -489,10 +493,7 @@ pub fn lut_folder_ui(app: &mut NlpApp, ui: &mut egui::Ui) {
             .on_hover_text("The plugin's LR Files/CameraRaw/Settings/NLP Enhanced Settings folder")
             .clicked()
         {
-            if let Some(p) = rfd::FileDialog::new()
-                .set_title("Locate 'NLP Enhanced Settings'")
-                .pick_folder()
-            {
+            if let Some(p) = super::picker::pick_folder(None, Some("Choose")) {
                 let r = LutLibrary::global().write().map(|mut l| l.set_dir(p));
                 match r {
                     Ok(Ok(())) => {
@@ -507,76 +508,5 @@ pub fn lut_folder_ui(app: &mut NlpApp, ui: &mut egui::Ui) {
                 }
             }
         }
-    });
-}
-
-pub fn export_settings_ui(ui: &mut egui::Ui, ex: &mut ExportSettings) {
-    section(ui, "POSITIVE COPY SETTINGS", |ui| {
-        combo(
-            ui,
-            "Format",
-            &mut ex.format,
-            ExportFormat::ALL,
-            ExportFormat::label,
-            "",
-        );
-        match ex.format {
-            ExportFormat::Tiff => {
-                ui.horizontal(|ui| {
-                    ui.add_sized([widgets::LABEL_W, 18.0], egui::Label::new("Bits"));
-                    ui.selectable_value(&mut ex.sixteen_bit, true, "16-bit");
-                    ui.selectable_value(&mut ex.sixteen_bit, false, "8-bit");
-                });
-                ui.horizontal(|ui| {
-                    ui.add_sized([widgets::LABEL_W, 18.0], egui::Label::new("Compression"));
-                    ui.selectable_value(&mut ex.zip_compression, true, "Lossless ZIP");
-                    ui.selectable_value(&mut ex.zip_compression, false, "None");
-                });
-            }
-            ExportFormat::Jpeg => {
-                slider_u8(ui, "Quality", &mut ex.jpeg_quality, 1..=100, 95, "");
-            }
-        }
-        combo(
-            ui,
-            "Colorspace",
-            &mut ex.space,
-            OutputSpace::ALL,
-            OutputSpace::label,
-            "sRGB: web · AdobeRGB: print · ProPhotoRGB: further editing",
-        );
-        combo(
-            ui,
-            "Placement",
-            &mut ex.placement,
-            Placement::ALL,
-            Placement::label,
-            "Subfolder next to the scans, or next to the scan itself",
-        );
-        if ex.placement == Placement::Subfolder {
-            ui.horizontal(|ui| {
-                ui.add_sized([widgets::LABEL_W, 18.0], egui::Label::new("Subfolder"));
-                ui.add(
-                    egui::TextEdit::singleline(&mut ex.subfolder)
-                        .desired_width((ui.available_width() - 4.0).max(40.0)),
-                );
-            });
-        }
-        ui.horizontal(|ui| {
-            ui.add_sized([widgets::LABEL_W, 18.0], egui::Label::new("Name suffix"));
-            ui.add(
-                egui::TextEdit::singleline(&mut ex.suffix)
-                    .desired_width((ui.available_width() - 4.0).max(40.0)),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.add_sized([widgets::LABEL_W, 18.0], egui::Label::new("Long edge px"));
-            ui.add(
-                egui::DragValue::new(&mut ex.long_edge)
-                    .range(0..=20000)
-                    .speed(10.0),
-            );
-            ui.label(RichText::new("(0 = full)").weak().small());
-        });
     });
 }
