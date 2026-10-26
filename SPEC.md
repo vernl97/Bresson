@@ -1,8 +1,8 @@
-# Technical Specification: Negative Lab Pro (NLP) Architecture & Inversion Engine
+# Technical Specification: Negative Conversion Plugin (NLP) Architecture & Inversion Engine
 
 **Document Version:** 3.1.1-REV  
 **Target Architecture:** Adobe Lightroom Classic Plugin SDK (v6.0+) / Standalone CLI Implementation  
-**Source Codebase:** Negative Lab Pro v3.1.1  
+**Source Codebase:** Negative Conversion Plugin v3.1.1  
 **Author:** Antigravity Engineering (Deconstruction & Deep Codebase Audit)  
 
 ---
@@ -52,7 +52,7 @@
 
 ## 1. Executive Summary & Core Engineering Principles
 
-Negative Lab Pro (NLP) is an advanced film negative inversion and color grading engine built to operate within the constraints of Adobe Lightroom Classic. Rather than behaving as an external raster image editor that bakes pixels destructively into intermediate TIFF or PSD files, NLP achieves **non-destructive, real-time raw inversion directly inside Lightroom's native Develop Module**.
+Negative Conversion Plugin (NLP) is an advanced film negative inversion and color grading engine built to operate within the constraints of Adobe Lightroom Classic. Rather than behaving as an external raster image editor that bakes pixels destructively into intermediate TIFF or PSD files, NLP achieves **non-destructive, real-time raw inversion directly inside Lightroom's native Develop Module**.
 
 ### Core Technical Feat
 Lightroom's internal RAW processing pipeline (Adobe Camera Raw / ACR) is fundamentally designed for positive sensor data:
@@ -142,7 +142,7 @@ When `IsGroupMaskAvailable == true`:
 ## 3. The Adobe Camera Raw (ACR) Asset Ecosystem
 
 ### 3.1 Custom Camera Profiles (`.dcp`) Architecture
-Negative Lab Pro bundles over 2,500 `.dcp` camera profiles located in `NLP Plugin/CameraRaw/CameraProfiles/NegativeLab Camera Profiles/`.
+Negative Conversion Plugin bundles over 2,500 `.dcp` camera profiles located in `NLP Plugin/CameraRaw/CameraProfiles/NegativeLab Camera Profiles/`.
 
 Inspecting `Negative Lab - Nikon D750 v2.3.dcp` reveals the exact profile specifications:
 ```
@@ -349,7 +349,7 @@ In `L50_1`, NLP determines the true black and white clipping points for each cha
 
 ## 5. Mathematical Curve Engine & Inversion Pipeline (`CurveEngineV3.lua`)
 
-`CurveEngineV3.lua` is the mathematical heart of Negative Lab Pro. It translates image histogram metrics, white balance vectors, and user develop settings into 16-bit coordinate arrays formatted for Lightroom's RGB tone curves.
+`CurveEngineV3.lua` is the mathematical heart of Negative Conversion Plugin. It translates image histogram metrics, white balance vectors, and user develop settings into 16-bit coordinate arrays formatted for Lightroom's RGB tone curves.
 
 ```mermaid
 flowchart LR
@@ -665,7 +665,7 @@ exiftool -m -overwrite_original -E \
   -software="VueScan" \
   target.dng
 ```
-This forces Lightroom Classic to recognize the file as an editable raw asset and unlocks the full suite of Negative Lab Pro camera profiles and creative looks.
+This forces Lightroom Classic to recognize the file as an editable raw asset and unlocks the full suite of Negative Conversion Plugin camera profiles and creative looks.
 
 ---
 
@@ -681,7 +681,7 @@ This forces Lightroom Classic to recognize the file as an editable raw asset and
 
 ### 3. `NegativeV3.lua`
 - **Role**: Primary Plugin Entrypoint.
-- **Specifications**: Triggered when the user launches Negative Lab Pro from Lightroom menus or via shortcut. Sets `_G.tempMultiplier = 0.75`, clears previous session state via `NLPSession.clearSession()`, and invokes `NLPDialogs.mainDialog()`.
+- **Specifications**: Triggered when the user launches Negative Conversion Plugin from Lightroom menus or via shortcut. Sets `_G.tempMultiplier = 0.75`, clears previous session state via `NLPSession.clearSession()`, and invokes `NLPDialogs.mainDialog()`.
 
 ### 4. `PluginInfoProviderV3.lua`
 - **Role**: Lightroom Plugin Manager Hook.
@@ -787,7 +787,7 @@ This forces Lightroom Classic to recognize the file as an editable raw asset and
 
 ## 10. Re-Implementation Blueprint: Standalone `NLP_CLI`
 
-To implement Negative Lab Pro's exact inversion and grading pipeline outside of Adobe Lightroom as a high-performance standalone command-line tool (in Python, Rust, or C++), the architecture maps directly to the following pipeline:
+To implement Negative Conversion Plugin's exact inversion and grading pipeline outside of Adobe Lightroom as a high-performance standalone command-line tool (in Python, Rust, or C++), the architecture maps directly to the following pipeline:
 
 ```mermaid
 flowchart TD

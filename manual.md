@@ -1,8 +1,4 @@
-# Negative Lab Pro — User Manual & Visual Workflow Guide
-
-*Source: [negativelabpro.com/guide/basics/](https://www.negativelabpro.com/guide/basics/)*  
-*Version: Negative Lab Pro v2.3*  
-*Copyright © Nate Photographic. All rights reserved.*
+# Negative Conversion Plugin — User Manual & Visual Workflow Guide
 
 ---
 
@@ -15,7 +11,7 @@
    - [VueScan / SilverFast RAW DNGs](#vuescan--silverfast-raw-dngs)
    - [TIF Scans](#tif-scans)
    - [Film Border Guidance & Pre-Conversion Tips](#film-border-guidance--pre-conversion-tips)
-3. [Opening Negative Lab Pro](#3-opening-negative-lab-pro)
+3. [Opening Negative Conversion Plugin](#3-opening-negative-lab-pro)
    - [macOS Shortcut](#macos)
    - [Windows Shortcuts by Language](#windows)
 4. [Conversion Settings (Convert Tab)](#4-conversion-settings-convert-tab)
@@ -24,7 +20,7 @@
    - [Pre-Saturation](#pre-saturation)
    - [Border Buffer](#border-buffer)
    - [Initiating the Conversion](#initiating-the-conversion)
-5. [Editing in Negative Lab Pro (Edit Tab)](#5-editing-in-negative-lab-pro-edit-tab)
+5. [Editing in Negative Conversion Plugin (Edit Tab)](#5-editing-in-negative-lab-pro-edit-tab)
    - [Full Edit Tab Interface Mockup & Screenshot](#full-edit-tab-interface-mockup--screenshot)
    - [Non-Destructive Foundation](#non-destructive-foundation)
 6. [TONE Settings](#6-tone-settings)
@@ -97,7 +93,7 @@ flowchart TD
 
 ## 2. Preparing Your Negatives for Conversion
 
-Once your negative scans are imported into Adobe Lightroom, complete the preparation steps specific to your scanning hardware before opening Negative Lab Pro.
+Once your negative scans are imported into Adobe Lightroom, complete the preparation steps specific to your scanning hardware before opening Negative Conversion Plugin.
 
 ### Pre-Conversion Decision Tree
 
@@ -120,7 +116,7 @@ flowchart LR
 
 ### Digital Camera Scans
 1. **White Balance:** Before converting, use the White Balance selector (eyedropper) in Lightroom to sample off the unexposed film border. (You can do this once per roll and sync across photos.) If no film border is available, or if Lightroom warns that the area is too bright, select the **'Auto WB'** setting in Lightroom.
-2. **Crop:** Exclude any non-film elements such as film holders or direct backlight edges. You can re-crop after conversion, or use the **Border Buffer** setting within Negative Lab Pro.
+2. **Crop:** Exclude any non-film elements such as film holders or direct backlight edges. You can re-crop after conversion, or use the **Border Buffer** setting within Negative Conversion Plugin.
 
 ### VueScan / SilverFast RAW DNGs
 1. **Profile Check:** Ensure that the **'Negative Lab v2.1'** raw camera profile is available. If it does not appear, go to `File > Plugin-Extras > Update Vuescan/Silverfast DNGs` (this can be batch-run across multiple DNG files at once). After running, the profile should show `Negative Lab v2.1`. If an error occurs, ensure all profiles from installation were copied correctly, restart Lightroom, and try again.
@@ -141,10 +137,10 @@ flowchart LR
 > [!TIP]
 > **Including Film Border in Analysis:**  
 > In select circumstances, you may achieve more accurate color results by including a small amount of the film border during conversion. If the photo was shot at box speed, or if the scene lacks any true black point, including a sliver of the unexposed emulsion helps calibrate shadows.  
-> Because Negative Lab Pro is completely non-destructive, you can easily test this:
+> Because Negative Conversion Plugin is completely non-destructive, you can easily test this:
 > 1. In NLP, click **"Unconvert"** and hit **"Apply"**.
 > 2. Adjust your Lightroom crop to include a small strip of the border.
-> 3. Reopen Negative Lab Pro, set **Border Buffer** to `0%`, and convert again.
+> 3. Reopen Negative Conversion Plugin, set **Border Buffer** to `0%`, and convert again.
 
 > [!NOTE]
 > **Lightroom Sync Feature:**  
@@ -152,16 +148,16 @@ flowchart LR
 
 ---
 
-## 3. Opening Negative Lab Pro
+## 3. Opening Negative Conversion Plugin
 
 Once your negatives are prepared, select the image (or group of images) you wish to convert and launch the plugin.
 
 ### macOS
 - **Shortcut:** `Ctrl + N`
-- **Menu:** `File > Plug-in Extras > Negative Lab Pro`
+- **Menu:** `File > Plug-in Extras > Negative Conversion Plugin`
 
 ### Windows
-- **Menu:** `File > Plug-in Extras > Negative Lab Pro`
+- **Menu:** `File > Plug-in Extras > Negative Conversion Plugin`
 - **Windows Hotkey:** If running the background hotkey utility, use the shortcut matching your Lightroom language setting:
 
 | Lightroom Language | Shortcut Key |
@@ -179,7 +175,7 @@ Once your negatives are prepared, select the image (or group of images) you wish
 
 ## 4. Conversion Settings (Convert Tab)
 
-The **Convert** tab defines the initial mathematical translation from negative to positive. Negative Lab Pro requires these input parameters *before* analyzing the image and building tone curves.
+The **Convert** tab defines the initial mathematical translation from negative to positive. Negative Conversion Plugin requires these input parameters *before* analyzing the image and building tone curves.
 
 ### Convert Tab UI Mockup & Screenshot
 
@@ -187,7 +183,7 @@ The **Convert** tab defines the initial mathematical translation from negative t
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    NEGATIVE LAB PRO v2.3                     │
+│                    Negative Conversion Plugin v2.3                     │
 ├──────────────────────────────────────────────────────────────┤
 │       [ Convert (Active) ]     [ Edit ]     [ Advanced ]     │
 │  ┌────────────────────────────────────────────────────────┐  │
@@ -220,7 +216,7 @@ Color Models emulate the color balance and spectral characteristics of professio
 - **Frontier:** Emulates the classic **Fuji Frontier** scanner. Produces signature teal-blues, golden yellows, and warm skin tints widely associated with modern film photography.
 - **Noritsu:** Emulates the **Fuji Noritsu** scanner. Shares many Frontier characteristics but with a cleaner, cooler, less pronounced warmth.
 - **B+W:** Dedicated monochrome conversion mode. Use whenever converting black and white film negatives (or converting color negatives to monochrome).
-- **NONE:** Disables all color model profiling and retains whatever profile was active before opening Negative Lab Pro. Ideal for custom camera profiles or unique color calibrations.
+- **NONE:** Disables all color model profiling and retains whatever profile was active before opening Negative Conversion Plugin. Ideal for custom camera profiles or unique color calibrations.
 
 ### Pre-Saturation
 Pre-saturation modifies the saturation level of the raw negative *prior* to inversion. This directly influences the separation, vividness, and hue relationships in the converted positive:
@@ -230,20 +226,20 @@ Pre-saturation modifies the saturation level of the raw negative *prior* to inve
 - **Higher Values (4–5):** Produces greater color separation (greater distinction between neighboring hues), slightly cooler color tones, and increased vividness.
 
 ### Border Buffer
-Negative Lab Pro calculates conversion algorithms based on the pixels present within the image frame. If non-image elements (unexposed film border, film rebate, scanner masks, film carrier edges, or light flare) are visible, they distort the tonal analysis.
+Negative Conversion Plugin calculates conversion algorithms based on the pixels present within the image frame. If non-image elements (unexposed film border, film rebate, scanner masks, film carrier edges, or light flare) are visible, they distort the tonal analysis.
 
 - **Border Buffer** specifies a percentage border margin (e.g., `5%` or `8%`) around the perimeter that the analysis engine will ignore.
 - This eliminates the need to tightly crop negatives prior to conversion and re-expand the crop afterwards to show borders.
 - *Rule of thumb:* If your film border occupies roughly 5% of the frame width/height, set Border Buffer to a value greater than 5%.
 
 ### Initiating the Conversion
-Click the **"CONVERT NEGATIVE(s)"** button. Negative Lab Pro evaluates every pixel, separates channels, calculates color matrix transformations, maps optimal dynamic range curves, and writes analysis metadata directly into the image catalog.
+Click the **"CONVERT NEGATIVE(s)"** button. Negative Conversion Plugin evaluates every pixel, separates channels, calculates color matrix transformations, maps optimal dynamic range curves, and writes analysis metadata directly into the image catalog.
 
 ---
 
-## 5. Editing in Negative Lab Pro (Edit Tab)
+## 5. Editing in Negative Conversion Plugin (Edit Tab)
 
-The editing controls inside Negative Lab Pro are customized specifically for negative film chemistry and tone responses, functioning in ways Lightroom's native sliders cannot match on raw negatives.
+The editing controls inside Negative Conversion Plugin are customized specifically for negative film chemistry and tone responses, functioning in ways Lightroom's native sliders cannot match on raw negatives.
 
 ### Full Edit Tab Interface Mockup & Screenshot
 
@@ -251,7 +247,7 @@ The editing controls inside Negative Lab Pro are customized specifically for neg
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    NEGATIVE LAB PRO v2.3                     │
+│                    Negative Conversion Plugin v2.3                     │
 ├──────────────────────────────────────────────────────────────┤
 │       [ Convert ]     [ Edit (Active) ]     [ Advanced ]     │
 │                                                              │
@@ -294,7 +290,7 @@ The editing controls inside Negative Lab Pro are customized specifically for neg
 ### Non-Destructive Foundation
 - All operations are completely non-destructive and reference the original raw negative.
 - Because adjustments are applied at the base mathematical level rather than stacked as post-inversion adjustments, image fidelity is preserved with wide editing latitude.
-- Edits can either be finalized within Negative Lab Pro or rendered into **Positive Copies** for further manipulation with Lightroom’s standard tools.
+- Edits can either be finalized within Negative Conversion Plugin or rendered into **Positive Copies** for further manipulation with Lightroom’s standard tools.
 
 ---
 
@@ -371,7 +367,7 @@ Tone Profiles represent the starting point of your tonal rendering. As of v2.2, 
 └──────────────────────────────────────────────────────────────┘
 ```
 
-- **WhiteClip & BlackClip:** Defines the threshold where highlight and shadow values truncate into pure white or pure black. By default, Negative Lab Pro pins endpoints just before clipping occurs.
+- **WhiteClip & BlackClip:** Defines the threshold where highlight and shadow values truncate into pure white or pure black. By default, Negative Conversion Plugin pins endpoints just before clipping occurs.
   - If a conversion displays blown highlight alerts, click the `WhiteClip` field and tap the **Down Arrow** (or input a negative integer) to recover headroom non-destructively.
 - **Soft Highs & Soft Lows:** Applies a subtle tonal roll-off curve to the highlight and shadow shoulders, simulating the gentle highlight roll-off of analog photographic paper.
 
@@ -381,7 +377,7 @@ Tone Profiles represent the starting point of your tonal rendering. As of v2.2, 
 
 ### Color Architecture & Processing Pipeline
 
-The following diagram illustrates how color corrections flow through Negative Lab Pro's specialized color stages:
+The following diagram illustrates how color corrections flow through Negative Conversion Plugin's specialized color stages:
 
 ```mermaid
 flowchart TD
@@ -441,7 +437,7 @@ The integrated **Temp / Tint** sliders feature an algorithm calibrated specifica
 
 ### White Balance Dropdown Options
 
-Negative Lab Pro provides two categories of white balance presets:
+Negative Conversion Plugin provides two categories of white balance presets:
 
 #### Dynamic / Auto Options (Multi-Layer Scene Analysis)
 - **Auto-Neutral (Default):** Locates neutral elements in the scene and aligns them to true neutral grey (similar to Photoshop’s neutral snap).
@@ -463,10 +459,10 @@ Negative Lab Pro provides two categories of white balance presets:
 The Color Picker samples a known neutral reference area (e.g., an 18% grey card or neutral concrete) to balance Temp and Tint instantly.
 
 #### On macOS:
-1. Click the **Color Picker icon** in Negative Lab Pro; the macOS System Color Tool appears.
+1. Click the **Color Picker icon** in Negative Conversion Plugin; the macOS System Color Tool appears.
 2. Click the eyedropper icon on the macOS Color Tool (cursor changes).
 3. Click the target neutral area on your negative image.
-4. The Temp/Tint sliders in Negative Lab Pro will update. Fine-tune sliders as needed, or click the **"WB"** label to reset to zero.
+4. The Temp/Tint sliders in Negative Conversion Plugin will update. Fine-tune sliders as needed, or click the **"WB"** label to reset to zero.
 
 #### On Windows:
 1. Ensure GPU Acceleration is disabled in `Lightroom > Preferences > Performance` (*Graphics Processor* turned off).
@@ -525,7 +521,7 @@ Color grading operates on opposing complementary color channels:
 > [!IMPORTANT]
 > Requires Lightroom Classic 8.0+ and enhanced color profiles properly installed.
 
-Negative Lab Pro v2.2+ embeds 3D Lookup Tables (LUTs) directly into the processing pipeline:
+Negative Conversion Plugin v2.2+ embeds 3D Lookup Tables (LUTs) directly into the processing pipeline:
 
 - **Natural:** Prioritizes colorimetric accuracy. Features true blues, natural foliage greens, and neutral skin reproduction.
 - **Frontier:** Emulates the classic Fuji Frontier aesthetic. Produces richer saturation, purer neutral highlights, warmer peachy skin tones, clean sky greens/yellows, and suppressed cherry reds.
@@ -536,7 +532,7 @@ Negative Lab Pro v2.2+ embeds 3D Lookup Tables (LUTs) directly into the processi
 
 ## 8. Sharpening
 
-Negative Lab Pro features customized sharpening algorithms tailored to film grain structure:
+Negative Conversion Plugin features customized sharpening algorithms tailored to film grain structure:
 
 - **Sharpen: Leave as Set (Default, v2.1+):** Leaves sharpening settings under direct user/Lightroom control without overriding existing values.
 - **Sharpen: Off:** Zeroes out all sharpening and noise reduction. Ideal for scans pre-sharpened during hardware scanning.
@@ -559,13 +555,13 @@ To establish personal presets as default settings:
 ### Why Use Positive Copies
 Because Lightroom’s standard sliders (Exposure, Highlights, Shadows, White Balance) are designed for normal camera raw files, applying them to an inverted negative produces reversed or non-linear behavior. 
 
-A **Positive Copy** bakes the Negative Lab Pro inversion into a rendered positive file (TIFF or JPEG) and imports it into your Lightroom catalog. On a positive copy, every native Lightroom tool functions exactly as expected.
+A **Positive Copy** bakes the Negative Conversion Plugin inversion into a rendered positive file (TIFF or JPEG) and imports it into your Lightroom catalog. On a positive copy, every native Lightroom tool functions exactly as expected.
 
-*Recommendation: Strive to achieve as much of your look as possible within Negative Lab Pro first to benefit from raw headroom, creating positive copies only when specialized local Lightroom brushes, radial filters, or export workflows require them.*
+*Recommendation: Strive to achieve as much of your look as possible within Negative Conversion Plugin first to benefit from raw headroom, creating positive copies only when specialized local Lightroom brushes, radial filters, or export workflows require them.*
 
 ### Creating a Positive Copy
 
-#### Method 1: Directly inside Negative Lab Pro
+#### Method 1: Directly inside Negative Conversion Plugin
 - Check the **"Make Copy"** checkbox in the NLP interface.
 - When you click **Apply**, NLP processes the frame and automatically exports and catalogs the positive copy.
 - Configure positive copy formatting under the **Advanced** tab.
@@ -590,7 +586,7 @@ The **Advanced** tab provides fine-grained control over the underlying mathemati
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    NEGATIVE LAB PRO v2.3                     │
+│                    Negative Conversion Plugin v2.3           │
 ├──────────────────────────────────────────────────────────────┤
 │       [ Convert ]     [ Edit ]     [ Advanced (Active) ]     │
 │                                                              │
