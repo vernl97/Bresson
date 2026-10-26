@@ -616,11 +616,12 @@ pub fn aggregate_roll(frames: &[Analysis]) -> (RollAggregate, Vec<usize>) {
         }
     };
     let multipliers = [kept(&g), kept(&b)];
-    // `L24_1`: average each zone's colour over the roll, then round to HSB.
+    // `L24_1`: average each zone's colour over the roll (2.2 power mean).
+    // Unlike the per-frame samples, the roll's HSB is stored unrounded.
     let colors = std::array::from_fn(|z| {
-        round_hsb(std::array::from_fn(|c| {
+        std::array::from_fn(|c| {
             rgb_avg(frames.iter().map(|a| a.auto_wb.colors[z][c] as f64)) as f32
-        }))
+        })
     });
     let auto_wb = auto_wb_from(colors, &origins);
     (
