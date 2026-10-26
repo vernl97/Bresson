@@ -29,6 +29,17 @@ pub fn is_supported(path: &Path) -> bool {
     RAW_EXTENSIONS.contains(&ext.as_str()) || BITMAP_EXTENSIONS.contains(&ext.as_str())
 }
 
+/// RAW or TIFF: the file types listed when a whole folder is opened.
+/// JPEG/PNG are still accepted when opened individually.
+pub fn is_folder_scan(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    RAW_EXTENSIONS.contains(&ext.as_str()) || matches!(ext.as_str(), "tif" | "tiff")
+}
+
 pub fn is_raw(path: &Path) -> bool {
     let ext = path
         .extension()
