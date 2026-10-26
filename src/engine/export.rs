@@ -19,14 +19,14 @@ use super::settings::{ExportFormat, ExportSettings, FilmMetadata, Placement, Set
 pub const SOFTWARE: &str = concat!("NLP Studio ", env!("CARGO_PKG_VERSION"));
 
 pub fn output_path(src: &Path, ex: &ExportSettings) -> PathBuf {
-    let dir = src.parent().unwrap_or(Path::new("."));
-    let dir = match ex.placement {
-        Placement::Subfolder => dir.join(if ex.subfolder.trim().is_empty() {
-            "Positives"
+    let dir = if let Some(ref out_dir) = ex.output_dir {
+        if !out_dir.as_os_str().is_empty() {
+            out_dir.clone()
         } else {
-            ex.subfolder.trim()
-        }),
-        Placement::SameFolder => dir.to_path_buf(),
+            default_dir(src, ex)
+        }
+    } else {
+        default_dir(src, ex)
     };
     let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
     let ext = match ex.format {
@@ -34,6 +34,18 @@ pub fn output_path(src: &Path, ex: &ExportSettings) -> PathBuf {
         ExportFormat::Jpeg => "jpg",
     };
     dir.join(format!("{stem}{}.{ext}", ex.suffix))
+}
+
+fn default_dir(src: &Path, ex: &ExportSettings) -> PathBuf {
+    let dir = src.parent().unwrap_or(Path::new("."));
+    match ex.placement {
+        Placement::Subfolder => dir.join(if ex.subfolder.trim().is_empty() {
+            "Positives"
+        } else {
+            ex.subfolder.trim()
+        }),
+        Placement::SameFolder => dir.to_path_buf(),
+    }
 }
 
 /// Render a frame at full resolution and write the positive copy.
@@ -386,5 +398,31 @@ mod tests {
         assert!(e.windows(5).any(|w| w == b"Leica"));
         assert_eq!(parse_rational("1/125"), Some((1000, 125000)));
         assert_eq!(parse_rational("f/2.8"), Some((2800, 1000)));
+    }
+
+    #[test]
+    fn output_path_uses_custom_output_dir() {
+        let src = Path::new("/path/to/scans/test-01.nef");
+        let mut ex = ExportSettings::default();
+        ex.format = ExportFormat::Jpeg;
+        ex.suffix = "-positive".into();
+        ex.output_dir = Some(PathBuf::from("/Users/abe/Pictures/ExportDir"));
+
+        let p = output_path(src, &ex);
+        assert_eq!(p, PathBuf::from("/Users/abe/Pictures/ExportDir/test-01-positive.jpg"));
+    }
+
+    #[test]
+    fn output_path_defaults_when_output_dir_none() {
+        let src = Path::new("/path/to/scans/test-01.nef");
+        let mut ex = ExportSettings::default();
+        ex.format = ExportFormat::Tiff;
+        ex.placement = Placement::Subfolder;
+        ex.subfolder = "Positives".into();
+        ex.suffix = "-positive".into();
+        ex.output_dir = None;
+
+        let p = output_path(src, &ex);
+        assert_eq!(p, PathBuf::from("/path/to/scans/Positives/test-01-positive.tif"));
     }
 }

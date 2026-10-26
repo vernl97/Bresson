@@ -60,7 +60,10 @@ pub fn run(args: Vec<String>) -> Result<()> {
 
 fn convert(args: Vec<String>) -> Result<()> {
     let mut s = sidecar::load_defaults().settings;
-    let mut ex = ExportSettings::default();
+    let mut ex = ExportSettings {
+        format: ExportFormat::Tiff,
+        ..Default::default()
+    };
     let mut roll = false;
     let mut out: Option<PathBuf> = None;
     let mut files = Vec::new();
@@ -139,31 +142,17 @@ fn convert(args: Vec<String>) -> Result<()> {
         let mut exs = ex.clone();
         if let Some(o) = &out {
             std::fs::create_dir_all(o)?;
-            exs.placement = crate::engine::settings::Placement::SameFolder;
-            // Write into `out` by exporting a path that lives there.
-            let target = export::export_frame(
-                f,
-                &fs,
-                Some(&a),
-                roll_data.as_ref().map(|r| &r.origins),
-                &Default::default(),
-                &exs,
-            )?;
-            let dest = o.join(target.file_name().unwrap());
-            std::fs::rename(&target, &dest)
-                .or_else(|_| std::fs::copy(&target, &dest).map(|_| ()))?;
-            println!("{} -> {}", f.display(), dest.display());
-        } else {
-            let target = export::export_frame(
-                f,
-                &fs,
-                Some(&a),
-                roll_data.as_ref().map(|r| &r.origins),
-                &Default::default(),
-                &exs,
-            )?;
-            println!("{} -> {}", f.display(), target.display());
+            exs.output_dir = Some(o.clone());
         }
+        let target = export::export_frame(
+            f,
+            &fs,
+            Some(&a),
+            roll_data.as_ref().map(|r| &r.origins),
+            &Default::default(),
+            &exs,
+        )?;
+        println!("{} -> {}", f.display(), target.display());
         let sc = Sidecar {
             settings: fs,
             analysis: Some(a),

@@ -1,6 +1,8 @@
 //! Conversion / editing settings. Field names and defaults mirror
 //! `NegativePresets.defaultSettings` from the Lightroom plugin.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 macro_rules! choice_enum {
@@ -9,7 +11,9 @@ macro_rules! choice_enum {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         pub enum $name { $($var),+ }
         impl $name {
+            #[allow(dead_code)]
             pub const ALL: &'static [$name] = &[$($name::$var),+];
+            #[allow(dead_code)]
             pub fn label(self) -> &'static str { match self { $($name::$var => $label),+ } }
         }
         impl Default for $name { fn default() -> Self { $name::$def } }
@@ -503,12 +507,13 @@ pub struct ExportSettings {
     pub suffix: String,
     /// 0 = full resolution.
     pub long_edge: u32,
+    pub output_dir: Option<PathBuf>,
 }
 
 impl Default for ExportSettings {
     fn default() -> Self {
         Self {
-            format: ExportFormat::Tiff,
+            format: ExportFormat::Jpeg,
             sixteen_bit: true,
             zip_compression: true,
             jpeg_quality: 95,
@@ -517,6 +522,7 @@ impl Default for ExportSettings {
             subfolder: "Positives".into(),
             suffix: "-positive".into(),
             long_edge: 0,
+            output_dir: None,
         }
     }
 }
