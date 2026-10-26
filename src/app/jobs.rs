@@ -37,6 +37,12 @@ pub enum JobResult {
         path: PathBuf,
         result: Result<PathBuf, String>,
     },
+    /// The roll's frames differ by more than 1 EV in their exposure
+    /// metadata; ask before converting without it (`L22_1`).
+    ExposureVariance {
+        items: Vec<ConvertItem>,
+        spread: f64,
+    },
     Message(String),
 }
 
@@ -89,7 +95,7 @@ struct ProxyHeader {
     info: SourceInfo,
 }
 
-const MAGIC: &[u8; 8] = b"NLPPRX02";
+const MAGIC: &[u8; 8] = b"NLPPRX03";
 
 fn read_cache(p: &Path) -> Option<SourceImage> {
     let mut f = std::fs::File::open(p).ok()?;
@@ -168,8 +174,9 @@ pub struct ConvertItem {
     pub settings: Settings,
 }
 
-/// Analyse frames individually or as a roll.
-pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
+/// Analyse frames individually or as a roll. `use_exposure` matches the
+/// roll's frames by their EXIF exposure (`commonEV`).
+pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> JobResult {
     use rayon::prelude::*;
     let loaded: Vec<Result<(PathBuf, Arc<SourceImage>, Settings), String>> = items
         .into_par_iter()
@@ -220,11 +227,28 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
                 *base
             };
             let neg = pipeline::prepare_negative(src, s, base);
-            pipeline::analyze(&neg, s, base)
+            pipeline::analyze(&neg, s, base, pipeline::frame_ev(&src.info))
         })
         .collect();
+    let common_ev = (as_roll && use_exposure)
+        .then(|| pipeline::common_ev(&analyses))
+        .flatten();
+    if let Some(c) = common_ev {
+        let spread = pipeline::ev_spread(&analyses, c);
+        if spread > 1.0 {
+            let items = ok
+                .into_iter()
+                .map(|(path, src, settings)| ConvertItem {
+                    path,
+                    proxy: Some(src),
+                    settings,
+                })
+                .collect();
+            return JobResult::ExposureVariance { items, spread };
+        }
+    }
     let roll = as_roll.then(|| {
-        let (agg, excluded) = pipeline::aggregate_roll(&analyses);
+        let (agg, excluded) = pipeline::aggregate_roll(&analyses, common_ev);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -232,6 +256,7 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
         RollData {
             auto_wb: Some(agg.auto_wb),
             multipliers: Some(agg.multipliers),
+            common_ev: agg.common_ev,
             id: format!("roll-{stamp}"),
             origins: agg.origins,
             base: roll_base.unwrap(),

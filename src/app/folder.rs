@@ -736,3 +736,66 @@ impl NlpApp {
         }
     }
 }
+
+impl NlpApp {
+    /// The plugin's "Large Exposure Variance Detected" prompt (`L22_1`).
+    pub fn exposure_prompt_ui(&mut self, ctx: &egui::Context) {
+        let Some((items, spread)) = self.exposure_prompt.take() else {
+            return;
+        };
+        let (mut go, mut cancel) = (false, false);
+        let frame = egui::Frame::new()
+            .fill(theme::PANEL)
+            .stroke(egui::Stroke::new(1.0, theme::LINE))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::same(22))
+            .shadow(ctx.global_style().visuals.window_shadow);
+        let r = egui::Modal::new(egui::Id::new("exposure_variance_modal"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.label(
+                    RichText::new("Large exposure variance detected")
+                        .font(theme::medium(16.0))
+                        .color(theme::TEXT),
+                );
+                ui.add_space(12.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "The exposure metadata of these frames differs by up to {spread:.1} EV. \
+                             This happens when exposure wasn't fixed during digital capture, or when \
+                             other tools overwrote the scans' EXIF exposure data.\n\n\
+                             You can continue without adjusting for exposure, but the results may \
+                             not be as accurate."
+                        ))
+                        .color(theme::MUTED),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(22.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(widgets::primary("Continue without exposure data"))
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if ui
+                        .add(widgets::ghost("Cancel").min_size(vec2(80.0, 30.0)))
+                        .clicked()
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+        if go {
+            self.jobs
+                .spawn(move || super::jobs::convert(items, true, false));
+        } else if !(cancel || r.should_close()) {
+            self.exposure_prompt = Some((items, spread));
+        }
+    }
+}

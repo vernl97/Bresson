@@ -134,6 +134,9 @@ pub struct NlpApp {
     pub export_targets: Option<Vec<usize>>,
     /// Open "Convert" dialog: the conversion options before analysis runs.
     pub convert_dialog: Option<folder::ConvertDialog>,
+    /// A roll conversion paused because its frames' exposures differ by
+    /// more than 1 EV: the frames and the spread.
+    pub exposure_prompt: Option<(Vec<jobs::ConvertItem>, f64)>,
 }
 
 impl NlpApp {
@@ -159,6 +162,7 @@ impl NlpApp {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            exposure_prompt: None,
         };
         if let Some(p) = open {
             if p.is_dir() {
@@ -379,7 +383,7 @@ impl NlpApp {
                 settings: self.frames[i].sc.settings.clone(),
             })
             .collect();
-        self.jobs.spawn(move || jobs::convert(items, as_roll));
+        self.jobs.spawn(move || jobs::convert(items, as_roll, true));
     }
 
     pub fn unconvert(&mut self, idx: &[usize]) {
@@ -602,6 +606,9 @@ impl NlpApp {
     fn poll_jobs(&mut self) {
         while let Ok(r) = self.jobs.rx.try_recv() {
             match r {
+                JobResult::ExposureVariance { items, spread } => {
+                    self.exposure_prompt = Some((items, spread));
+                }
                 JobResult::Proxy { path, result } => {
                     let Some(i) = self.index_of(&path) else {
                         continue;
@@ -871,6 +878,7 @@ impl eframe::App for NlpApp {
         self.toasts_ui(&ctx);
         self.export_dialog(&ctx);
         self.convert_dialog_ui(&ctx);
+        self.exposure_prompt_ui(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_all();
         }
@@ -915,6 +923,7 @@ mod tests {
                     auto_wb: AutoWb::default(),
                     base: [0.85, 0.60, 0.40],
                     key: Settings::default().analysis_key(),
+                    ev: None,
                 }),
                 roll: None,
                 metadata: Default::default(),
@@ -1240,6 +1249,7 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            exposure_prompt: None,
         };
 
         // Empty targets is a no-op
@@ -1274,6 +1284,7 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            exposure_prompt: None,
         };
         app.open_convert_dialog(vec![], true);
         assert!(app.convert_dialog.is_none());
@@ -1348,6 +1359,7 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            exposure_prompt: None,
         };
 
         let tmp = std::env::temp_dir().join("test_picker_single.tif");

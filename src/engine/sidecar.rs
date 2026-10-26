@@ -24,6 +24,9 @@ pub struct RollData {
     /// rolls from older versions lack them and render as Darkroom Paper.
     #[serde(default)]
     pub multipliers: Option<[f64; 2]>,
+    /// The roll's common exposure value (`commonEV`), when frames had EXIF.
+    #[serde(default)]
+    pub common_ev: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -116,10 +116,27 @@ fn convert(args: Vec<String>) -> Result<()> {
     for (_, src, base) in &frames {
         let base = roll_base.unwrap_or(*base);
         let neg = pipeline::prepare_negative(src, &s, base);
-        analyses.push(pipeline::analyze(&neg, &s, base));
+        analyses.push(pipeline::analyze(
+            &neg,
+            &s,
+            base,
+            pipeline::frame_ev(&src.info),
+        ));
     }
     let roll_data = roll.then(|| {
-        let (agg, excluded) = pipeline::aggregate_roll(&analyses);
+        // `L22_1`: with more than 1 EV between frames there is no prompt in
+        // batch mode, so continue without exposure data.
+        let common_ev = pipeline::common_ev(&analyses).filter(|&c| {
+            let spread = pipeline::ev_spread(&analyses, c);
+            if spread > 1.0 {
+                eprintln!(
+                    "warning: frames differ by {spread:.1} EV in their exposure metadata; \
+                     converting the roll without exposure data"
+                );
+            }
+            spread <= 1.0
+        });
+        let (agg, excluded) = pipeline::aggregate_roll(&analyses, common_ev);
         RollData {
             id: format!("roll-{}", std::process::id()),
             origins: agg.origins,
@@ -127,6 +144,7 @@ fn convert(args: Vec<String>) -> Result<()> {
             frames: files.len(),
             auto_wb: Some(agg.auto_wb),
             multipliers: Some(agg.multipliers),
+            common_ev: agg.common_ev,
             excluded: excluded
                 .iter()
                 .map(|i| files[*i].display().to_string())

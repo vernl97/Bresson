@@ -53,7 +53,7 @@ Settings are saved next to each scan as `<file>.nlp.json`.
 | Module | Ported from |
 |---|---|
 | `curve.rs` | `CurveEngineV3.lua`: tanh sigmoids, auto-tone gamma, every tone and colour layer, colour-protected and linear clipping, node inversion, single- and multi-pass curves |
-| `pipeline.rs` | `NLPImageProcessorV3.lua`: 600 px analysis, border buffer, σ=2 blur, CDF clipping (0.01 % / 0.05 %), HSB-zone auto WB; `NLPRolls.lua`: roll aggregation (min/max origins, 2.2 power-mean means, 2σ colour-ratio outliers) and the Pro Lab / Basic Lab / Darkroom Paper roll processes |
+| `pipeline.rs` | `NLPImageProcessorV3.lua`: 600 px analysis, border buffer, σ=2 blur, CDF clipping (0.01 % / 0.05 %), HSB-zone auto WB; `NLPRolls.lua`: roll aggregation (min/max origins, 2.2 power-mean means, 2σ colour-ratio outliers) exposure matching by EXIF shutter/aperture/ISO (`commonEV`), and the Pro Lab / Basic Lab / Darkroom Paper roll processes |
 | `presets.rs` | `NegativePresets.lua`: tone profiles, colour models, pre-saturation, film WB presets, engine presets |
 | `lut.rs` | Reads the plugin's real 3D LUTs from `LR Files/CameraRaw/Settings/NLP Enhanced Settings/*.xmp` (Adobe base85 + zlib RGB tables, 32³) |
 | `color.rs` | `NLPColorV3.lua`: MelissaRGB working space, output spaces, generated ICC profiles |
@@ -68,7 +68,6 @@ Settings are saved next to each scan as `<file>.nlp.json`.
   - Adobe's own raw processing (demosaic, highlight handling) still differs from `rawler`'s, so results are close to Lightroom but not identical.
 - **Film base.** Lightroom's border-eyedropper white balance becomes the **Film base** option. *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper.
 - **Exposure.** The plugin's Exposure slider (±50 curve units, applied in node space before the other tone layers) is replaced by a print exposure in EV (±5). It models paper density and is applied to the finished curve. Sidecars from older versions are converted at `exposure / 10`.
-- **Roll exposure normalisation.** The plugin reads each frame's aperture, shutter and ISO and offsets frames that were digitised at a different exposure; this isn't ported, so digitise a roll with fixed settings.
 - **LUT folder.** The app finds the LUTs automatically in `../NLP Lightroom Plugin/...` or in Lightroom's CameraRaw settings folder. If they are missing, it uses built-in approximations of each look.
 - **Not ported:** licensing and the Lightroom catalog/DNG-profile plumbing, which a standalone app doesn't need.
 
