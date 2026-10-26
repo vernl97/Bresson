@@ -1,8 +1,9 @@
 //! Colour science helpers (NLPColorV3.lua): RGB working spaces, transfer
 //! functions, HSV/HSL and minimal ICC profile generation.
 //!
-//! The working space is **MelissaRGB**: ProPhoto primaries, D65 white point and
-//! the sRGB tone response — the space Lightroom's tone curves operate in.
+//! The working space is **MelissaRGB**: ProPhoto primaries and D50 white point
+//! (NLPColorV3's MelissaRGB `toXYZ` is the D50 ProPhoto matrix) with the sRGB
+//! tone response — the space Lightroom's tone curves operate in.
 
 pub type Mat3 = [[f64; 3]; 3];
 
@@ -35,10 +36,7 @@ pub const PROPHOTO: Primaries = Primaries {
     b: [0.0366, 0.0001],
     white: D50,
 };
-pub const MELISSA: Primaries = Primaries {
-    white: D65,
-    ..PROPHOTO
-};
+pub const MELISSA: Primaries = PROPHOTO;
 
 pub fn xy_to_xyz(xy: [f64; 2]) -> [f64; 3] {
     [xy[0] / xy[1], 1.0, (1.0 - xy[0] - xy[1]) / xy[1]]

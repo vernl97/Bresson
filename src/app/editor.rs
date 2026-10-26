@@ -273,14 +273,18 @@ impl NlpApp {
         }
     }
 
+    /// Previous / next frame, wrapping around, through every frame in the
+    /// folder (converted or not).
     fn goto(&mut self, i: usize, delta: isize) {
-        let j = i as isize + delta;
-        if (0..self.frames.len() as isize).contains(&j) {
-            self.save_frame(i);
-            self.selected.clear();
-            self.selected.insert(j as usize);
-            self.open_editor(j as usize);
+        let n = self.frames.len() as isize;
+        if n < 2 {
+            return;
         }
+        let j = (i as isize + delta.signum()).rem_euclid(n);
+        self.save_frame(i);
+        self.selected.clear();
+        self.selected.insert(j as usize);
+        self.open_editor(j as usize);
     }
 
     /// Settings the preview renders with (crop mode shows the uncropped,
@@ -336,14 +340,13 @@ impl NlpApp {
         } else {
             self.editor.neg.as_ref().unwrap()
         };
-        let roll = f.sc.roll.as_ref().map(|r| r.origins);
         let origins = if self.editor.before {
             None
         } else {
-            pipeline::origins_for(&s, f.sc.analysis.as_ref(), roll.as_ref())
+            pipeline::origins_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
         };
         let mp = (src.info.full_width * src.info.full_height) as f32 / 1e6;
-        let r = Renderer::new(&s, origins, OutputSpace::Srgb).with_megapixels(mp);
+        let r = Renderer::new(&s, origins.as_ref(), OutputSpace::Srgb).with_megapixels(mp);
         let full_long = src.info.full_width.max(src.info.full_height).max(1) as f32;
         let crop_frac = 1.0 - (s.crop[0] + s.crop[2]).max(s.crop[1] + s.crop[3]) / 100.0;
         let scale = neg.width.max(neg.height) as f32 / (full_long * crop_frac.max(0.1));
@@ -622,11 +625,11 @@ impl NlpApp {
             }
             if n > 1 {
                 ui.add_space(8.0);
-                if icon_button(ui, Icon::Prev, "Previous image (←)", false, i > 0).clicked() {
+                if icon_button(ui, Icon::Prev, "Previous image (←)", false, true).clicked() {
                     self.goto(i, -1);
                     return;
                 }
-                if icon_button(ui, Icon::Next, "Next image (→)", false, i + 1 < n).clicked() {
+                if icon_button(ui, Icon::Next, "Next image (→)", false, true).clicked() {
                     self.goto(i, 1);
                     return;
                 }
@@ -1231,6 +1234,15 @@ impl NlpApp {
         }
     }
 
+    /// Recompute Temp / Tint for `s`'s WB mode on this frame: stored values
+    /// only carry over for Custom WB, as when the plugin applies saved settings.
+    fn refresh_wb(&self, i: usize, s: &mut Settings) {
+        if s.wb_mode == WbMode::Custom {
+            return;
+        }
+        (s.wb_temp, s.wb_tint) = self.frames[i].wb_values(s).unwrap_or((0.0, 0.0));
+    }
+
     /// The ⋯ menu next to Re-convert: defaults, unconvert and the LUT folder.
     fn defaults_menu(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
         if ui
@@ -1238,9 +1250,15 @@ impl NlpApp {
             .on_hover_text("New frames start with these settings")
             .clicked()
         {
+            // Like the plugin's saved defaults, leave out the frame's
+            // source, colour model, pre-saturation and border.
             let mut d = s.clone();
-            (d.crop, d.rotation, d.flip_h, d.straighten, d.use_roll) =
-                ([0.0; 4], 0, false, 0.0, false);
+            d.keep_frame_fields(&Settings {
+                image_type: d.image_type,
+                film_base: d.film_base,
+                film_base_sample: d.film_base_sample,
+                ..Settings::default()
+            });
             self.defaults.settings = d;
             let _ = crate::engine::sidecar::save_defaults(&self.defaults);
             self.toast("Saved as default settings", false);
@@ -1254,14 +1272,22 @@ impl NlpApp {
             let keep = s.clone();
             *s = self.defaults.settings.clone();
             s.keep_frame_fields(&keep);
+            self.refresh_wb(i, s);
             ui.close();
         }
         ui.separator();
         if ui.button("Reset edits").clicked() {
+            // `resetSettings`: the positive, B+W or colour defaults.
             let keep = s.clone();
             *s = Settings::default();
             s.keep_frame_fields(&keep);
+            if s.image_type == ImageType::Positive {
+                s.apply_positive_defaults();
+            } else if s.is_monochrome() {
+                s.apply_mono_defaults();
+            }
             s.apply_engine_preset(keep.engine);
+            self.refresh_wb(i, s);
             ui.close();
         }
         if self.frames[i].sc.is_converted()
@@ -1352,11 +1378,8 @@ impl NlpApp {
                 widgets::curves_plot(ui, &self.editor.curves, vec2(ui.available_width(), 150.0));
             }
             let f = &self.frames[i];
-            let o = if s.use_roll {
-                f.roll_origins().copied()
-            } else {
-                f.sc.analysis.as_ref().map(|a| a.origins)
-            };
+            let o = pipeline::origins_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
+                .map(|fo| fo.origins);
             if let Some(o) = o {
                 ui.add_space(6.0);
                 egui::Grid::new("origins")
@@ -1377,6 +1400,16 @@ impl NlpApp {
                     });
                 if f.sc.roll.is_some() {
                     ui.checkbox(&mut s.use_roll, "Use roll analysis");
+                    if s.use_roll {
+                        fl_combo(
+                            ui,
+                            "Roll process",
+                            &mut s.roll_mode,
+                            RollMode::ALL,
+                            RollMode::label,
+                            "",
+                        );
+                    }
                 }
             }
         }
@@ -1768,16 +1801,16 @@ impl NlpApp {
             Pick::WhiteBalance => {
                 let Some(neg) = &self.editor.neg else { return };
                 let f = &self.frames[i];
-                let roll = f.sc.roll.as_ref().map(|r| r.origins);
-                let Some(origins) =
-                    pipeline::origins_for(&s, f.sc.analysis.as_ref(), roll.as_ref()).copied()
+                let Some(fo) =
+                    pipeline::origins_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
                 else {
                     self.toast("Convert the negative first, then pick a neutral.", true);
                     return;
                 };
                 let avg = sample(&neg.data, neg.width, neg.height, u, v, 3);
+                let origins = fo.origins;
                 let lut = crate::engine::curve::CurveLut::from_curves(
-                    &crate::engine::curve::update_tone_curve(&origins, &s),
+                    &crate::engine::curve::update_tone_curve_roll(&origins, &s, fo.roll_clip),
                 );
                 let pos = [0, 1, 2].map(|c| lut.apply(c, avg[c]) as f64);
                 match crate::engine::curve::eyedropper_wb(pos, &origins, &s) {

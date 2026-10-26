@@ -11,10 +11,10 @@ use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
 use tiff::tags::Tag;
 
 use super::color;
-use super::curve::Origins;
 use super::decode;
 use super::pipeline::{self, Analysis, Renderer};
 use super::settings::{ExportFormat, ExportSettings, FilmMetadata, Placement, Settings};
+use super::sidecar::RollData;
 
 pub const SOFTWARE: &str = concat!("NLP Studio ", env!("CARGO_PKG_VERSION"));
 
@@ -53,7 +53,7 @@ pub fn export_frame(
     src_path: &Path,
     s: &Settings,
     analysis: Option<&Analysis>,
-    roll: Option<&Origins>,
+    roll: Option<&RollData>,
     meta: &FilmMetadata,
     ex: &ExportSettings,
 ) -> Result<PathBuf> {
@@ -74,7 +74,7 @@ pub fn export_frame(
     let scale = neg.width.max(neg.height) as f32 / full_long as f32;
     let origins = pipeline::origins_for(s, analysis, roll);
     let mp = (src.info.full_width * src.info.full_height) as f32 / 1e6;
-    let r = Renderer::new(s, origins, ex.space).with_megapixels(mp);
+    let r = Renderer::new(s, origins.as_ref(), ex.space).with_megapixels(mp);
     let px = r.render(&neg, scale);
     let out = output_path(src_path, ex);
     if let Some(p) = out.parent() {

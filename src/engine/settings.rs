@@ -183,6 +183,18 @@ choice_enum!(
 );
 
 choice_enum!(
+    /// "Roll Process" (`rollMode`, NLPRolls `getOriginsOfPhotoForRoll`).
+    /// Pro Lab fits the roll's colour balance to the frame's own density
+    /// range; Basic Lab additionally pulls the clipping towards the roll's;
+    /// Darkroom Paper uses the roll's origins unchanged.
+    RollMode {
+        ProLab => "Pro Lab",
+        BasicLab => "Basic Lab",
+        DarkroomPaper => "Darkroom Paper",
+    } default ProLab
+);
+
+choice_enum!(
     ExportFormat {
         Tiff => "TIF",
         Jpeg => "JPG",
@@ -290,6 +302,7 @@ pub struct Settings {
     pub clip_method: ClipMethod,
     /// Use the roll's aggregated analysis instead of the frame's own.
     pub use_roll: bool,
+    pub roll_mode: RollMode,
 }
 
 impl Default for Settings {
@@ -349,6 +362,7 @@ impl Default for Settings {
             toning_method: ToningMethod::Standard,
             clip_method: ClipMethod::ColorProtected,
             use_roll: false,
+            roll_mode: RollMode::ProLab,
         }
     }
 }
@@ -425,6 +439,7 @@ impl Settings {
     /// Apply `defaultPositiveSettings` (slides / already positive scans).
     pub fn apply_positive_defaults(&mut self) {
         self.tone_profile = ToneProfile::Linear;
+        self.lut = Lut::None;
         self.wb_mode = WbMode::None;
         (self.wb_temp, self.wb_tint) = (0.0, 0.0);
         self.correction_type = CorrectionType::SinglePass;
@@ -474,26 +489,14 @@ impl Settings {
             (k.rotation, k.flip_h, k.straighten, k.crop);
     }
 
-    /// Copy only the adjustment parameters (used by paste/sync so a
-    /// frame keeps its own crop and analysis-relevant convert settings).
+    /// Copy only the adjustment parameters (used by paste/sync). Like the
+    /// plugin's sync list, the conversion inputs (source, image type, colour
+    /// model, pre-saturation, border) stay with the frame, as do its film
+    /// base, roll choice and geometry.
     pub fn copy_edit_from(&mut self, o: &Settings) {
-        let keep = (
-            self.rotation,
-            self.flip_h,
-            self.straighten,
-            self.crop,
-            self.film_base,
-            self.film_base_sample,
-        );
+        let keep = self.clone();
         *self = o.clone();
-        (
-            self.rotation,
-            self.flip_h,
-            self.straighten,
-            self.crop,
-            self.film_base,
-            self.film_base_sample,
-        ) = keep;
+        self.keep_frame_fields(&keep);
     }
 }
 
@@ -565,6 +568,29 @@ impl FilmMetadata {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_keeps_conversion_inputs() {
+        let mut dst = Settings {
+            source: Source::VueScanRaw,
+            color_model: ColorModel::Noritsu,
+            pre_saturation: 5,
+            border_buffer: 8.0,
+            crop: [1.0, 2.0, 3.0, 4.0],
+            ..Settings::default()
+        };
+        let before = dst.analysis_key();
+        let src = Settings {
+            brightness: 12.0,
+            color_model: ColorModel::Frontier,
+            border_buffer: 2.0,
+            ..Settings::default()
+        };
+        dst.copy_edit_from(&src);
+        assert_eq!(dst.brightness, 12.0);
+        assert_eq!(dst.analysis_key(), before);
+        assert_eq!(dst.crop, [1.0, 2.0, 3.0, 4.0]);
+    }
 
     #[test]
     fn crop_and_geometry_do_not_change_analysis_key() {
