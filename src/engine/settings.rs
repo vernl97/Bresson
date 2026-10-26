@@ -441,10 +441,6 @@ impl Settings {
             border_buffer: (self.border_buffer * 100.0).round() as i32,
             film_base: self.film_base,
             film_base_sample: self.film_base_sample.map(|v| (v * 10000.0).round() as i32),
-            rotation: self.rotation % 4,
-            flip_h: self.flip_h,
-            straighten: (self.straighten * 100.0).round() as i32,
-            crop: self.crop.map(|v| (v * 100.0).round() as i32),
         }
     }
 
@@ -482,11 +478,6 @@ pub struct AnalysisKey {
     pub border_buffer: i32,
     pub film_base: FilmBase,
     pub film_base_sample: [i32; 3],
-    pub rotation: u8,
-    pub flip_h: bool,
-    #[serde(default)]
-    pub straighten: i32,
-    pub crop: [i32; 4],
 }
 
 /// Positive copy settings (Advanced tab).
@@ -538,3 +529,49 @@ pub struct FilmMetadata {
 }
 
 impl FilmMetadata {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crop_and_geometry_do_not_change_analysis_key() {
+        let mut s = Settings::default();
+        let initial_key = s.analysis_key();
+
+        s.crop = [5.0, 10.0, 5.0, 10.0];
+        assert_eq!(s.analysis_key(), initial_key, "crop must not alter analysis_key");
+
+        s.straighten = 2.5;
+        assert_eq!(s.analysis_key(), initial_key, "straighten must not alter analysis_key");
+
+        s.rotation = 1;
+        assert_eq!(s.analysis_key(), initial_key, "rotation must not alter analysis_key");
+
+        s.flip_h = true;
+        assert_eq!(s.analysis_key(), initial_key, "flip_h must not alter analysis_key");
+
+        // Convert settings MUST alter analysis_key
+        s.color_model = ColorModel::Frontier;
+        assert_ne!(s.analysis_key(), initial_key, "color_model must alter analysis_key");
+    }
+
+    #[test]
+    fn analysis_key_deserializes_with_legacy_crop_fields() {
+        let json = r#"{
+            "source": "DigitalCamera",
+            "image_type": "Negative",
+            "color_model": "Basic",
+            "pre_saturation": 3,
+            "border_buffer": 500,
+            "film_base": "Auto",
+            "film_base_sample": [0, 0, 0],
+            "rotation": 0,
+            "flip_h": false,
+            "straighten": 0,
+            "crop": [0, 0, 0, 0]
+        }"#;
+        let key: Result<AnalysisKey, _> = serde_json::from_str(json);
+        assert!(key.is_ok(), "legacy sidecar with crop fields must deserialize cleanly");
+    }
+}
