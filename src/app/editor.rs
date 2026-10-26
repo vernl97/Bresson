@@ -102,6 +102,8 @@ pub struct Editor {
     pub export_open: bool,
     zoom_req: Option<ZoomReq>,
     zoom_anim: Option<ZoomAnim>,
+    /// The Border buffer slider is held: outline the analysis area.
+    border_preview: bool,
 }
 
 impl Editor {
@@ -142,6 +144,7 @@ impl Default for Editor {
             export_open: false,
             zoom_req: None,
             zoom_anim: None,
+            border_preview: false,
         }
     }
 }
@@ -994,6 +997,7 @@ impl NlpApp {
                 true,
             );
         }
+        self.editor.border_preview = false;
         if widgets::fold_with(ui, "Analysis", false) {
             fl_slider_u8(
                 ui,
@@ -1003,16 +1007,18 @@ impl NlpApp {
                 3,
                 "1–2: fewer distinct hues, warmer · 4–5: more separation, cooler",
             );
-            fl_slider(
+            let (_, active) = widgets::fl_slider_active(
                 ui,
                 "Border buffer",
                 &mut s.border_buffer,
                 0.0..=25.0,
                 5.0,
+                None,
                 0,
                 "Percent of the frame edge ignored by the analysis",
                 None,
             );
+            self.editor.border_preview = active;
         }
     }
 
@@ -1539,6 +1545,41 @@ impl NlpApp {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
+
+        if self.editor.border_preview && !cropping {
+            // Mirror `pipeline::analysis_buffer`: equal % insets per side.
+            let pct = self.frames[i].sc.settings.border_buffer.clamp(0.0, 40.0);
+            let b = pct / 100.0;
+            let d = vec2(rect.width() * b, rect.height() * b);
+            let inner = Rect::from_min_max(rect.min + d, rect.max - d);
+            let dim = Color32::from_black_alpha(160);
+            for strip in [
+                Rect::from_min_max(rect.min, pos2(rect.right(), inner.top())),
+                Rect::from_min_max(pos2(rect.left(), inner.bottom()), rect.max),
+                Rect::from_min_max(
+                    pos2(rect.left(), inner.top()),
+                    pos2(inner.left(), inner.bottom()),
+                ),
+                Rect::from_min_max(
+                    pos2(inner.right(), inner.top()),
+                    pos2(rect.right(), inner.bottom()),
+                ),
+            ] {
+                p.rect_filled(strip, 0.0, dim);
+            }
+            p.rect_stroke(
+                inner,
+                0.0,
+                Stroke::new(1.0, theme::ACCENT),
+                egui::StrokeKind::Inside,
+            );
+            pill(
+                &p,
+                pos2(avail.center().x, avail.top() + 22.0),
+                &format!("Analysis area · {pct:.0}% border"),
+            );
+            ui.ctx().request_repaint();
+        }
 
         if cropping {
             self.crop_overlay(ui, &resp, rect, avail);

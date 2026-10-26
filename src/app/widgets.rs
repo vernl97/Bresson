@@ -572,7 +572,28 @@ pub fn fl_slider_origin(
     tip: &str,
     gradient: Option<(Color32, Color32)>,
 ) -> bool {
+    fl_slider_active(
+        ui, label, v, range, default, origin, decimals, tip, gradient,
+    )
+    .0
+}
+
+/// `fl_slider_origin` that also reports whether the slider is being held
+/// (track drag or value drag): `(changed, active)`.
+#[allow(clippy::too_many_arguments)]
+pub fn fl_slider_active(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    origin: Option<f32>,
+    decimals: usize,
+    tip: &str,
+    gradient: Option<(Color32, Color32)>,
+) -> (bool, bool) {
     let mut changed = false;
+    let mut active = false;
     let (lo, hi) = (*range.start(), *range.end());
     let modified = (*v - default).abs() > 1e-6;
     ui.horizontal(|ui| {
@@ -614,9 +635,11 @@ pub fn fl_slider_origin(
                 .speed((hi - lo) as f64 / 400.0)
                 .max_decimals(decimals)
                 .custom_formatter(fmt);
-            if ui.add(dv.update_while_editing(false)).changed() {
+            let r = ui.add(dv.update_while_editing(false));
+            if r.changed() {
                 changed = true;
             }
+            active |= r.dragged() || r.is_pointer_button_down_on();
         });
     });
     let w = ui.available_width() - 6.0;
@@ -677,7 +700,10 @@ pub fn fl_slider_origin(
         egui::Stroke::new(2.0, theme::PANEL),
     );
     ui.add_space(4.0);
-    changed
+    (
+        changed,
+        active || resp.dragged() || resp.is_pointer_button_down_on(),
+    )
 }
 
 pub fn fl_slider(
