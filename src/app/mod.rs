@@ -186,7 +186,7 @@ impl NlpApp {
                 rd.filter_map(|e| e.ok().map(|e| e.path()))
                     .filter(|p| {
                         p.is_file()
-                            && decode::is_supported(p)
+                            && decode::is_folder_scan(p)
                             && !p.to_string_lossy().ends_with("-prepped.tif")
                     })
                     .collect()
