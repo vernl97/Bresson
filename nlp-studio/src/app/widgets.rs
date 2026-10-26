@@ -108,43 +108,33 @@ pub fn section<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R
         .inner
 }
 
-/// Paint an RGB histogram (counts per channel, 256 bins) as soft filled
-/// channel areas over a neutral card.
+/// Paint an RGB histogram (counts per channel, 256 bins).
 pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 8.0, theme::card());
-    let inner = rect.shrink2(egui::vec2(6.0, 6.0));
-    let max = h.iter().flat_map(|c| c[2..254].iter()).copied().max().unwrap_or(1).max(1) as f32;
-    let a = if theme::is_dark() { 70 } else { 55 };
+    p.rect_filled(rect, 6.0, Color32::from_rgb(232, 232, 235));
+    let max = h
+        .iter()
+        .flat_map(|c| c[2..254].iter())
+        .copied()
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
     let cols = [
-        (Color32::from_rgba_unmultiplied(235, 72, 72, a), Color32::from_rgb(225, 80, 80)),
-        (Color32::from_rgba_unmultiplied(64, 190, 96, a), Color32::from_rgb(60, 170, 90)),
-        (Color32::from_rgba_unmultiplied(70, 120, 245, a), Color32::from_rgb(70, 120, 235)),
+        Color32::from_rgb(222, 70, 70),
+        Color32::from_rgb(60, 170, 80),
+        Color32::from_rgb(60, 110, 230),
     ];
-    for (c, (fill, stroke)) in cols.iter().enumerate() {
-        // Smooth a little so the outline reads as a curve, not a comb.
-        let v: Vec<f32> = (0..256)
-            .map(|i| {
-                let lo = i.saturating_sub(2);
-                let hi = (i + 2).min(255);
-                let s: u32 = h[c][lo..=hi].iter().sum();
-                (s as f32 / (hi - lo + 1) as f32 / max).sqrt().min(1.0)
-            })
-            .collect();
-        let pt = |i: usize| egui::pos2(inner.left() + inner.width() * i as f32 / 255.0, inner.bottom() - inner.height() * v[i]);
-        let mut mesh = egui::Mesh::default();
-        for i in 0..256 {
-            mesh.colored_vertex(egui::pos2(pt(i).x, inner.bottom()), *fill);
-            mesh.colored_vertex(pt(i), *fill);
-            if i > 0 {
-                let k = (i * 2) as u32;
-                mesh.add_triangle(k - 2, k - 1, k);
-                mesh.add_triangle(k - 1, k, k + 1);
-            }
+    for (c, col) in cols.iter().enumerate() {
+        let mut pts = Vec::with_capacity(258);
+        pts.push(rect.left_bottom());
+        for (i, &v) in h[c].iter().enumerate() {
+            let x = rect.left() + rect.width() * i as f32 / 255.0;
+            let y = rect.bottom() - rect.height() * ((v as f32 / max).sqrt()).min(1.0);
+            pts.push(egui::pos2(x, y));
         }
-        p.add(egui::Shape::mesh(mesh));
-        p.add(egui::Shape::line((0..256).map(pt).collect(), egui::Stroke::new(1.0, stroke.gamma_multiply(0.9))));
+        pts.push(rect.right_bottom());
+        p.add(egui::Shape::line(pts, egui::Stroke::new(1.2, *col)));
     }
 }
 
@@ -152,10 +142,10 @@ pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2) {
 pub fn curves_plot(ui: &mut Ui, samples: &[[f32; 4]], size: egui::Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 8.0, theme::card());
+    p.rect_filled(rect, 3.0, Color32::from_black_alpha(120));
     for i in 1..4 {
         let t = i as f32 / 4.0;
-        let s = egui::Stroke::new(0.5, theme::line());
+        let s = egui::Stroke::new(0.5, Color32::from_gray(70));
         p.line_segment(
             [
                 egui::pos2(rect.left() + rect.width() * t, rect.top()),
@@ -218,147 +208,58 @@ pub mod grad {
 // ---- Light editor theme --------------------------------------------------------
 
 pub mod theme {
-    //! Design tokens: a light and a dark palette, San Francisco typography.
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use eframe::egui::{self, Color32, CornerRadius, Stroke};
 
-    use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke};
+    pub const TOOLBAR: Color32 = Color32::from_rgb(232, 232, 232);
+    pub const SIDEBAR: Color32 = Color32::from_rgb(247, 247, 247);
+    pub const CANVAS: Color32 = Color32::from_rgb(143, 143, 143);
+    pub const TEXT: Color32 = Color32::from_rgb(28, 28, 30);
+    pub const MUTED: Color32 = Color32::from_rgb(110, 110, 115);
+    pub const LINE: Color32 = Color32::from_rgb(208, 208, 210);
+    pub const TRACK: Color32 = Color32::from_rgb(214, 214, 216);
+    pub const TRACK_FILL: Color32 = Color32::from_rgb(70, 70, 74);
+    pub const ACCENT: Color32 = Color32::from_rgb(10, 122, 255);
+    pub const WARN: Color32 = Color32::from_rgb(196, 120, 0);
+    pub const OK: Color32 = Color32::from_rgb(36, 150, 70);
 
-    static DARK: AtomicBool = AtomicBool::new(false);
-
-    pub fn is_dark() -> bool {
-        DARK.load(Ordering::Relaxed)
-    }
-
-    macro_rules! tok {
-        ($($name:ident: $light:expr, $dark:expr;)*) => {
-            $(
-                #[inline]
-                pub fn $name() -> Color32 {
-                    if is_dark() { $dark } else { $light }
-                }
-            )*
-        };
-    }
-
-    const fn c(r: u8, g: u8, b: u8) -> Color32 {
-        Color32::from_rgb(r, g, b)
-    }
-
-    tok! {
-        toolbar:      c(236, 236, 238), c(30, 31, 34);
-        sidebar:      c(247, 247, 248), c(37, 38, 41);
-        canvas:       c(142, 142, 145), c(50, 50, 53);
-        surface:      c(255, 255, 255), c(46, 47, 51);
-        text:         c(29, 29, 31),    c(236, 236, 240);
-        muted:        c(110, 110, 116), c(152, 152, 160);
-        faint:        c(170, 170, 176), c(98, 98, 106);
-        line:         c(218, 218, 222), c(52, 53, 58);
-        track:        c(214, 214, 218), c(70, 71, 77);
-        track_fill:   c(72, 72, 78),    c(214, 214, 220);
-        accent:       c(10, 116, 245),  c(64, 148, 255);
-        warn:         c(190, 112, 0),   c(240, 172, 72);
-        ok:           c(30, 142, 66),   c(92, 200, 124);
-        hover:        c(222, 222, 226), c(52, 53, 58);
-        pressed:      c(208, 208, 214), c(62, 63, 69);
-        control_bg:   c(226, 226, 230), c(28, 29, 32);
-        card:         c(239, 239, 241), c(44, 45, 49);
-        card_hover:   c(230, 230, 233), c(52, 53, 58);
-        selected_bg:  c(219, 233, 254), c(33, 52, 82);
-        knob:         c(255, 255, 255), c(246, 246, 248);
-        knob_ring:    c(120, 120, 126), c(30, 31, 34);
-        input_stroke: c(200, 200, 205), c(64, 65, 71);
-    }
-
-    /// Semibold / medium font families (San Francisco when available).
-    pub fn semibold(size: f32) -> FontId {
-        FontId::new(size, FontFamily::Name("semibold".into()))
-    }
-
-    pub fn medium(size: f32) -> FontId {
-        FontId::new(size, FontFamily::Name("medium".into()))
-    }
-
-    /// Load San Francisco (system font, not bundled) in three weights.
-    pub fn install_fonts(ctx: &egui::Context) {
-        let mut fonts = egui::FontDefinitions::default();
-        let sf = std::fs::read("/System/Library/Fonts/SFNS.ttf").ok();
-        let mono = std::fs::read("/System/Library/Fonts/SFNSMono.ttf").ok();
-        let weighted = |bytes: &Vec<u8>, w: f32| {
-            let mut fd = egui::FontData::from_owned(bytes.clone());
-            fd.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", w)]);
-            std::sync::Arc::new(fd)
-        };
-        let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-        let mut add = |family: FontFamily, key: &str, data: Option<std::sync::Arc<egui::FontData>>| {
-            let mut list = Vec::new();
-            if let Some(d) = data {
-                fonts.font_data.insert(key.to_string(), d);
-                list.push(key.to_string());
-            }
-            list.extend(fallback.iter().cloned());
-            fonts.families.insert(family, list);
-        };
-        add(FontFamily::Proportional, "sf-regular", sf.as_ref().map(|b| weighted(b, 430.0)));
-        add(FontFamily::Name("medium".into()), "sf-medium", sf.as_ref().map(|b| weighted(b, 530.0)));
-        add(FontFamily::Name("semibold".into()), "sf-semibold", sf.as_ref().map(|b| weighted(b, 640.0)));
-        if let Some(m) = mono {
-            fonts.font_data.insert("sf-mono".into(), std::sync::Arc::new(egui::FontData::from_owned(m)));
-            fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "sf-mono".into());
-        }
-        ctx.set_fonts(fonts);
-    }
-
-    /// Apply the palette for light or dark mode.
-    pub fn apply(ctx: &egui::Context, dark: bool) {
-        DARK.store(dark, Ordering::Relaxed);
-        let mut v = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-        v.panel_fill = sidebar();
-        v.window_fill = surface();
-        v.window_stroke = Stroke::new(1.0, line());
-        v.extreme_bg_color = if dark { c(28, 29, 32) } else { Color32::WHITE };
-        v.faint_bg_color = card();
-        v.override_text_color = Some(text());
-        v.weak_text_color = Some(muted());
-        v.hyperlink_color = accent();
-        v.selection.bg_fill = accent();
+    pub fn apply(ctx: &egui::Context) {
+        let mut v = egui::Visuals::light();
+        v.panel_fill = SIDEBAR;
+        v.window_fill = Color32::WHITE;
+        v.extreme_bg_color = Color32::WHITE;
+        v.faint_bg_color = Color32::from_rgb(240, 240, 240);
+        v.override_text_color = Some(TEXT);
+        v.selection.bg_fill = ACCENT;
         v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-        v.window_corner_radius = CornerRadius::same(12);
-        v.menu_corner_radius = CornerRadius::same(10);
-        v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(if dark { 120 } else { 40 }) };
-        v.window_shadow = v.popup_shadow;
-        let r = CornerRadius::same(7);
-        for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        v.window_corner_radius = CornerRadius::same(10);
+        let r = CornerRadius::same(6);
+        for w in [
+            &mut v.widgets.inactive,
+            &mut v.widgets.hovered,
+            &mut v.widgets.active,
+            &mut v.widgets.open,
+        ] {
             w.corner_radius = r;
-            w.expansion = 0.0;
         }
-        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, line());
-        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, text());
-        v.widgets.inactive.weak_bg_fill = surface();
-        v.widgets.inactive.bg_fill = surface();
-        v.widgets.inactive.bg_stroke = Stroke::new(1.0, input_stroke());
-        v.widgets.inactive.fg_stroke = Stroke::new(1.2, text());
-        v.widgets.hovered.weak_bg_fill = hover();
-        v.widgets.hovered.bg_fill = hover();
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, faint());
-        v.widgets.hovered.fg_stroke = Stroke::new(1.3, text());
-        v.widgets.active.weak_bg_fill = pressed();
-        v.widgets.active.bg_fill = pressed();
-        v.widgets.active.fg_stroke = Stroke::new(1.3, text());
-        v.widgets.open.weak_bg_fill = surface();
-        v.widgets.open.bg_stroke = Stroke::new(1.0, accent());
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
+        v.widgets.inactive.weak_bg_fill = Color32::WHITE;
+        v.widgets.inactive.bg_fill = Color32::WHITE;
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(196, 196, 198));
+        v.widgets.inactive.fg_stroke = Stroke::new(1.2, TEXT);
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(244, 244, 246);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(160, 160, 164));
+        v.widgets.active.weak_bg_fill = Color32::from_rgb(230, 230, 233);
+        v.widgets.open.weak_bg_fill = Color32::WHITE;
         ctx.set_visuals(v);
         ctx.global_style_mut(|s| {
             s.spacing.item_spacing = egui::vec2(8.0, 6.0);
-            s.spacing.button_padding = egui::vec2(12.0, 5.0);
-            s.spacing.interact_size.y = 28.0;
-            s.spacing.menu_margin = egui::Margin::same(6);
-            for (ts, size) in [(egui::TextStyle::Body, 13.0), (egui::TextStyle::Button, 13.0), (egui::TextStyle::Small, 11.0), (egui::TextStyle::Heading, 20.0)] {
-                if let Some(f) = s.text_styles.get_mut(&ts) {
-                    f.size = size;
-                }
+            s.spacing.button_padding = egui::vec2(10.0, 4.0);
+            s.spacing.interact_size.y = 26.0;
+            if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Body) {
+                f.size = 13.5;
             }
-            if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Heading) {
-                f.family = FontFamily::Name("semibold".into());
+            if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Button) {
+                f.size = 13.5;
             }
         });
     }
@@ -544,16 +445,14 @@ pub fn icon_button(
     );
     let p = ui.painter();
     if selected {
-        p.rect_filled(rect, 7.0, theme::pressed());
+        p.rect_filled(rect, 6.0, Color32::from_rgb(208, 208, 212));
     } else if resp.hovered() && enabled {
-        p.rect_filled(rect, 7.0, theme::hover());
+        p.rect_filled(rect, 6.0, Color32::from_rgb(220, 220, 224));
     }
-    let col = if !enabled {
-        theme::faint()
-    } else if selected {
-        theme::accent()
+    let col = if enabled {
+        theme::TEXT
     } else {
-        theme::text()
+        Color32::from_rgb(170, 170, 174)
     };
     paint_icon(p, rect.shrink2(egui::vec2(7.0, 5.0)), icon, col);
     resp.on_hover_text(tip)
@@ -566,7 +465,7 @@ pub fn header(ui: &mut Ui, title: &str) {
         egui::RichText::new(title)
             .strong()
             .size(12.5)
-            .color(theme::text()),
+            .color(theme::TEXT),
     );
     ui.add_space(4.0);
 }
@@ -582,7 +481,7 @@ pub fn fl_combo<T: Copy + PartialEq>(
 ) -> bool {
     let mut changed = false;
     if !label.is_empty() {
-        let l = ui.label(egui::RichText::new(label).color(theme::text()));
+        let l = ui.label(egui::RichText::new(label).color(theme::TEXT));
         if !tip.is_empty() {
             l.on_hover_text(tip);
         }
@@ -619,7 +518,7 @@ pub fn fl_slider(
     let (lo, hi) = (*range.start(), *range.end());
     ui.horizontal(|ui| {
         let l = ui.add(
-            egui::Label::new(egui::RichText::new(label).color(theme::text())).sense(Sense::click()),
+            egui::Label::new(egui::RichText::new(label).color(theme::TEXT)).sense(Sense::click()),
         );
         let l = l.on_hover_text(if tip.is_empty() {
             "Click to reset".to_string()
@@ -686,25 +585,30 @@ pub fn fl_slider(
     match gradient {
         Some((a, b)) => gradient_rect(ui, track.expand2(egui::vec2(0.0, 1.0)), a, b),
         None => {
-            p.rect_filled(track, 1.0, theme::track());
+            p.rect_filled(track, 1.0, theme::TRACK);
             let z = to_x(default.clamp(lo, hi));
             let k = to_x(*v);
             let fill = Rect::from_min_max(
                 egui::pos2(z.min(k), track.top()),
                 egui::pos2(z.max(k), track.bottom()),
             );
-            p.rect_filled(fill, 1.0, theme::track_fill());
+            p.rect_filled(fill, 1.0, theme::TRACK_FILL);
         }
     }
     let knob = egui::pos2(to_x(*v), track.center().y);
     let hot = resp.hovered() || resp.dragged();
-    // Soft shadow + knob.
-    p.circle_filled(knob + egui::vec2(0.0, 1.0), 8.5, Color32::from_black_alpha(if theme::is_dark() { 90 } else { 30 }));
     p.circle(
         knob,
-        if hot { 8.5 } else { 8.0 },
-        theme::knob(),
-        egui::Stroke::new(if hot { 1.5 } else { 1.0 }, if hot { theme::accent() } else { theme::knob_ring() }),
+        8.0,
+        Color32::WHITE,
+        egui::Stroke::new(
+            if hot { 2.0 } else { 1.5 },
+            if hot {
+                theme::TEXT
+            } else {
+                Color32::from_rgb(90, 90, 94)
+            },
+        ),
     );
     ui.add_space(4.0);
     changed
@@ -752,8 +656,8 @@ pub fn segmented_locked<T: Copy + PartialEq>(
     let mut changed = false;
     let w = (ui.available_width() - 6.0) / items.len() as f32;
     egui::Frame::new()
-        .fill(theme::control_bg())
-        .corner_radius(8.0)
+        .fill(Color32::from_rgb(226, 226, 229))
+        .corner_radius(7.0)
         .inner_margin(2.0)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
@@ -775,20 +679,25 @@ pub fn segmented_locked<T: Copy + PartialEq>(
                         resp
                     };
                     if sel {
-                        ui.painter().rect_filled(rect.translate(egui::vec2(0.0, 0.5)), 7.0, Color32::from_black_alpha(if theme::is_dark() { 60 } else { 18 }));
-                        ui.painter().rect(rect, 7.0, theme::surface(), egui::Stroke::new(0.5, theme::line()), egui::StrokeKind::Inside);
+                        ui.painter().rect(
+                            rect,
+                            6.0,
+                            Color32::WHITE,
+                            egui::Stroke::new(0.5, Color32::from_rgb(200, 200, 204)),
+                            egui::StrokeKind::Inside,
+                        );
                     }
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
                         *name,
-                        if sel { theme::medium(12.5) } else { egui::FontId::proportional(12.5) },
+                        egui::FontId::proportional(13.0),
                         if is_locked {
-                            theme::faint()
+                            Color32::from_rgb(185, 185, 190)
                         } else if sel {
-                            theme::text()
+                            theme::TEXT
                         } else {
-                            theme::muted()
+                            theme::MUTED
                         },
                     );
                     if resp.clicked() && !sel && !is_locked {
@@ -810,7 +719,7 @@ pub fn fold(ui: &mut Ui, title: &str) -> bool {
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::click());
     let hot = resp.hovered();
-    let col = if hot { theme::accent() } else { theme::text() };
+    let col = if hot { theme::ACCENT } else { theme::TEXT };
     let p = ui.painter();
     p.text(
         rect.left_center(),
@@ -849,7 +758,7 @@ pub fn fold(ui: &mut Ui, title: &str) -> bool {
                 egui::pos2(rect.left(), rect.bottom() + 3.0),
                 egui::pos2(rect.right(), rect.bottom() + 3.0),
             ],
-            egui::Stroke::new(0.5, theme::line()),
+            egui::Stroke::new(0.5, theme::LINE),
         );
     }
     open

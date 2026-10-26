@@ -131,18 +131,13 @@ pub struct NlpApp {
     pub export_done: usize,
     pub thumb_size: f32,
     pub time: f64,
-    /// Theme currently applied (None until the first frame).
-    pub applied_dark: Option<bool>,
-    pub show_shortcuts: bool,
     /// Opened as a lone image: "back" returns to the welcome screen.
     pub single_mode: bool,
 }
 
 impl NlpApp {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
-        widgets::theme::install_fonts(&cc.egui_ctx);
-        // Follow the system appearance by default.
-        cc.egui_ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::System);
+        widgets::theme::apply(&cc.egui_ctx);
         let defaults = sidecar::load_defaults();
         let mut app = Self {
             view: View::Folder,
@@ -160,8 +155,6 @@ impl NlpApp {
             export_done: 0,
             thumb_size: 180.0,
             time: 0.0,
-            applied_dark: None,
-            show_shortcuts: false,
             single_mode: false,
         };
         if let Some(p) = open {
@@ -172,31 +165,6 @@ impl NlpApp {
             }
         }
         app
-    }
-
-    /// Cycle System → Light → Dark.
-    pub fn cycle_theme(&mut self) {
-        self.defaults.theme = match self.defaults.theme.as_str() {
-            "light" => "dark",
-            "dark" => "system",
-            _ => "light",
-        }
-        .into();
-        let _ = sidecar::save_defaults(&self.defaults);
-        let label = match self.defaults.theme.as_str() {
-            "light" => "Light appearance",
-            "dark" => "Dark appearance",
-            _ => "Appearance follows the system",
-        };
-        self.toast(label, false);
-    }
-
-    pub fn theme_tip(&self) -> &'static str {
-        match self.defaults.theme.as_str() {
-            "light" => "Appearance: Light (click for Dark)",
-            "dark" => "Appearance: Dark (click for System)",
-            _ => "Appearance: System (click for Light)",
-        }
     }
 
     pub fn toast(&mut self, text: impl Into<String>, error: bool) {
@@ -226,9 +194,6 @@ impl NlpApp {
         self.load_frames(files, dir);
         self.single_mode = false;
         self.defaults.last_folder = Some(dir.to_path_buf());
-        self.defaults.recent.retain(|p| p != dir);
-        self.defaults.recent.insert(0, dir.to_path_buf());
-        self.defaults.recent.truncate(6);
         let _ = sidecar::save_defaults(&self.defaults);
     }
 
@@ -723,18 +688,6 @@ pub fn to_color_image(px: &[[f32; 3]], w: usize, h: usize) -> egui::ColorImage {
 impl eframe::App for NlpApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.time = ctx.input(|i| i.time);
-        let dark = match self.defaults.theme.as_str() {
-            "dark" => true,
-            "light" => false,
-            _ => ctx.system_theme().map(|t| t == egui::Theme::Dark).unwrap_or(false),
-        };
-        if self.applied_dark != Some(dark) {
-            widgets::theme::apply(ctx, dark);
-            self.applied_dark = Some(dark);
-            for f in self.frames.iter_mut() {
-                f.thumb_dirty = f.thumb.is_some() || f.thumb_dirty;
-            }
-        }
         // Drag & drop of a folder or image files anywhere in the window.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw

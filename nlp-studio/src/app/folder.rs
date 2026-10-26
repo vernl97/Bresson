@@ -36,8 +36,8 @@ impl NlpApp {
             .exact_size(54.0)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::toolbar())
-                    .stroke(egui::Stroke::new(1.0, theme::line()))
+                    .fill(theme::TOOLBAR)
+                    .stroke(egui::Stroke::new(1.0, theme::LINE))
                     .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(ui, |ui| {
@@ -48,14 +48,14 @@ impl NlpApp {
                     egui::Align2::CENTER_CENTER,
                     "Welcome to NLP Studio",
                     egui::FontId::proportional(15.0),
-                    theme::text(),
+                    theme::TEXT,
                 );
                 p.text(
                     egui::pos2(rect.center().x, rect.center().y + 10.0),
                     egui::Align2::CENTER_CENTER,
                     "Select a folder to begin.",
                     egui::FontId::proportional(12.5),
-                    theme::muted(),
+                    theme::MUTED,
                 );
                 ui.horizontal_centered(|ui| {
                     if icon_button(ui, Icon::Folder, "Open folder…", false, true).clicked() {
@@ -65,7 +65,7 @@ impl NlpApp {
             });
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::sidebar()))
+            .frame(egui::Frame::new().fill(theme::SIDEBAR))
             .show(ui, |ui| {
                 let avail = ui.max_rect();
                 let resp = ui.allocate_rect(avail, Sense::click());
@@ -76,7 +76,7 @@ impl NlpApp {
                     p.rect_stroke(
                         zone,
                         16.0,
-                        egui::Stroke::new(2.0, theme::accent()),
+                        egui::Stroke::new(2.0, theme::ACCENT),
                         egui::StrokeKind::Inside,
                     );
                 } else if resp.hovered() {
@@ -93,9 +93,9 @@ impl NlpApp {
                     text,
                     egui::FontId::proportional(16.0),
                     if hovering {
-                        theme::accent()
+                        theme::ACCENT
                     } else {
-                        theme::muted()
+                        theme::MUTED
                     },
                 );
                 if resp.hovered() {
@@ -308,7 +308,7 @@ impl NlpApp {
                             p.rect_stroke(
                                 rect,
                                 8.0,
-                                egui::Stroke::new(1.5, widgets::theme::accent()),
+                                egui::Stroke::new(1.5, widgets::theme::ACCENT),
                                 egui::StrokeKind::Inside,
                             );
                         }
@@ -361,13 +361,13 @@ impl NlpApp {
                         );
                         let mut badges = Vec::new();
                         if f.sc.is_converted() {
-                            badges.push(("✔", widgets::theme::ok()));
+                            badges.push(("✔", widgets::theme::OK));
                         }
                         if f.is_roll() {
-                            badges.push(("ROLL", widgets::theme::accent()));
+                            badges.push(("ROLL", widgets::theme::ACCENT));
                         }
                         if f.exporting {
-                            badges.push(("EXPORT", widgets::theme::warn()));
+                            badges.push(("EXPORT", widgets::theme::WARN));
                         }
                         let mut x = rect.right() - 8.0;
                         for (b, c) in badges {
@@ -476,12 +476,12 @@ pub fn lut_folder_ui(app: &mut NlpApp, ui: &mut egui::Ui) {
                 ui.label(
                     RichText::new("✔ Using the plugin's 3D LUTs from:")
                         .small()
-                        .color(widgets::theme::ok()),
+                        .color(widgets::theme::OK),
                 );
                 ui.label(RichText::new(d.display().to_string()).small().weak());
             }
             None => {
-                ui.label(RichText::new("⚠ 'NLP Enhanced Settings' folder not found — using built-in approximations of the looks.").small().color(widgets::theme::warn()));
+                ui.label(RichText::new("⚠ 'NLP Enhanced Settings' folder not found — using built-in approximations of the looks.").small().color(widgets::theme::WARN));
             }
         }
         if ui

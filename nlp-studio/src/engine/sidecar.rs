@@ -77,10 +77,6 @@ pub struct Defaults {
     pub settings: Settings,
     pub export: ExportSettings,
     pub last_folder: Option<PathBuf>,
-    /// Recently opened folders, most recent first.
-    pub recent: Vec<PathBuf>,
-    /// "system", "light" or "dark".
-    pub theme: String,
 }
 
 pub fn load_defaults() -> Defaults {

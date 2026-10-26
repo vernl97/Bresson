@@ -455,8 +455,8 @@ impl NlpApp {
             .exact_size(54.0)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::toolbar())
-                    .stroke(Stroke::new(1.0, theme::line()))
+                    .fill(theme::TOOLBAR)
+                    .stroke(Stroke::new(1.0, theme::LINE))
                     .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(ui, |ui| self.toolbar(ui, i, &mut s));
@@ -472,8 +472,8 @@ impl NlpApp {
             .max_size(560.0)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::sidebar())
-                    .stroke(Stroke::new(1.0, theme::line()))
+                    .fill(theme::SIDEBAR)
+                    .stroke(Stroke::new(1.0, theme::LINE))
                     .inner_margin(egui::Margin {
                         left: 20,
                         right: 16,
@@ -494,7 +494,7 @@ impl NlpApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::canvas()))
+            .frame(egui::Frame::new().fill(theme::CANVAS))
             .show(ui, |ui| self.canvas(ui, i));
 
         self.export_dialog(&ctx, i);
@@ -619,14 +619,14 @@ impl NlpApp {
             egui::Align2::CENTER_CENTER,
             &f.name,
             egui::FontId::proportional(14.5),
-            theme::text(),
+            theme::TEXT,
         );
         p.text(
             pos2(rect.center().x, rect.center().y + 9.0),
             egui::Align2::CENTER_CENTER,
             sub,
             egui::FontId::proportional(12.0),
-            theme::muted(),
+            theme::MUTED,
         );
 
         let n = self.frames.len();
@@ -738,7 +738,7 @@ impl NlpApp {
                 }
                 if self.editor.loading || self.jobs.busy() > 0 {
                     ui.add_space(8.0);
-                    ui.add(egui::Spinner::new().color(theme::muted()));
+                    ui.add(egui::Spinner::new().color(theme::MUTED));
                 }
             });
         });
@@ -816,7 +816,7 @@ impl NlpApp {
                     if ui
                         .add(
                             egui::Button::new(RichText::new("Apply").color(Color32::WHITE))
-                                .fill(theme::accent()),
+                                .fill(theme::ACCENT),
                         )
                         .on_hover_text("Enter")
                         .clicked()
@@ -846,7 +846,7 @@ impl NlpApp {
                     "Drag the frame edges or corners on the image; drag inside to move it.",
                 )
                 .small()
-                .color(theme::muted()),
+                .color(theme::MUTED),
             );
         }
         ui.add_space(6.0);
@@ -869,7 +869,7 @@ impl NlpApp {
         let primary = !converted || stale;
         let btn = if primary {
             egui::Button::new(RichText::new(label).strong().color(Color32::WHITE))
-                .fill(theme::accent())
+                .fill(theme::ACCENT)
         } else {
             egui::Button::new(label)
         };
@@ -929,7 +929,7 @@ impl NlpApp {
             {
                 s.apply_mono_defaults();
             }
-            ui.label(RichText::new("Camera profile").color(theme::text()));
+            ui.label(RichText::new("Camera profile").color(theme::TEXT));
             match self
                 .editor
                 .src
@@ -937,7 +937,7 @@ impl NlpApp {
                 .map(|src| (src.is_raw, pipeline::camera_profile(src)))
             {
                 Some((_, Some(p))) => {
-                    ui.label(RichText::new(format!("{} · {}", p.name, p.camera)).color(theme::ok()))
+                    ui.label(RichText::new(format!("{} · {}", p.name, p.camera)).color(theme::OK))
                         .on_hover_text(p.path.display().to_string());
                 }
                 Some((true, None)) => {
@@ -945,14 +945,14 @@ impl NlpApp {
                         RichText::new(
                             "No Negative Lab profile for this camera — using the camera matrix",
                         )
-                        .color(theme::warn()),
+                        .color(theme::WARN),
                     );
                 }
                 Some((false, None)) => {
-                    ui.label(RichText::new("Not used for TIF / JPEG scans").color(theme::muted()));
+                    ui.label(RichText::new("Not used for TIF / JPEG scans").color(theme::MUTED));
                 }
                 None => {
-                    ui.label(RichText::new("…").color(theme::muted()));
+                    ui.label(RichText::new("…").color(theme::MUTED));
                 }
             }
             ui.add_space(4.0);
@@ -977,7 +977,7 @@ impl NlpApp {
                 {
                     self.editor.pick = if picking { None } else { Some(Pick::FilmBase) };
                 }
-                ui.label(RichText::new("Sample film border").color(theme::muted()));
+                ui.label(RichText::new("Sample film border").color(theme::MUTED));
             });
         }
         if widgets::fold(ui, "ANALYSIS") {
@@ -1012,7 +1012,7 @@ impl NlpApp {
             ui.label(
                 RichText::new(source_instructions(s.source))
                     .small()
-                    .color(theme::muted()),
+                    .color(theme::MUTED),
             );
         }
     }
@@ -1020,7 +1020,7 @@ impl NlpApp {
     fn edit_tab(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
         if !self.frames[i].sc.is_converted() {
             ui.add_space(10.0);
-            ui.label(RichText::new("This frame is not converted yet.").color(theme::warn()));
+            ui.label(RichText::new("This frame is not converted yet.").color(theme::WARN));
             self.convert_button(ui, i, s);
         }
         if widgets::fold(ui, "TONES") {
@@ -1239,7 +1239,7 @@ impl NlpApp {
                         "Plugin LUT folder not found — using approximations (see Advanced).",
                     )
                     .small()
-                    .color(theme::warn()),
+                    .color(theme::WARN),
                 );
             }
         }
@@ -1391,7 +1391,7 @@ impl NlpApp {
         }
         if widgets::fold(ui, "CURVES") {
             if self.editor.curves.is_empty() {
-                ui.label(RichText::new("Convert the frame to see its curves.").color(theme::muted()));
+                ui.label(RichText::new("Convert the frame to see its curves.").color(theme::MUTED));
             } else {
                 widgets::curves_plot(ui, &self.editor.curves, vec2(ui.available_width(), 150.0));
             }
@@ -1408,7 +1408,7 @@ impl NlpApp {
                     .spacing([18.0, 2.0])
                     .show(ui, |ui| {
                         for h in ["", "White", "Black", "Mean"] {
-                            ui.label(RichText::new(h).small().color(theme::muted()));
+                            ui.label(RichText::new(h).small().color(theme::MUTED));
                         }
                         ui.end_row();
                         for (c, n) in ["R", "G", "B"].iter().enumerate() {
@@ -1438,7 +1438,7 @@ impl NlpApp {
         let r = egui::Modal::new(egui::Id::new("export_modal")).show(ctx, |ui| {
             ui.set_width(380.0);
             ui.heading("Export positive copy");
-            ui.label(RichText::new(&self.frames[i].name).color(theme::muted()));
+            ui.label(RichText::new(&self.frames[i].name).color(theme::MUTED));
             ui.add_space(6.0);
             export_settings_ui(ui, &mut ex);
             ui.add_space(8.0);
@@ -1449,7 +1449,7 @@ impl NlpApp {
                 if ui
                     .add(
                         egui::Button::new(RichText::new("Export").color(Color32::WHITE))
-                            .fill(theme::accent()),
+                            .fill(theme::ACCENT),
                     )
                     .clicked()
                 {
@@ -1816,7 +1816,7 @@ impl NlpApp {
             p.line_segment([o, n], Stroke::new(1.2, Color32::WHITE));
         }
         let ka = (c.angle / 45.0) * span;
-        p.circle(pt(ka), 6.0, theme::accent(), Stroke::new(1.5, Color32::WHITE));
+        p.circle(pt(ka), 6.0, theme::ACCENT, Stroke::new(1.5, Color32::WHITE));
         p.text(
             dial_c + vec2(0.0, 14.0),
             egui::Align2::CENTER_TOP,
