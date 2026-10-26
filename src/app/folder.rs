@@ -51,7 +51,7 @@ impl NlpApp {
                 let avail = ui.max_rect();
                 let zone_w = (avail.width() - 64.0).clamp(280.0, 560.0);
                 let zone_h = (avail.height() * 0.36).clamp(180.0, 280.0);
-                let content_h = 64.0 + 28.0 + zone_h + 24.0 + 30.0 + 44.0;
+                let content_h = 64.0 + 28.0 + zone_h + 18.0 + 44.0;
                 ui.add_space(((avail.height() - content_h) * 0.45).max(24.0));
                 ui.vertical_centered(|ui| {
                     ui.label(
@@ -117,26 +117,7 @@ impl NlpApp {
                         self.choose_anything();
                     }
 
-                    ui.add_space(24.0);
-                    let bw = 132.0;
-                    let row = egui::Rect::from_center_size(
-                        pos2(avail.center().x, ui.cursor().top() + 15.0),
-                        vec2(bw * 2.0 + 8.0, 30.0),
-                    );
-                    ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .max_rect(row)
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        |ui| {
-                            if ui.add_sized([bw, 30.0], widgets::ghost("Open folder…")).clicked() {
-                                self.choose_folder();
-                            }
-                            if ui.add_sized([bw, 30.0], widgets::ghost("Open images…")).clicked() {
-                                self.choose_files();
-                            }
-                        },
-                    );
-                    ui.add_space(14.0);
+                    ui.add_space(18.0);
                     if let Some(dir) = last {
                         let name = dir
                             .file_name()
