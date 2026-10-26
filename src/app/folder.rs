@@ -40,11 +40,7 @@ impl NlpApp {
     /// Start screen shown before anything is opened.
     fn welcome_ui(&mut self, ui: &mut egui::Ui) {
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
-        let last = self
-            .defaults
-            .last_folder
-            .clone()
-            .filter(|p| p.is_dir());
+        let last = self.defaults.last_folder.clone().filter(|p| p.is_dir());
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG))
             .show(ui, |ui| {
@@ -62,8 +58,7 @@ impl NlpApp {
                     ui.label(RichText::new("Film negative conversion").color(theme::MUTED));
                     ui.add_space(28.0);
 
-                    let (zone, resp) =
-                        ui.allocate_exact_size(vec2(zone_w, zone_h), Sense::click());
+                    let (zone, resp) = ui.allocate_exact_size(vec2(zone_w, zone_h), Sense::click());
                     let p = ui.painter();
                     let (fill, stroke, fg) = if hovering {
                         (
@@ -200,14 +195,14 @@ impl NlpApp {
                                     )
                                     .clicked()
                             {
-                                self.convert(self.sel_vec(), true);
+                                self.open_convert_dialog(self.sel_vec(), true);
                             }
                             if ui
                                 .add(widgets::ghost("Convert"))
                                 .on_hover_text("Analyse each selected frame on its own")
                                 .clicked()
                             {
-                                self.convert(self.sel_vec(), false);
+                                self.open_convert_dialog(self.sel_vec(), false);
                             }
                         }
                         if n == 0 {
@@ -235,8 +230,7 @@ impl NlpApp {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let conv = self.frames.iter().filter(|f| f.sc.is_converted()).count();
-                    let mut status =
-                        format!("{} frames · {} converted", self.frames.len(), conv);
+                    let mut status = format!("{} frames · {} converted", self.frames.len(), conv);
                     if !self.selected.is_empty() {
                         status += &format!(" · {} selected", self.selected.len());
                     }
@@ -333,9 +327,7 @@ impl NlpApp {
             return;
         };
         for i in self.sel_vec() {
-            let was_roll = self.frames[i].is_roll();
             self.frames[i].sc.settings.copy_edit_from(&c);
-            self.frames[i].sc.settings.use_roll = was_roll;
             if c.wb_mode != WbMode::Custom {
                 self.frames[i].apply_wb_mode();
             }
@@ -413,8 +405,8 @@ impl NlpApp {
                             }
                             _ => {
                                 // Loading shimmer.
-                                let a = (((now * 2.4 + i as f64 * 0.35).sin() * 0.5 + 0.5)
-                                    * 10.0) as u8
+                                let a = (((now * 2.4 + i as f64 * 0.35).sin() * 0.5 + 0.5) * 10.0)
+                                    as u8
                                     + 6;
                                 p.rect_filled(img_area, 3.0, Color32::from_white_alpha(a));
                                 ui.ctx().request_repaint();
@@ -434,7 +426,11 @@ impl NlpApp {
                         let mut x = rect.right() - 8.0;
                         if f.exporting {
                             let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
-                            p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::WARN.gamma_multiply(a));
+                            p.circle_filled(
+                                pos2(x - 3.0, row_y),
+                                3.0,
+                                theme::WARN.gamma_multiply(a),
+                            );
                             x -= 12.0;
                             ui.ctx().request_repaint();
                         }
@@ -471,11 +467,7 @@ impl NlpApp {
                             (x - name_x - 4.0).max(10.0),
                         );
                         let g = p.layout_job(job);
-                        p.galley(
-                            pos2(name_x, row_y - g.size().y / 2.0),
-                            g,
-                            theme::MUTED,
-                        );
+                        p.galley(pos2(name_x, row_y - g.size().y / 2.0), g, theme::MUTED);
 
                         if resp.double_clicked() {
                             double = Some(i);
@@ -485,9 +477,8 @@ impl NlpApp {
                         let has_clip = self.clipboard.is_some();
                         resp.context_menu(|ui| {
                             let mut item = |ui: &mut egui::Ui, text: &str, key: &str, a, on| {
-                                let b = egui::Button::new(text).shortcut_text(
-                                    RichText::new(key).color(theme::FAINT),
-                                );
+                                let b = egui::Button::new(text)
+                                    .shortcut_text(RichText::new(key).color(theme::FAINT));
                                 if ui.add_enabled(on, b).clicked() {
                                     ctx_action = Some((i, a));
                                     ui.close();
@@ -540,8 +531,8 @@ impl NlpApp {
             self.active = Some(i);
             match act {
                 CellAction::Open => self.open_editor(i),
-                CellAction::Convert => self.convert(self.sel_vec(), false),
-                CellAction::ConvertRoll => self.convert(self.sel_vec(), true),
+                CellAction::Convert => self.open_convert_dialog(self.sel_vec(), false),
+                CellAction::ConvertRoll => self.open_convert_dialog(self.sel_vec(), true),
                 CellAction::Export => self.open_export_dialog(self.sel_vec()),
                 CellAction::Copy => self.copy_settings(),
                 CellAction::Paste => self.paste_settings(),
@@ -590,6 +581,158 @@ pub fn lut_folder_ui(app: &mut NlpApp, ui: &mut egui::Ui) {
                 Ok(Err(e)) => app.toast(format!("{e:#}"), true),
                 Err(_) => {}
             }
+        }
+    }
+}
+
+/// State of the Convert dialog shown before a folder-view conversion.
+pub struct ConvertDialog {
+    pub targets: Vec<usize>,
+    pub as_roll: bool,
+    /// Conversion options, seeded from the first selected frame.
+    pub settings: Settings,
+}
+
+impl NlpApp {
+    pub fn open_convert_dialog(&mut self, targets: Vec<usize>, as_roll: bool) {
+        let Some(&first) = targets.first() else {
+            return;
+        };
+        let settings = self
+            .frames
+            .get(first)
+            .map_or_else(|| self.defaults.settings.clone(), |f| f.sc.settings.clone());
+        self.convert_dialog = Some(ConvertDialog {
+            as_roll: as_roll && targets.len() > 1,
+            targets,
+            settings,
+        });
+    }
+
+    pub fn convert_dialog_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut d) = self.convert_dialog.take() else {
+            return;
+        };
+        let (mut go, mut cancel) = (false, false);
+        let count = d.targets.len();
+        let frame = egui::Frame::new()
+            .fill(theme::PANEL)
+            .stroke(egui::Stroke::new(1.0, theme::LINE))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::same(22))
+            .shadow(ctx.global_style().visuals.window_shadow);
+        let r = egui::Modal::new(egui::Id::new("convert_modal"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                let title = match (d.as_roll, count) {
+                    (true, n) => format!("Convert {n} frames as a roll"),
+                    (false, 1) => "Convert 1 frame".to_string(),
+                    (false, n) => format!("Convert {n} frames"),
+                };
+                ui.label(RichText::new(title).font(theme::medium(16.0)).color(theme::TEXT));
+                ui.add_space(16.0);
+                let s = &mut d.settings;
+                widgets::fl_combo(ui, "Image type", &mut s.image_type, ImageType::ALL, ImageType::label, "");
+                if widgets::fl_combo(ui, "Scan source", &mut s.source, Source::ALL, Source::label, "") {
+                    s.film_base = match s.source {
+                        Source::TifScan | Source::LinearScan => FilmBase::Off,
+                        _ => FilmBase::Auto,
+                    };
+                }
+                ui.add(
+                    egui::Label::new(RichText::new(source_instructions(s.source)).small().color(theme::FAINT))
+                        .wrap(),
+                );
+                ui.add_space(6.0);
+                widgets::fl_combo(
+                    ui,
+                    "Colour model",
+                    &mut s.color_model,
+                    ColorModel::ALL,
+                    ColorModel::label,
+                    "Basic: neutral · Frontier: teal-blues, golden yellows, warm skin · Noritsu: cleaner and cooler · B+W: monochrome · None: no calibration",
+                );
+                widgets::fl_combo(
+                    ui,
+                    "Film base",
+                    &mut s.film_base,
+                    FilmBase::ALL,
+                    FilmBase::label,
+                    "Neutralises the orange mask before analysis. Sampled uses each frame's own border sample.",
+                );
+                widgets::fl_slider_u8(
+                    ui,
+                    "Pre-saturation",
+                    &mut s.pre_saturation,
+                    1..=5,
+                    3,
+                    "1–2: fewer distinct hues, warmer · 4–5: more separation, cooler",
+                );
+                widgets::fl_slider(
+                    ui,
+                    "Border buffer",
+                    &mut s.border_buffer,
+                    0.0..=25.0,
+                    5.0,
+                    0,
+                    "Percent of the frame edge ignored by the analysis",
+                    None,
+                );
+                widgets::fl_combo(ui, "White balance", &mut s.wb_mode, WbMode::ALL, WbMode::label, "");
+                if count > 1 {
+                    ui.add_space(6.0);
+                    ui.checkbox(&mut d.as_roll, "Convert as roll")
+                        .on_hover_text("Analyse the selection together for one consistent roll balance");
+                    if d.as_roll {
+                        widgets::fl_combo(
+                            ui,
+                            "Roll process",
+                            &mut d.settings.roll_mode,
+                            RollMode::ALL,
+                            RollMode::label,
+                            "Pro Lab: fits the roll balance to each frame · Basic Lab: closer to a lab scanner's first pass · Darkroom Paper: the roll's values unchanged",
+                        );
+                    }
+                }
+                ui.add_space(22.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(widgets::primary("Convert").min_size(vec2(96.0, 30.0))).clicked()
+                        || (!ui.ctx().egui_wants_keyboard_input()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    {
+                        go = true;
+                    }
+                    if ui.add(widgets::ghost("Cancel").min_size(vec2(80.0, 30.0))).clicked()
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+        if go {
+            let o = &d.settings;
+            for &i in &d.targets {
+                let s = &mut self.frames[i].sc.settings;
+                let (was_type, was_model) = (s.image_type, s.color_model);
+                (s.image_type, s.source, s.color_model, s.film_base) =
+                    (o.image_type, o.source, o.color_model, o.film_base);
+                (s.pre_saturation, s.border_buffer, s.wb_mode, s.roll_mode) =
+                    (o.pre_saturation, o.border_buffer, o.wb_mode, o.roll_mode);
+                if s.image_type != was_type && s.image_type != ImageType::Negative {
+                    s.apply_positive_defaults();
+                    s.wb_mode = o.wb_mode;
+                }
+                if s.color_model != was_model && s.is_monochrome() {
+                    s.apply_mono_defaults();
+                    s.wb_mode = o.wb_mode;
+                }
+                self.mark_changed(i);
+            }
+            self.convert(d.targets, d.as_roll);
+        } else if !(cancel || r.should_close()) {
+            self.convert_dialog = Some(d);
         }
     }
 }

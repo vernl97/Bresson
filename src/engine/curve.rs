@@ -153,6 +153,14 @@ fn make_nodes(n: usize) -> Nodes {
 
 // ---- clipping ---------------------------------------------------------------------
 
+/// Extra clipping from Basic Lab roll processing (`rollWhiteClip`,
+/// `rollBlackClip` in NLPRolls), in 8-bit origin units; zero otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RollClip {
+    pub white: f64,
+    pub black: f64,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Clip {
     start: [f64; 3],
@@ -197,13 +205,19 @@ fn adjust_origins(o: &Origins, s: &Settings, a: f64, b: f64) -> ([f64; 3], [f64;
 }
 
 /// Colour-protected clipping (L32_1).
-fn color_protected_clip(o: &Origins, s: &Settings) -> Clip {
+fn color_protected_clip(o: &Origins, s: &Settings, rc: RollClip) -> Clip {
     let p = tone_profile_v3(s.tone_profile);
     let (wc, bc) = (s.white_clip as f64, s.black_clip as f64);
     let (a, b) = if is_positive(s) {
-        (bc + p.default_soft_low, wc + p.default_soft_high)
+        (
+            bc + p.default_soft_low + rc.black,
+            wc + p.default_soft_high + rc.white,
+        )
     } else {
-        (wc + p.default_soft_high, bc + p.default_soft_low)
+        (
+            wc + p.default_soft_high + rc.white,
+            bc + p.default_soft_low + rc.black,
+        )
     };
     let (mut start, mut end) = adjust_origins(o, s, a, b);
     let mut start_over = [0.0; 3];
@@ -233,7 +247,7 @@ fn color_protected_clip(o: &Origins, s: &Settings) -> Clip {
 }
 
 /// Linear clipping (L33_1).
-fn linear_clip(o: &Origins, s: &Settings) -> Clip {
+fn linear_clip(o: &Origins, s: &Settings, rc: RollClip) -> Clip {
     let p = tone_profile(s.tone_profile);
     let (wc, bc) = (s.white_clip as f64, s.black_clip as f64);
     let mut start = [0.0; 3];
@@ -246,6 +260,11 @@ fn linear_clip(o: &Origins, s: &Settings) -> Clip {
             start[c] = o[c].white + wc + p.default_soft_high;
             end[c] = o[c].black - bc - p.default_soft_low;
         }
+    }
+    // With roll clip offsets, L33_1 recomputes start/end from the roll
+    // amounts alone (via L31_1), dropping WhiteClip/BlackClip and the soft defaults.
+    if rc.white != 0.0 || rc.black != 0.0 {
+        (start, end) = adjust_origins(o, s, rc.white, rc.black);
     }
     let mut start_over = [0.0; 3];
     let mut end_over = [0.0; 3];
@@ -270,20 +289,20 @@ fn linear_clip(o: &Origins, s: &Settings) -> Clip {
 
 /// Clipping as used by `updateToneCurve` (curve offsets and node count): the
 /// clip method only, regardless of monochrome.
-fn clip_for_curve(o: &Origins, s: &Settings) -> Clip {
+fn clip_for_curve(o: &Origins, s: &Settings, rc: RollClip) -> Clip {
     if s.clip_method == ClipMethod::ColorProtected {
-        color_protected_clip(o, s)
+        color_protected_clip(o, s, rc)
     } else {
-        linear_clip(o, s)
+        linear_clip(o, s, rc)
     }
 }
 
 /// Clipping as used by `getRGBNodesForXAxis`: colour-protected only for colour.
-fn clip(o: &Origins, s: &Settings) -> Clip {
+fn clip(o: &Origins, s: &Settings, rc: RollClip) -> Clip {
     if s.clip_method == ClipMethod::ColorProtected && !s.is_monochrome() {
-        color_protected_clip(o, s)
+        color_protected_clip(o, s, rc)
     } else {
-        linear_clip(o, s)
+        linear_clip(o, s, rc)
     }
 }
 
@@ -655,12 +674,19 @@ pub enum ToneCurves {
 }
 
 /// `updateToneCurve`: build the three channel curves for a frame.
+#[cfg(test)]
 pub fn update_tone_curve(o: &Origins, s: &Settings) -> ToneCurves {
+    update_tone_curve_roll(o, s, RollClip::default())
+}
+
+/// `updateToneCurve` with the roll clip offsets (`rollWhiteClip`,
+/// `rollBlackClip`) that Basic Lab roll processing passes in.
+pub fn update_tone_curve_roll(o: &Origins, s: &Settings, rc: RollClip) -> ToneCurves {
     let ev = engine_values(o, s);
-    let cl = clip_for_curve(o, s);
+    let cl = clip_for_curve(o, s, rc);
     let n = node_count(cl.width[0].min(cl.width[1]).min(cl.width[2]), s);
     let mut nodes = make_nodes(n);
-    let xs = x_nodes(&clip(o, s), s, &nodes);
+    let xs = x_nodes(&clip(o, s, rc), s, &nodes);
     let mids = [ev.cyan, ev.tint, ev.temp];
     let has_wb = s.wb_tint != 0.0 || s.wb_temp != 0.0;
 

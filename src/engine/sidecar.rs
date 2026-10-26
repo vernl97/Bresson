@@ -17,9 +17,13 @@ pub struct RollData {
     pub base: [f32; 3],
     pub frames: usize,
     pub excluded: Vec<String>,
-    /// Roll-wide auto WB (average of the frames used for the aggregate).
+    /// Roll-wide auto WB (from the frames' averaged zone colours).
     #[serde(default)]
     pub auto_wb: Option<AutoWb>,
+    /// Roll colour ratios `[green, blue]` for Pro/Basic Lab processing;
+    /// rolls from older versions lack them and render as Darkroom Paper.
+    #[serde(default)]
+    pub multipliers: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

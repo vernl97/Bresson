@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::engine::settings::{ExportFormat, ExportSettings, Lut, ToneProfile, WbMode};
+use crate::engine::settings::{
+    ExportFormat, ExportSettings, FilmBase, Lut, RollMode, ToneProfile, WbMode,
+};
 use crate::engine::sidecar::{self, RollData, Sidecar};
 use crate::engine::{decode, export, pipeline};
 
@@ -17,6 +19,7 @@ USAGE:
 
 CONVERT OPTIONS:
   --roll               Analyse all files as one roll
+  --roll-process NAME  Pro Lab (default) | Basic Lab | Darkroom Paper
   --tone NAME          Tone profile (e.g. \"LAB - Standard\", \"Cinematic - Rich\")
   --wb NAME            White balance (Auto-Neutral, Kodak, Fuji, ...)
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
@@ -76,6 +79,7 @@ fn convert(args: Vec<String>) -> Result<()> {
         };
         match a.as_str() {
             "--roll" => roll = true,
+            "--roll-process" => s.roll_mode = find(RollMode::ALL, RollMode::label, &val()?)?,
             "--tone" => s.tone_profile = find(ToneProfile::ALL, ToneProfile::label, &val()?)?,
             "--wb" => s.wb_mode = find(WbMode::ALL, WbMode::label, &val()?)?,
             "--lut" => s.lut = find(Lut::ALL, Lut::label, &val()?)?,
@@ -90,6 +94,8 @@ fn convert(args: Vec<String>) -> Result<()> {
     if files.is_empty() {
         bail!("no input files\n{HELP}");
     }
+    // `createRoll` only runs for more than one frame.
+    let roll = roll && files.len() > 1;
     // Analyse every frame on its proxy.
     let mut frames = Vec::new();
     for f in &files {
@@ -97,7 +103,7 @@ fn convert(args: Vec<String>) -> Result<()> {
         let base = pipeline::resolve_base(&src, &s, None);
         frames.push((f.clone(), src, base));
     }
-    let roll_base = roll.then(|| {
+    let roll_base = (roll && s.film_base == FilmBase::Auto).then(|| {
         let mut b = [0.0f32; 3];
         for c in 0..3 {
             let mut v: Vec<f32> = frames.iter().map(|f| f.2[c]).collect();
@@ -113,14 +119,14 @@ fn convert(args: Vec<String>) -> Result<()> {
         analyses.push(pipeline::analyze(&neg, &s, base));
     }
     let roll_data = roll.then(|| {
-        let (origins, excluded) =
-            pipeline::aggregate_roll(&analyses.iter().map(|a| a.origins).collect::<Vec<_>>());
+        let (agg, excluded) = pipeline::aggregate_roll(&analyses);
         RollData {
             id: format!("roll-{}", std::process::id()),
-            origins,
-            base: roll_base.unwrap(),
+            origins: agg.origins,
+            base: roll_base.unwrap_or_else(|| analyses[0].base),
             frames: files.len(),
-            auto_wb: None,
+            auto_wb: Some(agg.auto_wb),
+            multipliers: Some(agg.multipliers),
             excluded: excluded
                 .iter()
                 .map(|i| files[*i].display().to_string())
@@ -135,7 +141,11 @@ fn convert(args: Vec<String>) -> Result<()> {
     }
     for ((f, _, _), a) in frames.iter().zip(analyses) {
         let mut fs = s.clone();
-        if let Some((t, n)) = pipeline::wb_for_mode(fs.wb_mode, &a.auto_wb) {
+        let wb = roll_data
+            .as_ref()
+            .and_then(|r| r.auto_wb)
+            .unwrap_or(a.auto_wb);
+        if let Some((t, n)) = pipeline::wb_for_mode(fs.wb_mode, &wb) {
             fs.wb_temp = t;
             fs.wb_tint = n;
         }
@@ -148,7 +158,7 @@ fn convert(args: Vec<String>) -> Result<()> {
             f,
             &fs,
             Some(&a),
-            roll_data.as_ref().map(|r| &r.origins),
+            roll_data.as_ref(),
             &Default::default(),
             &exs,
         )?;

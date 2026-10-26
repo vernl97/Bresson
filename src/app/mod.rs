@@ -62,10 +62,6 @@ impl Frame {
         self.sc.roll.is_some() && self.sc.settings.use_roll
     }
 
-    pub fn roll_origins(&self) -> Option<&crate::engine::curve::Origins> {
-        self.sc.roll.as_ref().map(|r| &r.origins)
-    }
-
     /// Base colour the frame renders with.
     pub fn base_for(&self, src: &SourceImage) -> [f32; 3] {
         match &self.sc.analysis {
@@ -80,31 +76,33 @@ impl Frame {
 
     /// Apply the WB dropdown choice to Temp / Tint (`updateFilm`).
     pub fn apply_wb_mode(&mut self) {
-        let wb = if self.is_roll() {
+        if let Some((t, n)) = self.wb_values(&self.sc.settings) {
+            self.sc.settings.wb_temp = t;
+            self.sc.settings.wb_tint = n;
+        }
+    }
+
+    /// Temp / Tint that `s.wb_mode` gives this frame (roll WB when rendering
+    /// from the roll); `None` keeps the current values.
+    pub fn wb_values(&self, s: &Settings) -> Option<(f32, f32)> {
+        let wb = if self.sc.roll.is_some() && s.use_roll {
             self.sc.roll.as_ref().and_then(|r| r.auto_wb)
         } else {
             None
         };
-        let wb = wb.or_else(|| self.sc.analysis.as_ref().map(|a| a.auto_wb));
-        if let Some(w) = wb {
-            if let Some((t, n)) = pipeline::wb_for_mode(self.sc.settings.wb_mode, &w) {
-                self.sc.settings.wb_temp = t;
-                self.sc.settings.wb_tint = n;
-            }
-        } else if let Some((t, n)) =
-            pipeline::wb_for_mode(self.sc.settings.wb_mode, &Default::default())
-        {
-            if !matches!(
-                self.sc.settings.wb_mode,
-                WbMode::AutoNeutral
-                    | WbMode::AutoWarm
-                    | WbMode::AutoCool
-                    | WbMode::AutoAvg
-                    | WbMode::AutoMix
-            ) {
-                self.sc.settings.wb_temp = t;
-                self.sc.settings.wb_tint = n;
-            }
+        match wb.or_else(|| self.sc.analysis.as_ref().map(|a| a.auto_wb)) {
+            Some(w) => pipeline::wb_for_mode(s.wb_mode, &w),
+            // Unconverted: film presets apply, the auto modes wait for analysis.
+            None => pipeline::wb_for_mode(s.wb_mode, &Default::default()).filter(|_| {
+                !matches!(
+                    s.wb_mode,
+                    WbMode::AutoNeutral
+                        | WbMode::AutoWarm
+                        | WbMode::AutoCool
+                        | WbMode::AutoAvg
+                        | WbMode::AutoMix
+                )
+            }),
         }
     }
 }
@@ -134,6 +132,8 @@ pub struct NlpApp {
     /// Opened as a lone image: "back" returns to the welcome screen.
     pub single_mode: bool,
     pub export_targets: Option<Vec<usize>>,
+    /// Open "Convert" dialog: the conversion options before analysis runs.
+    pub convert_dialog: Option<folder::ConvertDialog>,
 }
 
 impl NlpApp {
@@ -158,6 +158,7 @@ impl NlpApp {
             time: 0.0,
             single_mode: false,
             export_targets: None,
+            convert_dialog: None,
         };
         if let Some(p) = open {
             if p.is_dir() {
@@ -415,7 +416,7 @@ impl NlpApp {
                 f.path.clone(),
                 f.sc.settings.clone(),
                 f.sc.analysis.clone(),
-                f.sc.roll.as_ref().map(|r| r.origins),
+                f.sc.roll.clone(),
                 f.sc.metadata.clone(),
                 ex.clone(),
             );
@@ -539,17 +540,11 @@ impl NlpApp {
                         .color(theme::MUTED),
                 );
                 let display_str = display_dir.to_string_lossy().to_string();
-                let field = egui::Button::new(
-                    egui::RichText::new(&display_str).color(theme::TEXT),
-                )
-                .truncate()
-                .right_text(egui::RichText::new("Change…").color(theme::ACCENT))
-                .min_size(egui::vec2(ui.available_width(), 30.0));
-                if ui
-                    .add(field)
-                    .on_hover_text(&display_str)
-                    .clicked()
-                {
+                let field = egui::Button::new(egui::RichText::new(&display_str).color(theme::TEXT))
+                    .truncate()
+                    .right_text(egui::RichText::new("Change…").color(theme::ACCENT))
+                    .min_size(egui::vec2(ui.available_width(), 30.0));
+                if ui.add(field).on_hover_text(&display_str).clicked() {
                     if let Some(picked) = picker::pick_folder(Some(&display_dir), Some("Choose")) {
                         picked_dir = Some(picked);
                     }
@@ -736,9 +731,8 @@ impl NlpApp {
             let s = &f.sc.settings;
             let base = f.base_for(src);
             let neg = pipeline::prepare_negative(src, s, base);
-            let roll = f.sc.roll.as_ref().map(|r| r.origins);
-            let origins = pipeline::origins_for(s, f.sc.analysis.as_ref(), roll.as_ref());
-            let r = Renderer::new(s, origins, OutputSpace::Srgb);
+            let origins = pipeline::origins_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref());
+            let r = Renderer::new(s, origins.as_ref(), OutputSpace::Srgb);
             let px = r.render(&neg, 0.0);
             let img = to_color_image(&px, neg.width, neg.height);
             match &mut f.thumb {
@@ -876,6 +870,7 @@ impl eframe::App for NlpApp {
         }
         self.toasts_ui(&ctx);
         self.export_dialog(&ctx);
+        self.convert_dialog_ui(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_all();
         }
@@ -912,7 +907,11 @@ mod tests {
             sc: Sidecar {
                 settings: Settings::default(),
                 analysis: Some(Analysis {
-                    origins: [ChannelOrigin { white: 10.0, black: 240.0, mean: 0.5 }; 3],
+                    origins: [ChannelOrigin {
+                        white: 10.0,
+                        black: 240.0,
+                        mean: 0.5,
+                    }; 3],
                     auto_wb: AutoWb::default(),
                     base: [0.85, 0.60, 0.40],
                     key: Settings::default().analysis_key(),
@@ -1053,15 +1052,10 @@ mod ui_tests {
                 .map(|s| s.size().x)
                 .unwrap_or(-1.0)
         };
-        // Editor sidebar, every tab and colour sub-tab.
+        // Editor sidebar.
         h.state_mut().open_editor(0);
         settle(&mut h, 60.0);
-        for tab in [
-            editor::Tab::Convert,
-            editor::Tab::Edit,
-            editor::Tab::Advanced,
-        ] {
-            h.state_mut().editor.set_tab(tab);
+        {
             h.run_steps(3);
             let w0 = width(&h, "editor_sidebar");
             for k in 0..60 {
@@ -1075,6 +1069,20 @@ mod ui_tests {
                 "editor sidebar grew from {w0} to {w1}"
             );
         }
+        // Expanding the Conversion section of a converted frame.
+        h.state_mut().convert(vec![0], false);
+        settle(&mut h, 60.0);
+        let w0 = width(&h, "editor_sidebar");
+        let header = egui::pos2(1190.0, 204.0);
+        h.hover_at(header);
+        h.step();
+        h.drag_at(header);
+        h.step();
+        h.drop_at(header);
+        h.run_steps(5);
+        let w1 = width(&h, "editor_sidebar");
+        eprintln!("conversion expanded {w0} -> {w1}");
+        assert!(w1 <= w0 + 0.5, "editor sidebar grew from {w0} to {w1}");
     }
 
     #[test]
@@ -1231,6 +1239,7 @@ mod ui_tests {
             time: 0.0,
             single_mode: false,
             export_targets: None,
+            convert_dialog: None,
         };
 
         // Empty targets is a no-op
@@ -1242,6 +1251,41 @@ mod ui_tests {
         app.open_export_dialog(vec![0, 2]);
         assert_eq!(app.export_targets, Some(vec![0, 2]));
         assert!(app.editor.export_open);
+    }
+
+    #[test]
+    fn convert_buttons_open_the_options_dialog() {
+        let mut app = NlpApp {
+            view: View::Folder,
+            folder: None,
+            frames: Vec::new(),
+            selected: BTreeSet::new(),
+            anchor: None,
+            active: None,
+            jobs: Jobs::new(egui::Context::default()),
+            defaults: Default::default(),
+            clipboard: None,
+            editor: editor::Editor::default(),
+            toasts: Vec::new(),
+            export_total: 0,
+            export_done: 0,
+            thumb_size: 180.0,
+            time: 0.0,
+            single_mode: false,
+            export_targets: None,
+            convert_dialog: None,
+        };
+        app.open_convert_dialog(vec![], true);
+        assert!(app.convert_dialog.is_none());
+        app.open_convert_dialog(vec![0], true);
+        assert!(
+            !app.convert_dialog.as_ref().unwrap().as_roll,
+            "one frame is never a roll"
+        );
+        app.open_convert_dialog(vec![0, 1], true);
+        let d = app.convert_dialog.as_ref().unwrap();
+        assert!(d.as_roll);
+        assert_eq!(d.targets, vec![0, 1]);
     }
 
     #[test]
@@ -1258,7 +1302,8 @@ mod ui_tests {
             "suffix": "-positive",
             "long_edge": 0
         }"#;
-        let ex: ExportSettings = serde_json::from_str(json).expect("deserialize legacy export settings");
+        let ex: ExportSettings =
+            serde_json::from_str(json).expect("deserialize legacy export settings");
         assert_eq!(ex.output_dir, None);
 
         // Modern JSON with output_dir
@@ -1274,8 +1319,12 @@ mod ui_tests {
             "long_edge": 0,
             "output_dir": "/Users/abe/Pictures/Export"
         }"#;
-        let ex_modern: ExportSettings = serde_json::from_str(modern_json).expect("deserialize modern export settings");
-        assert_eq!(ex_modern.output_dir, Some(PathBuf::from("/Users/abe/Pictures/Export")));
+        let ex_modern: ExportSettings =
+            serde_json::from_str(modern_json).expect("deserialize modern export settings");
+        assert_eq!(
+            ex_modern.output_dir,
+            Some(PathBuf::from("/Users/abe/Pictures/Export"))
+        );
     }
 
     #[test]
@@ -1298,6 +1347,7 @@ mod ui_tests {
             time: 0.0,
             single_mode: false,
             export_targets: None,
+            convert_dialog: None,
         };
 
         let tmp = std::env::temp_dir().join("test_picker_single.tif");
@@ -1307,7 +1357,11 @@ mod ui_tests {
         if tmp.exists() {
             app.open_files(vec![tmp.clone()]);
             assert!(app.single_mode, "single image should set single_mode");
-            assert_eq!(app.view, View::Editor, "single image should immediately open editor");
+            assert_eq!(
+                app.view,
+                View::Editor,
+                "single image should immediately open editor"
+            );
             assert_eq!(app.frames.len(), 1);
             let _ = std::fs::remove_file(tmp);
         }

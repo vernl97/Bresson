@@ -18,13 +18,6 @@ use crate::engine::pipeline::{self, Negative, Renderer};
 use crate::engine::settings::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
-    Convert,
-    Edit,
-    Advanced,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ColorTab {
     Mids,
     Highs,
@@ -94,7 +87,6 @@ pub struct Editor {
     tex: Option<egui::TextureHandle>,
     dirty: bool,
     pub before: bool,
-    tab: Tab,
     color_tab: ColorTab,
     pick: Option<Pick>,
     undo: Vec<Settings>,
@@ -108,18 +100,11 @@ pub struct Editor {
     pan: egui::Vec2,
     crop: Option<CropEdit>,
     pub export_open: bool,
-    /// Conversion state seen last frame (to switch to Edit after converting).
-    was_converted: Option<bool>,
     zoom_req: Option<ZoomReq>,
     zoom_anim: Option<ZoomAnim>,
 }
 
 impl Editor {
-    #[cfg(test)]
-    pub fn set_tab(&mut self, t: Tab) {
-        self.tab = t;
-    }
-
     /// Test hook: adjust the pending crop.
     #[cfg(test)]
     pub fn set_pending_crop(&mut self, insets: [f32; 4], angle: f32) {
@@ -143,7 +128,6 @@ impl Default for Editor {
             tex: None,
             dirty: true,
             before: false,
-            tab: Tab::Edit,
             color_tab: ColorTab::Mids,
             pick: None,
             undo: Vec::new(),
@@ -156,7 +140,6 @@ impl Default for Editor {
             pan: egui::Vec2::ZERO,
             crop: None,
             export_open: false,
-            was_converted: None,
             zoom_req: None,
             zoom_anim: None,
         }
@@ -176,14 +159,14 @@ impl Editor {
     }
 
     pub fn load(&mut self, path: &Path, settings: Settings) {
-        let keep = (self.tab, self.color_tab);
+        let keep = self.color_tab;
         *self = Editor {
             path: Some(path.to_path_buf()),
             loading: true,
             committed: Some(settings),
             ..Default::default()
         };
-        (self.tab, self.color_tab) = keep;
+        self.color_tab = keep;
     }
 
     /// Force the negative to be re-prepared and the preview re-rendered.
@@ -290,14 +273,18 @@ impl NlpApp {
         }
     }
 
+    /// Previous / next frame, wrapping around, through every frame in the
+    /// folder (converted or not).
     fn goto(&mut self, i: usize, delta: isize) {
-        let j = i as isize + delta;
-        if (0..self.frames.len() as isize).contains(&j) {
-            self.save_frame(i);
-            self.selected.clear();
-            self.selected.insert(j as usize);
-            self.open_editor(j as usize);
+        let n = self.frames.len() as isize;
+        if n < 2 {
+            return;
         }
+        let j = (i as isize + delta.signum()).rem_euclid(n);
+        self.save_frame(i);
+        self.selected.clear();
+        self.selected.insert(j as usize);
+        self.open_editor(j as usize);
     }
 
     /// Settings the preview renders with (crop mode shows the uncropped,
@@ -353,14 +340,13 @@ impl NlpApp {
         } else {
             self.editor.neg.as_ref().unwrap()
         };
-        let roll = f.sc.roll.as_ref().map(|r| r.origins);
         let origins = if self.editor.before {
             None
         } else {
-            pipeline::origins_for(&s, f.sc.analysis.as_ref(), roll.as_ref())
+            pipeline::origins_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
         };
         let mp = (src.info.full_width * src.info.full_height) as f32 / 1e6;
-        let r = Renderer::new(&s, origins, OutputSpace::Srgb).with_megapixels(mp);
+        let r = Renderer::new(&s, origins.as_ref(), OutputSpace::Srgb).with_megapixels(mp);
         let full_long = src.info.full_width.max(src.info.full_height).max(1) as f32;
         let crop_frac = 1.0 - (s.crop[0] + s.crop[2]).max(s.crop[1] + s.crop[3]) / 100.0;
         let scale = neg.width.max(neg.height) as f32 / (full_long * crop_frac.max(0.1));
@@ -639,11 +625,11 @@ impl NlpApp {
             }
             if n > 1 {
                 ui.add_space(8.0);
-                if icon_button(ui, Icon::Prev, "Previous image (←)", false, i > 0).clicked() {
+                if icon_button(ui, Icon::Prev, "Previous image (←)", false, true).clicked() {
                     self.goto(i, -1);
                     return;
                 }
-                if icon_button(ui, Icon::Next, "Next image (→)", false, i + 1 < n).clicked() {
+                if icon_button(ui, Icon::Next, "Next image (→)", false, true).clicked() {
                     self.goto(i, 1);
                     return;
                 }
@@ -740,54 +726,21 @@ impl NlpApp {
         if self.editor.crop.is_some() {
             self.crop_panel(ui, i);
         }
-        widgets::histogram(
-            ui,
-            &self.editor.hist,
-            vec2(ui.available_width(), 72.0),
-        );
-        ui.add_space(10.0);
-        // Unconverted frames: only the Convert tab is available. Once the
-        // conversion arrives, unlock and move on to Edit.
+        widgets::histogram(ui, &self.editor.hist, vec2(ui.available_width(), 72.0));
+        ui.add_space(4.0);
         let converted = self.frames[i].sc.is_converted();
-        match (self.editor.was_converted, converted) {
-            (_, false) => self.editor.tab = Tab::Convert,
-            (Some(false), true) => self.editor.tab = Tab::Edit,
-            _ => {}
-        }
-        self.editor.was_converted = Some(converted);
-        let locked: &[Tab] = if converted {
-            &[]
-        } else {
-            &[Tab::Edit, Tab::Advanced]
-        };
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let w = ui.available_width() - 36.0;
-            ui.allocate_ui(vec2(w, 28.0), |ui| {
-                widgets::segmented_locked(
-                    ui,
-                    &mut self.editor.tab,
-                    &[
-                        (Tab::Convert, "Convert"),
-                        (Tab::Edit, "Edit"),
-                        (Tab::Advanced, "Advanced"),
-                    ],
-                    locked,
-                    "Convert the negative first",
-                );
-            });
-            let more = icon_button(ui, Icon::More, "Defaults", false, true);
-            egui::Popup::menu(&more).show(|ui| self.defaults_menu(ui, s));
-        });
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_width(ui.available_width() - 6.0);
-                match self.editor.tab {
-                    Tab::Convert => self.convert_tab(ui, i, s),
-                    Tab::Edit => self.edit_tab(ui, i, s),
-                    Tab::Advanced => self.advanced_tab(ui, i, s),
+                self.conversion_header(ui, i, s);
+                if converted {
+                    self.conversion_summary(ui, s);
+                    self.adjust_sections(ui, s);
+                } else {
+                    self.conversion_settings(ui, s);
                 }
+                self.engine_section(ui, i, s);
                 ui.add_space(16.0);
             });
     }
@@ -824,10 +777,18 @@ impl NlpApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(widgets::primary("Done")).on_hover_text("Enter").clicked() {
+                if ui
+                    .add(widgets::primary("Done"))
+                    .on_hover_text("Enter")
+                    .clicked()
+                {
                     self.apply_crop(i);
                 }
-                if ui.add(widgets::ghost("Cancel")).on_hover_text("Esc").clicked() {
+                if ui
+                    .add(widgets::ghost("Cancel"))
+                    .on_hover_text("Esc")
+                    .clicked()
+                {
                     self.cancel_crop();
                 }
             });
@@ -877,9 +838,15 @@ impl NlpApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let w = ui.available_width() - 36.0;
-            ui.allocate_ui(vec2(w, 30.0), |ui| {
-                fl_combo(ui, "", v, all, name, "");
-            });
+            // Top-down, so the combo's trailing space isn't added sideways
+            // (that overflowed the row and widened the panel every frame).
+            ui.allocate_ui_with_layout(
+                vec2(w, 30.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    fl_combo(ui, "", v, all, name, "");
+                },
+            );
             let picking = self.editor.pick == Some(pick);
             if icon_button(ui, Icon::Eyedropper, tip, picking, enabled).clicked() {
                 self.editor.pick = if picking { None } else { Some(pick) };
@@ -887,8 +854,52 @@ impl NlpApp {
         });
     }
 
-    fn convert_tab(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
-        if widgets::fold(ui, "Process") {
+    /// Convert / Re-convert with the ⋯ menu beside it.
+    fn conversion_header(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let w = ui.available_width() - 36.0;
+            ui.allocate_ui(vec2(w, 28.0), |ui| self.convert_button(ui, i, s));
+            let more = icon_button(ui, Icon::More, "Defaults and more", false, true);
+            egui::Popup::menu(&more).show(|ui| self.defaults_menu(ui, i, s));
+        });
+    }
+
+    /// Converted frames: a one-line recap of the conversion inputs, which
+    /// expands into the full settings.
+    fn conversion_summary(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
+        let open = widgets::fold_with(ui, "Conversion", false);
+        if open {
+            self.conversion_settings(ui, s);
+        } else {
+            let profile = match self.editor.src.as_ref().map(|src| src.is_raw) {
+                Some(true) => match self
+                    .editor
+                    .src
+                    .as_ref()
+                    .and_then(|src| pipeline::camera_profile(src))
+                {
+                    Some(_) => " · profile ✓",
+                    None => " · camera matrix",
+                },
+                _ => "",
+            };
+            ui.label(
+                RichText::new(format!(
+                    "{} · {} · base {}{profile}",
+                    s.source.label(),
+                    s.color_model.label(),
+                    s.film_base.label().to_lowercase(),
+                ))
+                .small()
+                .color(theme::FAINT),
+            );
+        }
+    }
+
+    /// The inputs the analysis depends on (everything in `AnalysisKey`).
+    fn conversion_settings(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
+        {
             if fl_combo(
                 ui,
                 "",
@@ -948,9 +959,8 @@ impl NlpApp {
                 .map(|src| (src.is_raw, pipeline::camera_profile(src)))
             {
                 Some((_, Some(p))) => {
-                    widgets::status_line(ui, Icon::Check, theme::OK, &p.name).on_hover_text(
-                        format!("{}\n{}", p.camera, p.path.display()),
-                    );
+                    widgets::status_line(ui, Icon::Check, theme::OK, &p.name)
+                        .on_hover_text(format!("{}\n{}", p.camera, p.path.display()));
                 }
                 Some((true, None)) => {
                     widgets::status_line(
@@ -984,7 +994,7 @@ impl NlpApp {
                 true,
             );
         }
-        if widgets::fold(ui, "Analysis") {
+        if widgets::fold_with(ui, "Analysis", false) {
             fl_slider_u8(
                 ui,
                 "Pre-saturation",
@@ -1004,34 +1014,10 @@ impl NlpApp {
                 None,
             );
         }
-        ui.add_space(14.0);
-        self.convert_button(ui, i, s);
-        if self.frames[i].sc.is_converted() {
-            ui.add_space(2.0);
-            ui.vertical_centered(|ui| {
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new("Unconvert").small().color(theme::MUTED))
-                            .frame(false),
-                    )
-                    .on_hover_text("Discard the analysis for this frame")
-                    .clicked()
-                {
-                    self.unconvert(&[i]);
-                }
-            });
-        }
     }
 
-    fn edit_tab(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
-        let converted = self.frames[i].sc.is_converted();
-        if !converted {
-            ui.add_space(10.0);
-            widgets::status_line(ui, Icon::Warn, theme::WARN, "This frame is not converted yet.");
-            ui.add_space(6.0);
-            self.convert_button(ui, i, s);
-        }
-        if widgets::fold(ui, "Tones") {
+    fn adjust_sections(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
+        if widgets::fold(ui, "Tone") {
             fl_combo(
                 ui,
                 "",
@@ -1070,35 +1056,35 @@ impl NlpApp {
                 &mut s.blacks,
                 "Black point: up = matte, down = deeper",
             );
-            tone(ui, "Lab glow", &mut s.glow, "Silky compressed highlights");
-            tone(ui, "Lab fade", &mut s.fade, "Open, compressed deep shadows");
-        }
-        if widgets::fold(ui, "Dynamic range") {
-            fl_slider(
-                ui,
-                "White clip",
-                &mut s.white_clip,
-                -50.0..=50.0,
-                0.0,
-                0,
-                "Negative values recover clipped highlights",
-                None,
-            );
-            fl_slider(
-                ui,
-                "Black clip",
-                &mut s.black_clip,
-                -50.0..=50.0,
-                0.0,
-                0,
-                "Negative values recover crushed shadows",
-                None,
-            );
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut s.soft_highlights, "Soft highs");
-                ui.add_space(16.0);
-                ui.checkbox(&mut s.soft_shadows, "Soft lows");
-            });
+            if widgets::fold_with(ui, "Glow, fade & clipping", false) {
+                tone(ui, "Lab glow", &mut s.glow, "Silky compressed highlights");
+                tone(ui, "Lab fade", &mut s.fade, "Open, compressed deep shadows");
+                fl_slider(
+                    ui,
+                    "White clip",
+                    &mut s.white_clip,
+                    -50.0..=50.0,
+                    0.0,
+                    0,
+                    "Negative values recover clipped highlights",
+                    None,
+                );
+                fl_slider(
+                    ui,
+                    "Black clip",
+                    &mut s.black_clip,
+                    -50.0..=50.0,
+                    0.0,
+                    0,
+                    "Negative values recover crushed shadows",
+                    None,
+                );
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut s.soft_highlights, "Soft highs");
+                    ui.add_space(16.0);
+                    ui.checkbox(&mut s.soft_shadows, "Soft lows");
+                });
+            }
         }
         if widgets::fold(ui, "White balance") {
             let wb_key = widgets::shortcut(ui.ctx(), egui::Modifiers::NONE, egui::Key::W);
@@ -1109,7 +1095,7 @@ impl NlpApp {
                 WbMode::label,
                 Pick::WhiteBalance,
                 &format!("Pick a neutral grey in the image ({wb_key})"),
-                converted,
+                true,
             );
             let mut t = s.wb_temp;
             if fl_slider(
@@ -1209,7 +1195,7 @@ impl NlpApp {
                 );
             }
         }
-        if widgets::fold(ui, "LUT") {
+        if widgets::fold(ui, "Look") {
             fl_combo(ui, "", &mut s.lut, Lut::ALL, Lut::label, "");
             fl_slider(
                 ui,
@@ -1234,11 +1220,9 @@ impl NlpApp {
                     ui,
                     Icon::Warn,
                     theme::WARN,
-                    "Plugin LUTs not found, so approximations are used (see Advanced).",
+                    "Plugin LUTs not found, so approximations are used (choose the folder in the ⋯ menu).",
                 );
             }
-        }
-        if widgets::fold(ui, "Sharpening") {
             fl_combo(
                 ui,
                 "",
@@ -1250,16 +1234,31 @@ impl NlpApp {
         }
     }
 
-    /// The ⋯ menu next to the tabs: default settings for new frames.
-    fn defaults_menu(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
+    /// Recompute Temp / Tint for `s`'s WB mode on this frame: stored values
+    /// only carry over for Custom WB, as when the plugin applies saved settings.
+    fn refresh_wb(&self, i: usize, s: &mut Settings) {
+        if s.wb_mode == WbMode::Custom {
+            return;
+        }
+        (s.wb_temp, s.wb_tint) = self.frames[i].wb_values(s).unwrap_or((0.0, 0.0));
+    }
+
+    /// The ⋯ menu next to Re-convert: defaults, unconvert and the LUT folder.
+    fn defaults_menu(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
         if ui
             .button("Save as default")
             .on_hover_text("New frames start with these settings")
             .clicked()
         {
+            // Like the plugin's saved defaults, leave out the frame's
+            // source, colour model, pre-saturation and border.
             let mut d = s.clone();
-            (d.crop, d.rotation, d.flip_h, d.straighten, d.use_roll) =
-                ([0.0; 4], 0, false, 0.0, false);
+            d.keep_frame_fields(&Settings {
+                image_type: d.image_type,
+                film_base: d.film_base,
+                film_base_sample: d.film_base_sample,
+                ..Settings::default()
+            });
             self.defaults.settings = d;
             let _ = crate::engine::sidecar::save_defaults(&self.defaults);
             self.toast("Saved as default settings", false);
@@ -1271,59 +1270,42 @@ impl NlpApp {
             .clicked()
         {
             let keep = s.clone();
-            s.copy_edit_from(&self.defaults.settings);
-            (
-                s.source,
-                s.image_type,
-                s.color_model,
-                s.pre_saturation,
-                s.border_buffer,
-                s.use_roll,
-            ) = (
-                keep.source,
-                keep.image_type,
-                keep.color_model,
-                keep.pre_saturation,
-                keep.border_buffer,
-                keep.use_roll,
-            );
+            *s = self.defaults.settings.clone();
+            s.keep_frame_fields(&keep);
+            self.refresh_wb(i, s);
             ui.close();
         }
         ui.separator();
         if ui.button("Reset edits").clicked() {
+            // `resetSettings`: the positive, B+W or colour defaults.
             let keep = s.clone();
             *s = Settings::default();
-            (
-                s.source,
-                s.image_type,
-                s.color_model,
-                s.pre_saturation,
-                s.border_buffer,
-                s.film_base,
-                s.film_base_sample,
-            ) = (
-                keep.source,
-                keep.image_type,
-                keep.color_model,
-                keep.pre_saturation,
-                keep.border_buffer,
-                keep.film_base,
-                keep.film_base_sample,
-            );
-            (s.rotation, s.flip_h, s.straighten, s.crop, s.use_roll) = (
-                keep.rotation,
-                keep.flip_h,
-                keep.straighten,
-                keep.crop,
-                keep.use_roll,
-            );
+            s.keep_frame_fields(&keep);
+            if s.image_type == ImageType::Positive {
+                s.apply_positive_defaults();
+            } else if s.is_monochrome() {
+                s.apply_mono_defaults();
+            }
             s.apply_engine_preset(keep.engine);
+            self.refresh_wb(i, s);
             ui.close();
         }
+        if self.frames[i].sc.is_converted()
+            && ui
+                .button("Unconvert")
+                .on_hover_text("Discard the analysis for this frame")
+                .clicked()
+        {
+            self.unconvert(&[i]);
+            ui.close();
+        }
+        ui.separator();
+        lut_folder_ui(self, ui);
     }
 
-    fn advanced_tab(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
-        if widgets::fold(ui, "Engine") {
+    /// Engine internals and the curve diagnostics, collapsed by default.
+    fn engine_section(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
+        if widgets::fold_with(ui, "Engine", false) {
             fl_combo(
                 ui,
                 "Engine preset",
@@ -1391,19 +1373,13 @@ impl NlpApp {
                 ClipMethod::label,
                 "",
             );
-        }
-        if widgets::fold(ui, "Curves") {
-            if self.editor.curves.is_empty() {
-                ui.label(RichText::new("Convert the frame to see its curves.").color(theme::MUTED));
-            } else {
+            if !self.editor.curves.is_empty() {
+                ui.add_space(8.0);
                 widgets::curves_plot(ui, &self.editor.curves, vec2(ui.available_width(), 150.0));
             }
             let f = &self.frames[i];
-            let o = if s.use_roll {
-                f.roll_origins().copied()
-            } else {
-                f.sc.analysis.as_ref().map(|a| a.origins)
-            };
+            let o = pipeline::origins_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
+                .map(|fo| fo.origins);
             if let Some(o) = o {
                 ui.add_space(6.0);
                 egui::Grid::new("origins")
@@ -1424,11 +1400,18 @@ impl NlpApp {
                     });
                 if f.sc.roll.is_some() {
                     ui.checkbox(&mut s.use_roll, "Use roll analysis");
+                    if s.use_roll {
+                        fl_combo(
+                            ui,
+                            "Roll process",
+                            &mut s.roll_mode,
+                            RollMode::ALL,
+                            RollMode::label,
+                            "",
+                        );
+                    }
                 }
             }
-        }
-        if widgets::fold(ui, "LUT folder") {
-            lut_folder_ui(self, ui);
         }
     }
 
@@ -1613,11 +1596,7 @@ impl NlpApp {
             Some(z) => format!("{:.0}%", z / full * 100.0),
             None => "Fit".into(),
         };
-        let chip = pill(
-            &p,
-            avail.right_bottom() + vec2(-36.0, -22.0),
-            &zoom_txt,
-        );
+        let chip = pill(&p, avail.right_bottom() + vec2(-36.0, -22.0), &zoom_txt);
         let chip_resp = ui
             .interact(chip, ui.id().with("zoom_chip"), Sense::click())
             .on_hover_text("Toggle fit / 100 %  ·  double-click the image to zoom there");
@@ -1822,16 +1801,16 @@ impl NlpApp {
             Pick::WhiteBalance => {
                 let Some(neg) = &self.editor.neg else { return };
                 let f = &self.frames[i];
-                let roll = f.sc.roll.as_ref().map(|r| r.origins);
-                let Some(origins) =
-                    pipeline::origins_for(&s, f.sc.analysis.as_ref(), roll.as_ref()).copied()
+                let Some(fo) =
+                    pipeline::origins_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
                 else {
                     self.toast("Convert the negative first, then pick a neutral.", true);
                     return;
                 };
                 let avg = sample(&neg.data, neg.width, neg.height, u, v, 3);
+                let origins = fo.origins;
                 let lut = crate::engine::curve::CurveLut::from_curves(
-                    &crate::engine::curve::update_tone_curve(&origins, &s),
+                    &crate::engine::curve::update_tone_curve_roll(&origins, &s, fo.roll_clip),
                 );
                 let pos = [0, 1, 2].map(|c| lut.apply(c, avg[c]) as f64);
                 match crate::engine::curve::eyedropper_wb(pos, &origins, &s) {

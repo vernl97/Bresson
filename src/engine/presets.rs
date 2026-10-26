@@ -163,7 +163,7 @@ pub const ZONE_NEUTRAL: WbZone = WbZone {
     lum_high: 100.0,
 };
 pub const ZONE_WARM: WbZone = WbZone {
-    hue_low: 40.28,
+    hue_low: 40.2778,
     hue_high: 75.0,
     invert_hue: false,
     sat_threshold: 60.0,

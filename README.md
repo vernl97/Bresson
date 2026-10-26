@@ -24,7 +24,7 @@ cargo run --release -- help
 
 **Editor View** (double-click a frame, or press Enter)
 - Light toolbar:
-  - Left: back (Space), previous/next (←/→), zoom (+/−, ⌘-scroll or double-click), undo/redo.
+  - Left: back (Space), previous/next (←/→, wraps; skips unconverted frames when the current one is converted), zoom (+/−, ⌘-scroll or double-click), undo/redo.
   - Centre: file name and tone profile.
   - Right: before/after (B), rotate, flip, crop/straighten (C), export.
 - Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. Reset Crop / Cancel (Esc) / Apply (Enter).
@@ -32,7 +32,7 @@ cargo run --release -- help
   - Tone profiles; Exposure, Brightness, Contrast, Lights, Darks, Whites, Blacks, Lab Glow and Lab Fade; Soft Highs/Lows; WhiteClip and BlackClip.
   - White balance: presets, a neutral eyedropper and Temp/Tint.
   - Mids, highs and shadows toning; LUT with amount and saturation; sharpening.
-  - Advanced: engine presets v2.1 to v3.1, curve points, processing order, WB density and WB type, toning, clipping, plus a curve and analysis readout.
+  - Advanced: engine presets v2.1 to v3.1, curve points, processing order, WB density and WB type, toning, clipping, plus a curve and analysis readout. Frames converted as a roll get *Use roll analysis* and the *Roll process*: Pro Lab, Basic Lab or Darkroom Paper.
 - Film-base eyedropper, rotate, flip and crop.
 - Histogram, export dialog, undo/redo (⌘Z / ⇧⌘Z).
 
@@ -43,7 +43,7 @@ Settings are saved next to each scan as `<file>.nlp.json`.
 | Module | Ported from |
 |---|---|
 | `curve.rs` | `CurveEngineV3.lua`: tanh sigmoids, auto-tone gamma, every tone and colour layer, colour-protected and linear clipping, node inversion, single- and multi-pass curves |
-| `pipeline.rs` | `NLPImageProcessorV3.lua`: 600 px analysis, border buffer, σ=2 blur, CDF clipping (0.01 % / 0.05 %), HSB-zone auto WB, roll aggregation with 2.5σ outlier rejection |
+| `pipeline.rs` | `NLPImageProcessorV3.lua`: 600 px analysis, border buffer, σ=2 blur, CDF clipping (0.01 % / 0.05 %), HSB-zone auto WB; `NLPRolls.lua`: roll aggregation (min/max origins, 2.2 power-mean means, 2σ colour-ratio outliers) and the Pro Lab / Basic Lab / Darkroom Paper roll processes |
 | `presets.rs` | `NegativePresets.lua`: tone profiles, colour models, pre-saturation, film WB presets, engine presets |
 | `lut.rs` | Reads the plugin's real 3D LUTs from `LR Files/CameraRaw/Settings/NLP Enhanced Settings/*.xmp` (Adobe base85 + zlib RGB tables, 32³) |
 | `color.rs` | `NLPColorV3.lua`: MelissaRGB working space, output spaces, generated ICC profiles |
@@ -57,7 +57,8 @@ Settings are saved next to each scan as `<file>.nlp.json`.
   - Cameras without a profile fall back to `rawler`'s colour matrix.
   - Adobe's own raw processing (demosaic, highlight handling) still differs from `rawler`'s, so results are close to Lightroom but not identical.
 - **Film base.** Lightroom's border-eyedropper white balance becomes the **Film base** option. *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper.
-- **Auto white balance.** The Auto-Neutral, Auto-Warm and Auto-Cool zones are solved directly for a neutral result.
+- **Exposure.** The plugin's Exposure slider (±50 curve units, applied in node space before the other tone layers) is replaced by a print exposure in EV (±5). It models paper density and is applied to the finished curve. Sidecars from older versions are converted at `exposure / 10`.
+- **Roll exposure normalisation.** The plugin reads each frame's aperture, shutter and ISO and offsets frames that were digitised at a different exposure; this isn't ported, so digitise a roll with fixed settings.
 - **LUT folder.** The app finds the LUTs automatically in `../NLP Lightroom Plugin/...` or in Lightroom's CameraRaw settings folder. If they are missing, it uses built-in approximations of each look.
 - **Not ported:** licensing and the Lightroom catalog/DNG-profile plumbing, which a standalone app doesn't need.
 

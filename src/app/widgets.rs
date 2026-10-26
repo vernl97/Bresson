@@ -242,7 +242,10 @@ pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2) {
             .collect();
         p.add(egui::Shape::line(
             pts,
-            egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(r / 2, g / 2, b / 2, 0)),
+            egui::Stroke::new(
+                1.0,
+                Color32::from_rgba_premultiplied(r / 2, g / 2, b / 2, 0),
+            ),
         ));
     }
 }
@@ -801,8 +804,13 @@ pub fn segmented_locked<T: Copy + PartialEq>(
 /// Collapsible section header with a chevron. Returns whether the section
 /// is open; the state is remembered per title.
 pub fn fold(ui: &mut Ui, title: &str) -> bool {
+    fold_with(ui, title, true)
+}
+
+/// A [`fold`] that starts collapsed when `default_open` is false.
+pub fn fold_with(ui: &mut Ui, title: &str, default_open: bool) -> bool {
     let id = ui.make_persistent_id(("fold", title));
-    let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+    let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, default_open));
     ui.add_space(10.0);
     let line_y = ui.cursor().top();
     ui.painter().hline(

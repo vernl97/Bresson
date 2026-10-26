@@ -195,6 +195,8 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
             errors,
         };
     }
+    // `createRoll` only runs for more than one frame.
+    let as_roll = as_roll && ok.len() > 1;
     let bases: Vec<[f32; 3]> = ok
         .par_iter()
         .map(|(_, src, s)| pipeline::resolve_base(src, s, None))
@@ -222,35 +224,16 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
         })
         .collect();
     let roll = as_roll.then(|| {
-        let (origins, excluded) =
-            pipeline::aggregate_roll(&analyses.iter().map(|a| a.origins).collect::<Vec<_>>());
+        let (agg, excluded) = pipeline::aggregate_roll(&analyses);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let used: Vec<&Analysis> = analyses
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !excluded.contains(i))
-            .map(|(_, a)| a)
-            .collect();
-        let n = used.len().max(1) as f32;
-        let avg = |f: fn(&pipeline::AutoWb) -> (f32, f32)| {
-            let (t, k) = used.iter().fold((0.0, 0.0), |acc, a| {
-                (acc.0 + f(&a.auto_wb).0, acc.1 + f(&a.auto_wb).1)
-            });
-            (t / n, k / n)
-        };
-        let auto_wb = pipeline::AutoWb {
-            neutral: avg(|w| w.neutral),
-            warm: avg(|w| w.warm),
-            cool: avg(|w| w.cool),
-            avg: avg(|w| w.avg),
-        };
         RollData {
-            auto_wb: Some(auto_wb),
+            auto_wb: Some(agg.auto_wb),
+            multipliers: Some(agg.multipliers),
             id: format!("roll-{stamp}"),
-            origins,
+            origins: agg.origins,
             base: roll_base.unwrap(),
             frames: ok.len(),
             excluded: excluded
