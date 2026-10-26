@@ -45,7 +45,7 @@ New `Settings` fields need `#[serde(default)]` compatibility so existing sidecar
 
 **`src/app/`**: the eframe GUI.
 - `mod.rs` holds `NlpApp`: the `Frame` list, Folder/Editor `View`, undo/redo and toasts. It also contains the kittest UI tests.
-- `folder.rs` is the grid with the Convert/Edit/Export/Metadata/Tools side panel. `editor.rs` is the single-frame editor with canvas, crop/straighten and the Convert/Edit/Advanced tabs. `widgets.rs` holds the plugin-styled controls and theme.
+- `folder.rs` holds the welcome screen and the thumbnail grid; selection-dependent Convert / Convert as roll / Export actions sit in its top bar. `editor.rs` is the single-frame editor with canvas, crop/straighten and the Convert/Edit/Advanced tabs. `widgets.rs` holds the dark graphite theme (colour tokens in `theme`, Inter embedded from `assets/fonts/`), the shared controls and the vector icons. Use `theme::*` tokens and `widgets::primary`/`ghost` rather than ad-hoc colours, and `widgets::shortcut` for OS-correct shortcut labels.
 - `jobs.rs` runs all heavy work on the rayon pool and returns `JobResult`s over an mpsc channel, which the UI polls each frame. Frames load at `PROXY_SIZE` (1024 px) for thumbnails and analysis, and at `EDITOR_SIZE` (2048 px) for the editor preview. Exports decode at full resolution.
 - `picker.rs`: native macOS NSOpenPanel via `objc2`, with `rfd` elsewhere.
 

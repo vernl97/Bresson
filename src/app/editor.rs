@@ -10,7 +10,7 @@ use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use super::folder::{lut_folder_ui, source_instructions};
 use super::widgets::{
-    self, Icon, fl_combo, fl_slider, fl_slider_u8, grad, header, icon_button, segmented, theme,
+    self, Icon, fl_combo, fl_slider, fl_slider_u8, grad, icon_button, pill, segmented, theme,
 };
 use super::{NlpApp, View, to_color_image};
 use crate::engine::decode::{self, SourceImage};
@@ -67,6 +67,8 @@ enum ZoomReq {
     Factor(f32),
     /// Double-click: zoom into this point, or back to fit when zoomed.
     Toggle(egui::Pos2),
+    /// Go to this display scale (e.g. 100 %), around the canvas centre.
+    Absolute(f32),
 }
 
 /// A running zoom/pan animation.
@@ -101,7 +103,6 @@ pub struct Editor {
     hist: [[u32; 256]; 3],
     curves: Vec<[f32; 4]>,
     uses_table: bool,
-    render_ms: f32,
     /// Display scale (screen points per preview pixel); `None` = fit.
     zoom: Option<f32>,
     pan: egui::Vec2,
@@ -151,7 +152,6 @@ impl Default for Editor {
             hist: [[0; 256]; 3],
             curves: Vec::new(),
             uses_table: false,
-            render_ms: 0.0,
             zoom: None,
             pan: egui::Vec2::ZERO,
             crop: None,
@@ -319,7 +319,6 @@ impl NlpApp {
         if !self.editor.dirty && self.editor.tex.is_some() {
             return;
         }
-        let t0 = std::time::Instant::now();
         let s = self.preview_settings(i);
         let f = &self.frames[i];
         let base = f.base_for(&src);
@@ -384,7 +383,6 @@ impl NlpApp {
             }
         }
         self.editor.dirty = use_small;
-        self.editor.render_ms = t0.elapsed().as_secs_f32() * 1000.0;
     }
 
     fn zoom_by(&mut self, factor: f32, fit: f32) {
@@ -448,12 +446,11 @@ impl NlpApp {
         let mut s = before.clone();
 
         egui::Panel::top("editor_toolbar")
-            .exact_size(54.0)
+            .exact_size(44.0)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::TOOLBAR)
-                    .stroke(Stroke::new(1.0, theme::LINE))
-                    .inner_margin(egui::Margin::symmetric(12, 0)),
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin::symmetric(10, 0)),
             )
             .show(ui, |ui| self.toolbar(ui, i, &mut s));
 
@@ -463,17 +460,16 @@ impl NlpApp {
         }
         egui::Panel::right("editor_sidebar")
             .resizable(true)
-            .default_size(360.0)
-            .min_size(320.0)
-            .max_size(560.0)
+            .default_size(340.0)
+            .min_size(300.0)
+            .max_size(480.0)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::SIDEBAR)
-                    .stroke(Stroke::new(1.0, theme::LINE))
+                    .fill(theme::PANEL)
                     .inner_margin(egui::Margin {
-                        left: 20,
-                        right: 16,
-                        top: 14,
+                        left: 16,
+                        right: 12,
+                        top: 12,
                         bottom: 8,
                     }),
             )
@@ -499,12 +495,14 @@ impl NlpApp {
         if ctx.egui_wants_keyboard_input() {
             return false;
         }
+        let mac = ctx.os() == egui::os::OperatingSystem::Mac;
         let k = ctx.input(|inp| {
             let cmd = inp.modifiers.command;
             [
                 inp.key_pressed(egui::Key::B),
                 cmd && !inp.modifiers.shift && inp.key_pressed(egui::Key::Z),
-                cmd && inp.modifiers.shift && inp.key_pressed(egui::Key::Z),
+                (cmd && inp.modifiers.shift && inp.key_pressed(egui::Key::Z))
+                    || (cmd && !mac && inp.key_pressed(egui::Key::Y)),
                 inp.key_pressed(egui::Key::ArrowLeft),
                 inp.key_pressed(egui::Key::ArrowRight),
                 inp.key_pressed(egui::Key::Escape),
@@ -591,13 +589,17 @@ impl NlpApp {
     // ---- toolbar ----------------------------------------------------------------
 
     fn toolbar(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
+        let ctx = ui.ctx().clone();
+        let cmd = egui::Modifiers::COMMAND;
+        let undo_key = widgets::shortcut(&ctx, cmd, egui::Key::Z);
+        let redo_key = widgets::shortcut(&ctx, cmd | egui::Modifiers::SHIFT, egui::Key::Z);
         let rect = ui.max_rect();
         // Centred title.
         let f = &self.frames[i];
         let sub = if self.editor.crop.is_some() {
-            "Crop / Rotate".to_string()
+            "Crop & straighten".to_string()
         } else if self.editor.before {
-            "Before — negative".to_string()
+            "Before: negative".to_string()
         } else if f.sc.is_converted() {
             format!(
                 "{}{}",
@@ -609,56 +611,54 @@ impl NlpApp {
         };
         let p = ui.painter();
         p.text(
-            pos2(rect.center().x, rect.center().y - 8.0),
+            pos2(rect.center().x, rect.center().y - 7.0),
             egui::Align2::CENTER_CENTER,
             &f.name,
-            egui::FontId::proportional(14.5),
+            theme::medium(13.5),
             theme::TEXT,
         );
         p.text(
             pos2(rect.center().x, rect.center().y + 9.0),
             egui::Align2::CENTER_CENTER,
             sub,
-            egui::FontId::proportional(12.0),
+            egui::FontId::proportional(11.5),
             theme::MUTED,
         );
 
         let n = self.frames.len();
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            if icon_button(ui, Icon::Back, "Back to folder (Space)", false, true).clicked() {
+            let back_tip = if self.single_mode {
+                "Close image (Space)"
+            } else {
+                "Back to folder (Space)"
+            };
+            if icon_button(ui, Icon::Back, back_tip, false, true).clicked() {
                 self.leave_editor();
                 return;
             }
-            ui.add_space(14.0);
-            if icon_button(ui, Icon::Prev, "Previous image (←)", false, i > 0).clicked() {
-                self.goto(i, -1);
-                return;
+            if n > 1 {
+                ui.add_space(8.0);
+                if icon_button(ui, Icon::Prev, "Previous image (←)", false, i > 0).clicked() {
+                    self.goto(i, -1);
+                    return;
+                }
+                if icon_button(ui, Icon::Next, "Next image (→)", false, i + 1 < n).clicked() {
+                    self.goto(i, 1);
+                    return;
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!("{} / {}", i + 1, n))
+                        .small()
+                        .color(theme::MUTED),
+                );
             }
-            if icon_button(ui, Icon::Next, "Next image (→)", false, i + 1 < n).clicked() {
-                self.goto(i, 1);
-                return;
-            }
-            ui.add_space(14.0);
-            if icon_button(
-                ui,
-                Icon::ZoomOut,
-                "Zoom out (−)",
-                false,
-                self.editor.zoom.is_some(),
-            )
-            .clicked()
-            {
-                self.editor.zoom_req = Some(ZoomReq::Factor(1.0 / 1.5));
-            }
-            if icon_button(ui, Icon::ZoomIn, "Zoom in (+)", false, true).clicked() {
-                self.editor.zoom_req = Some(ZoomReq::Factor(1.5));
-            }
-            ui.add_space(14.0);
+            ui.add_space(10.0);
             if icon_button(
                 ui,
                 Icon::Undo,
-                "Undo (⌘Z)",
+                &format!("Undo ({undo_key})"),
                 false,
                 !self.editor.undo.is_empty(),
             )
@@ -669,7 +669,7 @@ impl NlpApp {
             if icon_button(
                 ui,
                 Icon::Redo,
-                "Redo (⇧⌘Z)",
+                &format!("Redo ({redo_key})"),
                 false,
                 !self.editor.redo.is_empty(),
             )
@@ -680,44 +680,40 @@ impl NlpApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if icon_button(
+                if widgets::icon_button_tinted(
                     ui,
                     Icon::Export,
                     "Export positive copy",
                     self.export_targets.is_some() || self.editor.export_open,
                     true,
+                    Some(theme::ACCENT),
                 )
                 .clicked()
                 {
                     self.open_export_dialog(vec![i]);
                 }
-                ui.add_space(14.0);
+                ui.add_space(10.0);
                 let cropping = self.editor.crop.is_some();
-                if icon_button(ui, Icon::Crop, "Crop / straighten (C)", cropping, true).clicked() {
+                if icon_button(ui, Icon::Crop, "Crop & straighten (C)", cropping, true).clicked() {
                     if cropping {
                         self.apply_crop(i);
                     } else {
                         self.enter_crop(i);
                     }
                 }
-                ui.add_space(14.0);
                 if icon_button(ui, Icon::Flip, "Flip horizontally", s.flip_h, !cropping).clicked() {
                     s.flip_h = !s.flip_h;
                     s.crop = [s.crop[2], s.crop[1], s.crop[0], s.crop[3]];
                 }
-                if icon_button(ui, Icon::RotateRight, "Rotate right (CW)", false, !cropping)
-                    .clicked()
-                {
+                if icon_button(ui, Icon::RotateRight, "Rotate right", false, !cropping).clicked() {
                     s.rotation = (s.rotation + 1) % 4;
                     s.crop = rotate_insets(s.crop, true);
                 }
-                if icon_button(ui, Icon::RotateLeft, "Rotate left (CCW)", false, !cropping)
-                    .clicked()
-                {
+                if icon_button(ui, Icon::RotateLeft, "Rotate left", false, !cropping).clicked() {
                     s.rotation = (s.rotation + 3) % 4;
                     s.crop = rotate_insets(s.crop, false);
                 }
-                ui.add_space(14.0);
+                ui.add_space(10.0);
                 if icon_button(
                     ui,
                     Icon::Compare,
@@ -732,7 +728,7 @@ impl NlpApp {
                 }
                 if self.editor.loading || self.jobs.busy() > 0 {
                     ui.add_space(8.0);
-                    ui.add(egui::Spinner::new().color(theme::MUTED));
+                    ui.add(egui::Spinner::new().size(14.0).color(theme::MUTED));
                 }
             });
         });
@@ -747,7 +743,7 @@ impl NlpApp {
         widgets::histogram(
             ui,
             &self.editor.hist,
-            vec2(ui.available_width() - 4.0, 64.0),
+            vec2(ui.available_width(), 72.0),
         );
         ui.add_space(10.0);
         // Unconverted frames: only the Convert tab is available. Once the
@@ -764,17 +760,25 @@ impl NlpApp {
         } else {
             &[Tab::Edit, Tab::Advanced]
         };
-        widgets::segmented_locked(
-            ui,
-            &mut self.editor.tab,
-            &[
-                (Tab::Convert, "Convert"),
-                (Tab::Edit, "Edit"),
-                (Tab::Advanced, "Advanced"),
-            ],
-            locked,
-            "Convert the negative first",
-        );
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let w = ui.available_width() - 36.0;
+            ui.allocate_ui(vec2(w, 28.0), |ui| {
+                widgets::segmented_locked(
+                    ui,
+                    &mut self.editor.tab,
+                    &[
+                        (Tab::Convert, "Convert"),
+                        (Tab::Edit, "Edit"),
+                        (Tab::Advanced, "Advanced"),
+                    ],
+                    locked,
+                    "Convert the negative first",
+                );
+            });
+            let more = icon_button(ui, Icon::More, "Defaults", false, true);
+            egui::Popup::menu(&more).show(|ui| self.defaults_menu(ui, s));
+        });
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -789,38 +793,13 @@ impl NlpApp {
     }
 
     fn crop_panel(&mut self, ui: &mut egui::Ui, i: usize) {
-        header(ui, "CROP");
-        egui::Frame::new()
-            .fill(Color32::from_rgb(234, 234, 236))
-            .corner_radius(8.0)
-            .inner_margin(8.0)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    if ui.button("Reset Crop").clicked() {
-                        if let Some(c) = &mut self.editor.crop {
-                            c.insets = [0.0; 4];
-                            c.angle = 0.0;
-                            self.editor.dirty = true;
-                        }
-                    }
-                    if ui.button("Cancel").on_hover_text("Esc").clicked() {
-                        self.cancel_crop();
-                    }
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Apply").color(Color32::WHITE))
-                                .fill(theme::ACCENT),
-                        )
-                        .on_hover_text("Enter")
-                        .clicked()
-                    {
-                        self.apply_crop(i);
-                    }
-                });
-            });
+        ui.label(
+            RichText::new("Crop & straighten")
+                .font(theme::medium(12.5))
+                .color(theme::TEXT),
+        );
+        ui.add_space(4.0);
         if let Some(c) = &mut self.editor.crop {
-            ui.add_space(6.0);
             let mut a = c.angle;
             if fl_slider(
                 ui,
@@ -829,22 +808,31 @@ impl NlpApp {
                 -45.0..=45.0,
                 0.0,
                 1,
-                "Fine rotation in degrees",
+                "Fine rotation in degrees. Drag the frame edges or corners on the image; drag inside to move it.",
                 None,
             ) {
                 c.angle = a;
                 self.editor.dirty = true;
             }
-            ui.label(
-                RichText::new(
-                    "Drag the frame edges or corners on the image; drag inside to move it.",
-                )
-                .small()
-                .color(theme::MUTED),
-            );
         }
-        ui.add_space(6.0);
-        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.add(widgets::ghost("Reset")).clicked() {
+                if let Some(c) = &mut self.editor.crop {
+                    c.insets = [0.0; 4];
+                    c.angle = 0.0;
+                    self.editor.dirty = true;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(widgets::primary("Done")).on_hover_text("Enter").clicked() {
+                    self.apply_crop(i);
+                }
+                if ui.add(widgets::ghost("Cancel")).on_hover_text("Esc").clicked() {
+                    self.cancel_crop();
+                }
+            });
+        });
+        ui.add_space(14.0);
     }
 
     fn convert_button(&mut self, ui: &mut egui::Ui, i: usize, s: &Settings) {
@@ -856,22 +844,18 @@ impl NlpApp {
                 .map(|a| a.key != s.analysis_key())
                 .unwrap_or(false);
         let label = match (converted, stale) {
-            (false, _) => "Convert Negative",
+            (false, _) => "Convert negative",
             (true, true) => "Re-convert (settings changed)",
             (true, false) => "Re-convert",
         };
-        let primary = !converted || stale;
-        let btn = if primary {
-            egui::Button::new(RichText::new(label).strong().color(Color32::WHITE))
-                .fill(theme::ACCENT)
+        let btn = if !converted || stale {
+            widgets::primary(label)
         } else {
-            egui::Button::new(label)
+            widgets::ghost(label)
         };
         if ui
             .add_sized([ui.available_width(), 32.0], btn)
-            .on_hover_text(
-                "Analyse this frame on its own (rolls are converted from the Folder View)",
-            )
+            .on_hover_text("Analyse this frame on its own (convert rolls from the folder view)")
             .clicked()
         {
             self.frames[i].sc.settings = s.clone();
@@ -879,8 +863,32 @@ impl NlpApp {
         }
     }
 
+    /// A full-width dropdown with an eyedropper button on its right.
+    fn combo_with_picker<T: Copy + PartialEq>(
+        &mut self,
+        ui: &mut egui::Ui,
+        v: &mut T,
+        all: &[T],
+        name: impl Fn(T) -> &'static str,
+        pick: Pick,
+        tip: &str,
+        enabled: bool,
+    ) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let w = ui.available_width() - 36.0;
+            ui.allocate_ui(vec2(w, 30.0), |ui| {
+                fl_combo(ui, "", v, all, name, "");
+            });
+            let picking = self.editor.pick == Some(pick);
+            if icon_button(ui, Icon::Eyedropper, tip, picking, enabled).clicked() {
+                self.editor.pick = if picking { None } else { Some(pick) };
+            }
+        });
+    }
+
     fn convert_tab(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
-        if widgets::fold(ui, "PROCESS") {
+        if widgets::fold(ui, "Process") {
             if fl_combo(
                 ui,
                 "",
@@ -898,7 +906,7 @@ impl NlpApp {
                 }
             }
         }
-        if widgets::fold(ui, "SOURCE") {
+        if widgets::fold(ui, "Source") {
             if fl_combo(
                 ui,
                 "Scan source",
@@ -912,9 +920,18 @@ impl NlpApp {
                     _ => FilmBase::Auto,
                 };
             }
+            ui.add(
+                egui::Label::new(
+                    RichText::new(source_instructions(s.source))
+                        .small()
+                        .color(theme::FAINT),
+                )
+                .wrap(),
+            );
+            ui.add_space(8.0);
             if fl_combo(
                 ui,
-                "Color Model",
+                "Colour model",
                 &mut s.color_model,
                 ColorModel::ALL,
                 ColorModel::label,
@@ -923,7 +940,7 @@ impl NlpApp {
             {
                 s.apply_mono_defaults();
             }
-            ui.label(RichText::new("Camera profile").color(theme::TEXT));
+            ui.label(RichText::new("Camera profile").small().color(theme::MUTED));
             match self
                 .editor
                 .src
@@ -931,53 +948,46 @@ impl NlpApp {
                 .map(|src| (src.is_raw, pipeline::camera_profile(src)))
             {
                 Some((_, Some(p))) => {
-                    ui.label(RichText::new(format!("{} · {}", p.name, p.camera)).color(theme::OK))
-                        .on_hover_text(p.path.display().to_string());
+                    widgets::status_line(ui, Icon::Check, theme::OK, &p.name).on_hover_text(
+                        format!("{}\n{}", p.camera, p.path.display()),
+                    );
                 }
                 Some((true, None)) => {
-                    ui.label(
-                        RichText::new(
-                            "No Negative Lab profile for this camera — using the camera matrix",
-                        )
-                        .color(theme::WARN),
+                    widgets::status_line(
+                        ui,
+                        Icon::Warn,
+                        theme::WARN,
+                        "No Negative Lab profile for this camera, so the camera matrix is used.",
                     );
                 }
                 Some((false, None)) => {
-                    ui.label(RichText::new("Not used for TIF / JPEG scans").color(theme::MUTED));
+                    ui.label(
+                        RichText::new("Not used for TIF / JPEG scans")
+                            .small()
+                            .color(theme::FAINT),
+                    );
                 }
                 None => {
-                    ui.label(RichText::new("…").color(theme::MUTED));
+                    ui.label(RichText::new("…").small().color(theme::FAINT));
                 }
             }
-            ui.add_space(4.0);
-            fl_combo(
+            ui.add_space(8.0);
+            ui.label(RichText::new("Film base").small().color(theme::MUTED))
+                .on_hover_text("Neutralises the orange mask before analysis");
+            self.combo_with_picker(
                 ui,
-                "Film base",
                 &mut s.film_base,
                 FilmBase::ALL,
                 FilmBase::label,
-                "Neutralises the orange mask before analysis",
+                Pick::FilmBase,
+                "Sample the unexposed film border",
+                true,
             );
-            let picking = self.editor.pick == Some(Pick::FilmBase);
-            ui.horizontal(|ui| {
-                if icon_button(
-                    ui,
-                    Icon::Eyedropper,
-                    "Sample the unexposed film border",
-                    picking,
-                    true,
-                )
-                .clicked()
-                {
-                    self.editor.pick = if picking { None } else { Some(Pick::FilmBase) };
-                }
-                ui.label(RichText::new("Sample film border").color(theme::MUTED));
-            });
         }
-        if widgets::fold(ui, "ANALYSIS") {
+        if widgets::fold(ui, "Analysis") {
             fl_slider_u8(
                 ui,
-                "Pre-Saturation",
+                "Pre-saturation",
                 &mut s.pre_saturation,
                 1..=5,
                 3,
@@ -985,7 +995,7 @@ impl NlpApp {
             );
             fl_slider(
                 ui,
-                "Border Buffer",
+                "Border buffer",
                 &mut s.border_buffer,
                 0.0..=25.0,
                 5.0,
@@ -993,31 +1003,35 @@ impl NlpApp {
                 "Percent of the frame edge ignored by the analysis",
                 None,
             );
-            ui.add_space(8.0);
-            self.convert_button(ui, i, s);
-            if self.frames[i].sc.is_converted()
-                && ui
-                    .add_sized([ui.available_width(), 26.0], egui::Button::new("Unconvert"))
+        }
+        ui.add_space(14.0);
+        self.convert_button(ui, i, s);
+        if self.frames[i].sc.is_converted() {
+            ui.add_space(2.0);
+            ui.vertical_centered(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("Unconvert").small().color(theme::MUTED))
+                            .frame(false),
+                    )
+                    .on_hover_text("Discard the analysis for this frame")
                     .clicked()
-            {
-                self.unconvert(&[i]);
-            }
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new(source_instructions(s.source))
-                    .small()
-                    .color(theme::MUTED),
-            );
+                {
+                    self.unconvert(&[i]);
+                }
+            });
         }
     }
 
     fn edit_tab(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
-        if !self.frames[i].sc.is_converted() {
+        let converted = self.frames[i].sc.is_converted();
+        if !converted {
             ui.add_space(10.0);
-            ui.label(RichText::new("This frame is not converted yet.").color(theme::WARN));
+            widgets::status_line(ui, Icon::Warn, theme::WARN, "This frame is not converted yet.");
+            ui.add_space(6.0);
             self.convert_button(ui, i, s);
         }
-        if widgets::fold(ui, "TONES") {
+        if widgets::fold(ui, "Tones") {
             fl_combo(
                 ui,
                 "",
@@ -1056,13 +1070,13 @@ impl NlpApp {
                 &mut s.blacks,
                 "Black point: up = matte, down = deeper",
             );
-            tone(ui, "Lab Glow", &mut s.glow, "Silky compressed highlights");
-            tone(ui, "Lab Fade", &mut s.fade, "Open, compressed deep shadows");
+            tone(ui, "Lab glow", &mut s.glow, "Silky compressed highlights");
+            tone(ui, "Lab fade", &mut s.fade, "Open, compressed deep shadows");
         }
-        if widgets::fold(ui, "DYNAMIC RANGE") {
+        if widgets::fold(ui, "Dynamic range") {
             fl_slider(
                 ui,
-                "WhiteClip",
+                "White clip",
                 &mut s.white_clip,
                 -50.0..=50.0,
                 0.0,
@@ -1072,7 +1086,7 @@ impl NlpApp {
             );
             fl_slider(
                 ui,
-                "BlackClip",
+                "Black clip",
                 &mut s.black_clip,
                 -50.0..=50.0,
                 0.0,
@@ -1081,34 +1095,22 @@ impl NlpApp {
                 None,
             );
             ui.horizontal(|ui| {
-                ui.checkbox(&mut s.soft_highlights, "Soft Highs");
+                ui.checkbox(&mut s.soft_highlights, "Soft highs");
                 ui.add_space(16.0);
-                ui.checkbox(&mut s.soft_shadows, "Soft Lows");
+                ui.checkbox(&mut s.soft_shadows, "Soft lows");
             });
         }
-        if widgets::fold(ui, "WHITE BALANCE") {
-            let converted = self.frames[i].sc.is_converted();
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                let picking = self.editor.pick == Some(Pick::WhiteBalance);
-                if icon_button(
-                    ui,
-                    Icon::Eyedropper,
-                    "Pick a neutral grey in the image (W)",
-                    picking,
-                    converted,
-                )
-                .clicked()
-                {
-                    self.editor.pick = if picking {
-                        None
-                    } else {
-                        Some(Pick::WhiteBalance)
-                    };
-                }
-                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    fl_combo(ui, "", &mut s.wb_mode, WbMode::ALL, WbMode::label, "");
-                });
-            });
+        if widgets::fold(ui, "White balance") {
+            let wb_key = widgets::shortcut(ui.ctx(), egui::Modifiers::NONE, egui::Key::W);
+            self.combo_with_picker(
+                ui,
+                &mut s.wb_mode,
+                WbMode::ALL,
+                WbMode::label,
+                Pick::WhiteBalance,
+                &format!("Pick a neutral grey in the image ({wb_key})"),
+                converted,
+            );
             let mut t = s.wb_temp;
             if fl_slider(
                 ui,
@@ -1117,7 +1119,7 @@ impl NlpApp {
                 -75.0..=75.0,
                 0.0,
                 2,
-                "Blue ↔ Yellow — most film conversions need some warmth",
+                "Blue ↔ Yellow: most film conversions need some warmth",
                 Some(grad::TEMP),
             ) {
                 s.wb_temp = t;
@@ -1138,7 +1140,7 @@ impl NlpApp {
                 s.wb_mode = WbMode::Custom;
             }
         }
-        if widgets::fold(ui, "COLOR TONING") {
+        if widgets::fold(ui, "Colour toning") {
             segmented(
                 ui,
                 &mut self.editor.color_tab,
@@ -1148,7 +1150,7 @@ impl NlpApp {
                     (ColorTab::Shadows, "Shadows"),
                 ],
             );
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             let (c, m, y, range) = match self.editor.color_tab {
                 ColorTab::Mids => (&mut s.mid_cyan, &mut s.mid_tint, &mut s.mid_temp, None),
                 ColorTab::Highs => (
@@ -1228,16 +1230,15 @@ impl NlpApp {
                 "LUT saturation variant (5 = default)",
             );
             if s.lut != Lut::None && !self.editor.uses_table && !s.is_monochrome() {
-                ui.label(
-                    RichText::new(
-                        "Plugin LUT folder not found — using approximations (see Advanced).",
-                    )
-                    .small()
-                    .color(theme::WARN),
+                widgets::status_line(
+                    ui,
+                    Icon::Warn,
+                    theme::WARN,
+                    "Plugin LUTs not found, so approximations are used (see Advanced).",
                 );
             }
         }
-        if widgets::fold(ui, "SHARPENING") {
+        if widgets::fold(ui, "Sharpening") {
             fl_combo(
                 ui,
                 "",
@@ -1247,74 +1248,82 @@ impl NlpApp {
                 "",
             );
         }
-        if widgets::fold(ui, "DEFAULTS") {
-            ui.horizontal(|ui| {
-                if ui
-                    .button("Save as Default")
-                    .on_hover_text("New frames start with these settings")
-                    .clicked()
-                {
-                    let mut d = s.clone();
-                    (d.crop, d.rotation, d.flip_h, d.straighten, d.use_roll) =
-                        ([0.0; 4], 0, false, 0.0, false);
-                    self.defaults.settings = d;
-                    let _ = crate::engine::sidecar::save_defaults(&self.defaults);
-                    self.toast("Saved as default settings", false);
-                }
-                if ui.button("Load Default").clicked() {
-                    let keep = s.clone();
-                    s.copy_edit_from(&self.defaults.settings);
-                    (
-                        s.source,
-                        s.image_type,
-                        s.color_model,
-                        s.pre_saturation,
-                        s.border_buffer,
-                        s.use_roll,
-                    ) = (
-                        keep.source,
-                        keep.image_type,
-                        keep.color_model,
-                        keep.pre_saturation,
-                        keep.border_buffer,
-                        keep.use_roll,
-                    );
-                }
-                if ui.button("Reset").clicked() {
-                    let keep = s.clone();
-                    *s = Settings::default();
-                    (
-                        s.source,
-                        s.image_type,
-                        s.color_model,
-                        s.pre_saturation,
-                        s.border_buffer,
-                        s.film_base,
-                        s.film_base_sample,
-                    ) = (
-                        keep.source,
-                        keep.image_type,
-                        keep.color_model,
-                        keep.pre_saturation,
-                        keep.border_buffer,
-                        keep.film_base,
-                        keep.film_base_sample,
-                    );
-                    (s.rotation, s.flip_h, s.straighten, s.crop, s.use_roll) = (
-                        keep.rotation,
-                        keep.flip_h,
-                        keep.straighten,
-                        keep.crop,
-                        keep.use_roll,
-                    );
-                    s.apply_engine_preset(keep.engine);
-                }
-            });
+    }
+
+    /// The ⋯ menu next to the tabs: default settings for new frames.
+    fn defaults_menu(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
+        if ui
+            .button("Save as default")
+            .on_hover_text("New frames start with these settings")
+            .clicked()
+        {
+            let mut d = s.clone();
+            (d.crop, d.rotation, d.flip_h, d.straighten, d.use_roll) =
+                ([0.0; 4], 0, false, 0.0, false);
+            self.defaults.settings = d;
+            let _ = crate::engine::sidecar::save_defaults(&self.defaults);
+            self.toast("Saved as default settings", false);
+            ui.close();
+        }
+        if ui
+            .button("Apply default")
+            .on_hover_text("Replace this frame's edits with the saved default")
+            .clicked()
+        {
+            let keep = s.clone();
+            s.copy_edit_from(&self.defaults.settings);
+            (
+                s.source,
+                s.image_type,
+                s.color_model,
+                s.pre_saturation,
+                s.border_buffer,
+                s.use_roll,
+            ) = (
+                keep.source,
+                keep.image_type,
+                keep.color_model,
+                keep.pre_saturation,
+                keep.border_buffer,
+                keep.use_roll,
+            );
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Reset edits").clicked() {
+            let keep = s.clone();
+            *s = Settings::default();
+            (
+                s.source,
+                s.image_type,
+                s.color_model,
+                s.pre_saturation,
+                s.border_buffer,
+                s.film_base,
+                s.film_base_sample,
+            ) = (
+                keep.source,
+                keep.image_type,
+                keep.color_model,
+                keep.pre_saturation,
+                keep.border_buffer,
+                keep.film_base,
+                keep.film_base_sample,
+            );
+            (s.rotation, s.flip_h, s.straighten, s.crop, s.use_roll) = (
+                keep.rotation,
+                keep.flip_h,
+                keep.straighten,
+                keep.crop,
+                keep.use_roll,
+            );
+            s.apply_engine_preset(keep.engine);
+            ui.close();
         }
     }
 
     fn advanced_tab(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
-        if widgets::fold(ui, "ENGINE") {
+        if widgets::fold(ui, "Engine") {
             fl_combo(
                 ui,
                 "Engine preset",
@@ -1383,7 +1392,7 @@ impl NlpApp {
                 "",
             );
         }
-        if widgets::fold(ui, "CURVES") {
+        if widgets::fold(ui, "Curves") {
             if self.editor.curves.is_empty() {
                 ui.label(RichText::new("Convert the frame to see its curves.").color(theme::MUTED));
             } else {
@@ -1418,7 +1427,7 @@ impl NlpApp {
                 }
             }
         }
-        if widgets::fold(ui, "LUT FOLDER") {
+        if widgets::fold(ui, "LUT folder") {
             lut_folder_ui(self, ui);
         }
     }
@@ -1429,7 +1438,7 @@ impl NlpApp {
         let avail = ui.max_rect();
         let Some(tex) = self.editor.tex.clone() else {
             ui.centered_and_justified(|ui| {
-                ui.add(egui::Spinner::new().size(28.0).color(Color32::WHITE));
+                ui.add(egui::Spinner::new().size(24.0).color(theme::MUTED));
             });
             return;
         };
@@ -1457,6 +1466,14 @@ impl NlpApp {
             let (to_z, to_pan, to_fit) = match req {
                 ZoomReq::Factor(f) => {
                     let z = (cur_z * f).clamp(fit, 8.0);
+                    if z <= fit * 1.001 {
+                        (fit, egui::Vec2::ZERO, true)
+                    } else {
+                        (z, cur_pan * (z / cur_z), false)
+                    }
+                }
+                ZoomReq::Absolute(a) => {
+                    let z = a.clamp(fit, 8.0f32.max(fit));
                     if z <= fit * 1.001 {
                         (fit, egui::Vec2::ZERO, true)
                     } else {
@@ -1524,7 +1541,15 @@ impl NlpApp {
         }
 
         let p = ui.painter_at(avail);
-        p.rect_filled(rect.expand(1.0), 0.0, Color32::from_black_alpha(40));
+        p.add(
+            egui::Shadow {
+                offset: [0, 6],
+                blur: 28,
+                spread: 0,
+                color: Color32::from_black_alpha(90),
+            }
+            .as_shape(rect, 0.0),
+        );
         p.image(
             tex.id(),
             rect,
@@ -1539,7 +1564,7 @@ impl NlpApp {
                 Pick::WhiteBalance => "Click a neutral grey area · Esc to cancel",
                 Pick::FilmBase => "Click the unexposed film border · Esc to cancel",
             };
-            pill(&p, pos2(avail.center().x, avail.top() + 18.0), label);
+            pill(&p, pos2(avail.center().x, avail.top() + 22.0), label);
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
@@ -1570,30 +1595,42 @@ impl NlpApp {
         }
 
         if self.editor.before && !cropping {
-            pill(&p, pos2(avail.left() + 50.0, avail.top() + 18.0), "BEFORE");
+            pill(&p, pos2(avail.left() + 44.0, avail.top() + 22.0), "Before");
         }
+        if cropping {
+            return;
+        }
+        // Zoom chip: click to toggle between fit and 100 %.
+        let full = self
+            .editor
+            .src
+            .as_ref()
+            .map(|s| {
+                s.info.full_width.max(s.info.full_height) as f32 / s.width.max(s.height) as f32
+            })
+            .unwrap_or(1.0);
         let zoom_txt = match self.editor.zoom {
-            Some(z) => {
-                let full = self
-                    .editor
-                    .src
-                    .as_ref()
-                    .map(|s| {
-                        s.info.full_width.max(s.info.full_height) as f32
-                            / s.width.max(s.height) as f32
-                    })
-                    .unwrap_or(1.0);
-                format!("{:.0}%", z / full * 100.0)
-            }
+            Some(z) => format!("{:.0}%", z / full * 100.0),
             None => "Fit".into(),
         };
-        p.text(
-            avail.right_bottom() + vec2(-10.0, -8.0),
-            egui::Align2::RIGHT_BOTTOM,
-            format!("{zoom_txt} · {:.0} ms", self.editor.render_ms),
-            egui::FontId::proportional(11.0),
-            Color32::from_gray(225),
+        let chip = pill(
+            &p,
+            avail.right_bottom() + vec2(-36.0, -22.0),
+            &zoom_txt,
         );
+        let chip_resp = ui
+            .interact(chip, ui.id().with("zoom_chip"), Sense::click())
+            .on_hover_text("Toggle fit / 100 %  ·  double-click the image to zoom there");
+        if chip_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if chip_resp.clicked() {
+            self.editor.zoom_req = Some(if self.editor.zoom.is_some() {
+                ZoomReq::Absolute(0.0)
+            } else {
+                ZoomReq::Absolute(full)
+            });
+        }
     }
 
     fn crop_overlay(&mut self, ui: &mut egui::Ui, resp: &egui::Response, img: Rect, avail: Rect) {
@@ -1742,7 +1779,7 @@ impl NlpApp {
             p.line_segment([pos2(fx, r.top()), pos2(fx, r.bottom())], thirds);
             p.line_segment([pos2(r.left(), fy), pos2(r.right(), fy)], thirds);
         }
-        let hs = Stroke::new(4.0, Color32::WHITE);
+        let hs = Stroke::new(3.0, theme::TEXT);
         let len = 22.0f32.min(r.width() / 3.0).min(r.height() / 3.0);
         for (corner, sx, sy) in [
             (r.left_top(), 1.0, 1.0),
@@ -1826,18 +1863,6 @@ impl NlpApp {
         }
         self.apply_change(i, &before, s);
     }
-}
-
-/// Rounded dark label on the canvas.
-fn pill(p: &egui::Painter, center: egui::Pos2, text: &str) {
-    let g = p.layout_no_wrap(
-        text.to_string(),
-        egui::FontId::proportional(13.0),
-        Color32::WHITE,
-    );
-    let r = Rect::from_center_size(center, g.size() + vec2(20.0, 10.0));
-    p.rect_filled(r, 12.0, Color32::from_black_alpha(150));
-    p.galley(r.center() - g.size() / 2.0, g, Color32::WHITE);
 }
 
 /// Average a (2r+1)² neighbourhood at normalised coordinates.

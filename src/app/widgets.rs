@@ -1,11 +1,192 @@
-//! Shared controls mirroring the plugin's UI conventions:
-//! click a label to reset, ⟳ to cycle a dropdown, typed values may exceed
-//! the slider range.
+//! Shared controls and the dark graphite theme. Controls follow the plugin's
+//! conventions: click a slider label (or double-click its track) to reset,
+//! and typed values may exceed the slider range.
 
 use eframe::egui::{self, Color32, Rect, Sense, Ui};
 
-#[allow(dead_code)]
-pub const LABEL_W: f32 = 92.0;
+// ---- Theme ------------------------------------------------------------------------
+
+pub mod theme {
+    use std::sync::Arc;
+
+    use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Shadow, Stroke};
+
+    /// App chrome behind everything.
+    pub const BG: Color32 = Color32::from_rgb(28, 28, 30);
+    /// Toolbars and the sidebar.
+    pub const PANEL: Color32 = Color32::from_rgb(35, 35, 38);
+    /// Neutral surround for judging the image.
+    pub const CANVAS: Color32 = Color32::from_rgb(42, 42, 45);
+    /// Inputs, buttons, selected states.
+    pub const SURFACE: Color32 = Color32::from_rgb(47, 47, 51);
+    pub const HOVER: Color32 = Color32::from_rgb(56, 56, 61);
+    pub const PRESSED: Color32 = Color32::from_rgb(66, 66, 72);
+    /// Hairlines (white at ~7 %).
+    pub const LINE: Color32 = Color32::from_rgba_premultiplied(18, 18, 18, 18);
+    pub const TEXT: Color32 = Color32::from_rgb(232, 232, 234);
+    pub const MUTED: Color32 = Color32::from_rgb(142, 142, 147);
+    pub const FAINT: Color32 = Color32::from_rgb(90, 90, 96);
+    pub const TRACK: Color32 = Color32::from_rgb(64, 64, 70);
+    pub const ACCENT: Color32 = Color32::from_rgb(76, 141, 255);
+    pub const OK: Color32 = Color32::from_rgb(98, 186, 120);
+    pub const WARN: Color32 = Color32::from_rgb(222, 168, 72);
+    pub const ERR: Color32 = Color32::from_rgb(236, 96, 84);
+
+    const MEDIUM: &str = "medium";
+
+    /// Inter Medium at `size` (titles, section headers).
+    pub fn medium(size: f32) -> FontId {
+        FontId::new(size, FontFamily::Name(MEDIUM.into()))
+    }
+
+    /// Embed Inter so text renders identically on every OS. egui's own
+    /// fonts stay behind it as fallback (emoji, rare symbols).
+    pub fn install_fonts(ctx: &egui::Context) {
+        let mut f = egui::FontDefinitions::default();
+        f.font_data.insert(
+            "Inter".into(),
+            Arc::new(egui::FontData::from_static(include_bytes!(
+                "../../assets/fonts/Inter-Regular.ttf"
+            ))),
+        );
+        f.font_data.insert(
+            "Inter-Medium".into(),
+            Arc::new(egui::FontData::from_static(include_bytes!(
+                "../../assets/fonts/Inter-Medium.ttf"
+            ))),
+        );
+        let prop = f.families.entry(FontFamily::Proportional).or_default();
+        let fallback = prop.clone();
+        prop.insert(0, "Inter".into());
+        let mut medium = vec!["Inter-Medium".to_string()];
+        medium.extend(fallback);
+        f.families.insert(FontFamily::Name(MEDIUM.into()), medium);
+        ctx.set_fonts(f);
+    }
+
+    fn visuals() -> egui::Visuals {
+        let mut v = egui::Visuals::dark();
+        v.panel_fill = PANEL;
+        v.window_fill = PANEL;
+        v.window_stroke = Stroke::new(1.0, LINE);
+        v.extreme_bg_color = BG;
+        v.faint_bg_color = SURFACE;
+        v.code_bg_color = SURFACE;
+        v.hyperlink_color = ACCENT;
+        v.warn_fg_color = WARN;
+        v.error_fg_color = ERR;
+        v.selection.bg_fill = ACCENT.gamma_multiply(0.55);
+        v.selection.stroke = Stroke::new(1.0, TEXT);
+        v.window_corner_radius = CornerRadius::same(12);
+        v.menu_corner_radius = CornerRadius::same(8);
+        v.window_shadow = Shadow {
+            offset: [0, 10],
+            blur: 32,
+            spread: 0,
+            color: Color32::from_black_alpha(120),
+        };
+        v.popup_shadow = Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: Color32::from_black_alpha(100),
+        };
+        v.handle_shape = egui::style::HandleShape::Circle;
+        let w = &mut v.widgets;
+        w.noninteractive.bg_fill = PANEL;
+        w.noninteractive.weak_bg_fill = PANEL;
+        w.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
+        w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
+        w.inactive.bg_fill = SURFACE;
+        w.inactive.weak_bg_fill = SURFACE;
+        w.inactive.bg_stroke = Stroke::NONE;
+        w.inactive.fg_stroke = Stroke::new(1.2, TEXT);
+        w.hovered.bg_fill = HOVER;
+        w.hovered.weak_bg_fill = HOVER;
+        w.hovered.bg_stroke = Stroke::NONE;
+        w.hovered.fg_stroke = Stroke::new(1.4, TEXT);
+        w.active.bg_fill = PRESSED;
+        w.active.weak_bg_fill = PRESSED;
+        w.active.bg_stroke = Stroke::NONE;
+        w.active.fg_stroke = Stroke::new(1.4, TEXT);
+        w.open.bg_fill = HOVER;
+        w.open.weak_bg_fill = HOVER;
+        w.open.bg_stroke = Stroke::NONE;
+        w.open.fg_stroke = Stroke::new(1.2, TEXT);
+        for s in [
+            &mut w.noninteractive,
+            &mut w.inactive,
+            &mut w.hovered,
+            &mut w.active,
+            &mut w.open,
+        ] {
+            s.corner_radius = CornerRadius::same(6);
+            s.expansion = 0.0;
+        }
+        v
+    }
+
+    /// Install fonts and the dark graphite style. Both egui themes get the
+    /// same visuals so the OS light/dark setting cannot switch them.
+    pub fn apply(ctx: &egui::Context) {
+        install_fonts(ctx);
+        ctx.set_theme(egui::Theme::Dark);
+        let v = visuals();
+        ctx.all_styles_mut(|s| {
+            s.visuals = v.clone();
+            s.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            s.spacing.button_padding = egui::vec2(12.0, 4.0);
+            s.spacing.interact_size.y = 26.0;
+            s.spacing.menu_margin = egui::Margin::same(6);
+            s.spacing.window_margin = egui::Margin::same(20);
+            use egui::TextStyle::*;
+            for (style, font) in [
+                (Body, FontId::proportional(13.0)),
+                (Button, FontId::proportional(13.0)),
+                (Small, FontId::proportional(11.0)),
+                (Heading, medium(17.0)),
+                (Monospace, FontId::monospace(12.0)),
+            ] {
+                s.text_styles.insert(style, font);
+            }
+        });
+    }
+}
+
+/// Platform-correct label for a shortcut (`⌘Z` on macOS, `Ctrl+Z` elsewhere).
+pub fn shortcut(ctx: &egui::Context, mods: egui::Modifiers, key: egui::Key) -> String {
+    ctx.format_shortcut(&egui::KeyboardShortcut::new(mods, key))
+}
+
+/// Accent-filled call-to-action button.
+pub fn primary<'a>(text: &str) -> egui::Button<'a> {
+    egui::Button::new(
+        egui::RichText::new(text)
+            .font(theme::medium(13.0))
+            .color(Color32::WHITE),
+    )
+    .fill(theme::ACCENT)
+    .corner_radius(6.0)
+    .min_size(egui::vec2(0.0, 28.0))
+}
+
+/// Quiet secondary button.
+pub fn ghost<'a>(text: &str) -> egui::Button<'a> {
+    egui::Button::new(egui::RichText::new(text).color(theme::TEXT))
+        .corner_radius(6.0)
+        .min_size(egui::vec2(0.0, 28.0))
+}
+
+/// Small muted icon + text line (status messages).
+pub fn status_line(ui: &mut Ui, icon: Icon, color: Color32, text: &str) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+        paint_icon(ui.painter(), r, icon, color);
+        ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::MUTED)).wrap());
+    })
+    .response
+}
 
 pub fn gradient_rect(ui: &Ui, rect: Rect, a: Color32, b: Color32) {
     let mut mesh = egui::Mesh::default();
@@ -18,104 +199,13 @@ pub fn gradient_rect(ui: &Ui, rect: Rect, a: Color32, b: Color32) {
     ui.painter().add(egui::Shape::mesh(mesh));
 }
 
-/// Integer slider row (e.g. ranges 1..10).
-#[allow(dead_code)]
-pub fn slider_u8(
-    ui: &mut Ui,
-    label: &str,
-    v: &mut u8,
-    range: std::ops::RangeInclusive<u8>,
-    default: u8,
-    tip: &str,
-) -> bool {
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        let lbl = ui.add_sized(
-            [LABEL_W, 18.0],
-            egui::Label::new(label).sense(Sense::click()),
-        );
-        let lbl = if tip.is_empty() {
-            lbl
-        } else {
-            lbl.on_hover_text(tip)
-        };
-        if lbl.clicked() && *v != default {
-            *v = default;
-            changed = true;
-        }
-        ui.spacing_mut().slider_width = (ui.available_width() - 76.0).max(40.0);
-        changed |= ui.add(egui::Slider::new(v, range)).changed();
-    });
-    changed
-}
-
-/// A dropdown with a ⟳ button that cycles to the next option.
-#[allow(dead_code)]
-pub fn combo<T: Copy + PartialEq>(
-    ui: &mut Ui,
-    label: &str,
-    v: &mut T,
-    all: &[T],
-    name: impl Fn(T) -> &'static str,
-    tip: &str,
-) -> bool {
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        let lbl = ui.add_sized([LABEL_W, 18.0], egui::Label::new(label));
-        if !tip.is_empty() {
-            lbl.on_hover_text(tip);
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button("⟳")
-                .on_hover_text("Cycle to the next option")
-                .clicked()
-            {
-                let i = all.iter().position(|o| *o == *v).unwrap_or(0);
-                *v = all[(i + 1) % all.len()];
-                changed = true;
-            }
-            let w = (ui.available_width() - 4.0).max(60.0);
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                egui::ComboBox::from_id_salt(("combo", label, std::any::type_name::<T>(), ui.id()))
-                    .width(w)
-                    .selected_text(name(*v))
-                    .show_ui(ui, |ui| {
-                        for &o in all {
-                            if ui.selectable_label(*v == o, name(o)).clicked() && *v != o {
-                                *v = o;
-                                changed = true;
-                            }
-                        }
-                    });
-            });
-        });
-    });
-    changed
-}
-
-pub fn section<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
-    egui::Frame::group(ui.style())
-        .inner_margin(egui::Margin::same(8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(
-                egui::RichText::new(title)
-                    .small()
-                    .strong()
-                    .color(ui.visuals().weak_text_color()),
-            );
-            ui.add_space(2.0);
-            add(ui)
-        })
-        .inner
-}
-
-/// Paint an RGB histogram (counts per channel, 256 bins).
+/// Paint an RGB histogram (counts per channel, 256 bins) as additive
+/// translucent fills, so overlapping channels sum towards white.
 pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 6.0, Color32::from_rgb(232, 232, 235));
+    p.rect_filled(rect, 6.0, theme::BG);
+    let plot = rect.shrink2(egui::vec2(6.0, 6.0));
     let max = h
         .iter()
         .flat_map(|c| c[2..254].iter())
@@ -123,21 +213,37 @@ pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2) {
         .max()
         .unwrap_or(1)
         .max(1) as f32;
-    let cols = [
-        Color32::from_rgb(222, 70, 70),
-        Color32::from_rgb(60, 170, 80),
-        Color32::from_rgb(60, 110, 230),
-    ];
-    for (c, col) in cols.iter().enumerate() {
-        let mut pts = Vec::with_capacity(258);
-        pts.push(rect.left_bottom());
+    let cols = [(235u8, 72u8, 72u8), (72, 200, 96), (80, 130, 255)];
+    for (c, &(r, g, b)) in cols.iter().enumerate() {
+        let y = |v: u32| plot.bottom() - plot.height() * (v as f32 / max).sqrt().min(1.0);
+        let x = |i: usize| plot.left() + plot.width() * i as f32 / 255.0;
+        // Additive colour: alpha 0 in premultiplied space.
+        let fill = Color32::from_rgba_premultiplied(
+            (r as f32 * 0.38) as u8,
+            (g as f32 * 0.38) as u8,
+            (b as f32 * 0.38) as u8,
+            0,
+        );
+        let mut mesh = egui::Mesh::default();
         for (i, &v) in h[c].iter().enumerate() {
-            let x = rect.left() + rect.width() * i as f32 / 255.0;
-            let y = rect.bottom() - rect.height() * ((v as f32 / max).sqrt()).min(1.0);
-            pts.push(egui::pos2(x, y));
+            mesh.colored_vertex(egui::pos2(x(i), plot.bottom()), fill);
+            mesh.colored_vertex(egui::pos2(x(i), y(v)), fill);
+            if i > 0 {
+                let k = (i * 2) as u32;
+                mesh.add_triangle(k - 2, k - 1, k);
+                mesh.add_triangle(k - 1, k, k + 1);
+            }
         }
-        pts.push(rect.right_bottom());
-        p.add(egui::Shape::line(pts, egui::Stroke::new(1.2, *col)));
+        p.add(egui::Shape::mesh(mesh));
+        let pts: Vec<_> = h[c]
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| egui::pos2(x(i), y(v)))
+            .collect();
+        p.add(egui::Shape::line(
+            pts,
+            egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(r / 2, g / 2, b / 2, 0)),
+        ));
     }
 }
 
@@ -145,10 +251,10 @@ pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2) {
 pub fn curves_plot(ui: &mut Ui, samples: &[[f32; 4]], size: egui::Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 3.0, Color32::from_black_alpha(120));
+    p.rect_filled(rect, 6.0, theme::BG);
     for i in 1..4 {
         let t = i as f32 / 4.0;
-        let s = egui::Stroke::new(0.5, Color32::from_gray(70));
+        let s = egui::Stroke::new(1.0, theme::LINE);
         p.line_segment(
             [
                 egui::pos2(rect.left() + rect.width() * t, rect.top()),
@@ -165,9 +271,9 @@ pub fn curves_plot(ui: &mut Ui, samples: &[[f32; 4]], size: egui::Vec2) {
         );
     }
     let cols = [
-        Color32::from_rgb(240, 80, 80),
-        Color32::from_rgb(80, 220, 80),
-        Color32::from_rgb(90, 140, 255),
+        Color32::from_rgb(235, 88, 88),
+        Color32::from_rgb(88, 205, 110),
+        Color32::from_rgb(96, 145, 255),
     ];
     for c in 0..3 {
         let pts: Vec<egui::Pos2> = samples
@@ -183,89 +289,21 @@ pub fn curves_plot(ui: &mut Ui, samples: &[[f32; 4]], size: egui::Vec2) {
     }
 }
 
-/// Colours for the opposing-colour sliders.
+/// Colours for the opposing-colour sliders (muted for the dark theme).
 pub mod grad {
     use eframe::egui::Color32;
-    pub const TEMP: (Color32, Color32) = (
-        Color32::from_rgb(60, 110, 230),
-        Color32::from_rgb(230, 200, 40),
-    );
-    pub const TINT: (Color32, Color32) = (
-        Color32::from_rgb(50, 190, 70),
-        Color32::from_rgb(210, 60, 200),
-    );
+    const BLUE: Color32 = Color32::from_rgb(70, 112, 200);
+    const YELLOW: Color32 = Color32::from_rgb(208, 184, 70);
+    const GREEN: Color32 = Color32::from_rgb(72, 168, 88);
+    const MAGENTA: Color32 = Color32::from_rgb(190, 78, 182);
+    pub const TEMP: (Color32, Color32) = (BLUE, YELLOW);
+    pub const TINT: (Color32, Color32) = (GREEN, MAGENTA);
     pub const RED_CYAN: (Color32, Color32) = (
-        Color32::from_rgb(220, 60, 60),
-        Color32::from_rgb(40, 200, 210),
+        Color32::from_rgb(200, 76, 76),
+        Color32::from_rgb(62, 180, 190),
     );
-    pub const GREEN_MAGENTA: (Color32, Color32) = (
-        Color32::from_rgb(50, 190, 70),
-        Color32::from_rgb(210, 60, 200),
-    );
-    pub const BLUE_YELLOW: (Color32, Color32) = (
-        Color32::from_rgb(60, 110, 230),
-        Color32::from_rgb(230, 200, 40),
-    );
-}
-
-// ---- Light editor theme --------------------------------------------------------
-
-pub mod theme {
-    use eframe::egui::{self, Color32, CornerRadius, Stroke};
-
-    pub const TOOLBAR: Color32 = Color32::from_rgb(232, 232, 232);
-    pub const SIDEBAR: Color32 = Color32::from_rgb(247, 247, 247);
-    pub const CANVAS: Color32 = Color32::from_rgb(143, 143, 143);
-    pub const TEXT: Color32 = Color32::from_rgb(28, 28, 30);
-    pub const MUTED: Color32 = Color32::from_rgb(110, 110, 115);
-    pub const LINE: Color32 = Color32::from_rgb(208, 208, 210);
-    pub const TRACK: Color32 = Color32::from_rgb(214, 214, 216);
-    pub const TRACK_FILL: Color32 = Color32::from_rgb(70, 70, 74);
-    pub const ACCENT: Color32 = Color32::from_rgb(10, 122, 255);
-    pub const WARN: Color32 = Color32::from_rgb(196, 120, 0);
-    pub const OK: Color32 = Color32::from_rgb(36, 150, 70);
-
-    pub fn apply(ctx: &egui::Context) {
-        let mut v = egui::Visuals::light();
-        v.panel_fill = SIDEBAR;
-        v.window_fill = Color32::WHITE;
-        v.extreme_bg_color = Color32::WHITE;
-        v.faint_bg_color = Color32::from_rgb(240, 240, 240);
-        v.override_text_color = Some(TEXT);
-        v.selection.bg_fill = ACCENT;
-        v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-        v.window_corner_radius = CornerRadius::same(10);
-        let r = CornerRadius::same(6);
-        for w in [
-            &mut v.widgets.inactive,
-            &mut v.widgets.hovered,
-            &mut v.widgets.active,
-            &mut v.widgets.open,
-        ] {
-            w.corner_radius = r;
-        }
-        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
-        v.widgets.inactive.weak_bg_fill = Color32::WHITE;
-        v.widgets.inactive.bg_fill = Color32::WHITE;
-        v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(196, 196, 198));
-        v.widgets.inactive.fg_stroke = Stroke::new(1.2, TEXT);
-        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(244, 244, 246);
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(160, 160, 164));
-        v.widgets.active.weak_bg_fill = Color32::from_rgb(230, 230, 233);
-        v.widgets.open.weak_bg_fill = Color32::WHITE;
-        ctx.set_visuals(v);
-        ctx.global_style_mut(|s| {
-            s.spacing.item_spacing = egui::vec2(8.0, 6.0);
-            s.spacing.button_padding = egui::vec2(10.0, 4.0);
-            s.spacing.interact_size.y = 26.0;
-            if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Body) {
-                f.size = 13.5;
-            }
-            if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Button) {
-                f.size = 13.5;
-            }
-        });
-    }
+    pub const GREEN_MAGENTA: (Color32, Color32) = (GREEN, MAGENTA);
+    pub const BLUE_YELLOW: (Color32, Color32) = (BLUE, YELLOW);
 }
 
 // ---- Vector icons ----------------------------------------------------------------
@@ -275,8 +313,6 @@ pub enum Icon {
     Back,
     Prev,
     Next,
-    ZoomOut,
-    ZoomIn,
     Undo,
     Redo,
     Compare,
@@ -287,6 +323,9 @@ pub enum Icon {
     Export,
     Eyedropper,
     Folder,
+    Check,
+    Warn,
+    More,
 }
 
 fn arc(c: egui::Pos2, r: f32, a0: f32, a1: f32, n: usize) -> Vec<egui::Pos2> {
@@ -300,9 +339,9 @@ fn arc(c: egui::Pos2, r: f32, a0: f32, a1: f32, n: usize) -> Vec<egui::Pos2> {
 
 pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     use egui::{Shape, Stroke, pos2, vec2};
-    let st = Stroke::new(1.7, color);
     let c = rect.center();
     let s = rect.width().min(rect.height()) / 20.0; // unit
+    let st = Stroke::new((1.6 * s * 1.25).clamp(1.2, 1.6), color);
     let q = |x: f32, y: f32| pos2(c.x + x * s, c.y + y * s);
     let line = |pts: Vec<egui::Pos2>| Shape::line(pts, st);
     let arrow_head = |tip: egui::Pos2, dir: egui::Vec2| {
@@ -320,14 +359,6 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         }
         Icon::Next => {
             p.add(line(vec![q(-3.0, -7.0), q(4.0, 0.0), q(-3.0, 7.0)]));
-        }
-        Icon::ZoomIn | Icon::ZoomOut => {
-            p.circle_stroke(q(-1.5, -1.5), 6.0 * s, st);
-            p.add(line(vec![q(3.0, 3.0), q(7.5, 7.5)]));
-            p.add(line(vec![q(-4.5, -1.5), q(1.5, -1.5)]));
-            if icon == Icon::ZoomIn {
-                p.add(line(vec![q(-1.5, -4.5), q(-1.5, 1.5)]));
-            }
         }
         Icon::Undo | Icon::Redo => {
             let flip = if icon == Icon::Undo { 1.0 } else { -1.0 };
@@ -408,29 +439,43 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                     q(-8.0, -6.0),
                     q(-3.0, -6.0),
                     q(-1.5, -4.0),
-                    q(6.0, -4.0),
-                    q(6.0, -1.5),
+                    q(8.0, -4.0),
+                    q(8.0, 6.5),
                 ],
                 st,
             ));
-            p.add(Shape::convex_polygon(
-                vec![q(-8.0, 6.5), q(-5.0, -1.5), q(9.0, -1.5), q(6.0, 6.5)],
-                color,
-                Stroke::NONE,
-            ));
+            p.add(line(vec![q(-8.0, -1.0), q(8.0, -1.0)]));
         }
         Icon::Eyedropper => {
             p.add(line(vec![q(-7.0, 7.0), q(3.0, -3.0)]));
             p.add(Shape::line(
                 vec![q(1.0, -5.0), q(5.0, -1.0)],
-                Stroke::new(3.0, color),
+                Stroke::new(3.0 * s.max(0.6), color),
             ));
             p.circle_filled(q(5.0, -5.0), 2.5 * s, color);
+        }
+        Icon::Check => {
+            p.circle_stroke(c, 8.0 * s, st);
+            p.add(line(vec![q(-3.5, 0.2), q(-1.0, 3.0), q(4.0, -2.8)]));
+        }
+        Icon::Warn => {
+            p.add(Shape::closed_line(
+                vec![q(0.0, -8.0), q(8.5, 7.0), q(-8.5, 7.0)],
+                st,
+            ));
+            p.add(line(vec![q(0.0, -2.5), q(0.0, 2.0)]));
+            p.circle_filled(q(0.0, 4.6), 1.0 * s.max(0.8), color);
+        }
+        Icon::More => {
+            for x in [-6.0, 0.0, 6.0] {
+                p.circle_filled(q(x, 0.0), 1.6 * s.max(0.8), color);
+            }
         }
     }
 }
 
-/// Toolbar icon button.
+/// Toolbar icon button: muted glyph that brightens on hover; `selected`
+/// shows a soft surface behind it.
 pub fn icon_button(
     ui: &mut Ui,
     icon: Icon,
@@ -438,8 +483,20 @@ pub fn icon_button(
     selected: bool,
     enabled: bool,
 ) -> egui::Response {
+    icon_button_tinted(ui, icon, tip, selected, enabled, None)
+}
+
+/// [`icon_button`] with a fixed glyph colour (e.g. the accent export icon).
+pub fn icon_button_tinted(
+    ui: &mut Ui,
+    icon: Icon,
+    tip: &str,
+    selected: bool,
+    enabled: bool,
+    tint: Option<Color32>,
+) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(34.0, 30.0),
+        egui::vec2(32.0, 28.0),
         if enabled {
             Sense::click()
         } else {
@@ -447,30 +504,23 @@ pub fn icon_button(
         },
     );
     let p = ui.painter();
+    let hot = resp.hovered() && enabled;
     if selected {
-        p.rect_filled(rect, 6.0, Color32::from_rgb(208, 208, 212));
-    } else if resp.hovered() && enabled {
-        p.rect_filled(rect, 6.0, Color32::from_rgb(220, 220, 224));
+        p.rect_filled(rect, 6.0, theme::HOVER);
+    } else if hot {
+        p.rect_filled(rect, 6.0, theme::SURFACE);
     }
-    let col = if enabled {
-        theme::TEXT
-    } else {
-        Color32::from_rgb(170, 170, 174)
+    let col = match (enabled, tint) {
+        (false, _) => theme::FAINT,
+        (true, Some(t)) => t,
+        (true, None) if hot || selected => theme::TEXT,
+        (true, None) => theme::MUTED,
     };
-    paint_icon(p, rect.shrink2(egui::vec2(7.0, 5.0)), icon, col);
+    paint_icon(p, rect.shrink2(egui::vec2(8.0, 6.0)), icon, col);
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     resp.on_hover_text(tip)
-}
-
-/// Bold caps section header.
-pub fn header(ui: &mut Ui, title: &str) {
-    ui.add_space(14.0);
-    ui.label(
-        egui::RichText::new(title)
-            .strong()
-            .size(12.5)
-            .color(theme::TEXT),
-    );
-    ui.add_space(4.0);
 }
 
 /// Label-above dropdown, full width.
@@ -484,7 +534,7 @@ pub fn fl_combo<T: Copy + PartialEq>(
 ) -> bool {
     let mut changed = false;
     if !label.is_empty() {
-        let l = ui.label(egui::RichText::new(label).color(theme::TEXT));
+        let l = ui.label(egui::RichText::new(label).small().color(theme::MUTED));
         if !tip.is_empty() {
             l.on_hover_text(tip);
         }
@@ -521,16 +571,22 @@ pub fn fl_slider_origin(
 ) -> bool {
     let mut changed = false;
     let (lo, hi) = (*range.start(), *range.end());
+    let modified = (*v - default).abs() > 1e-6;
     ui.horizontal(|ui| {
         let l = ui.add(
-            egui::Label::new(egui::RichText::new(label).color(theme::TEXT)).sense(Sense::click()),
+            egui::Label::new(egui::RichText::new(label).color(if modified {
+                theme::TEXT
+            } else {
+                theme::MUTED
+            }))
+            .sense(Sense::click()),
         );
         let l = l.on_hover_text(if tip.is_empty() {
             "Click to reset".to_string()
         } else {
             format!("{tip}\n\nClick the label to reset.")
         });
-        if l.clicked() && *v != default {
+        if l.clicked() && modified {
             *v = default;
             changed = true;
         }
@@ -550,6 +606,7 @@ pub fn fl_slider_origin(
                 w.weak_bg_fill = Color32::TRANSPARENT;
                 w.bg_fill = Color32::TRANSPARENT;
             }
+            vis.inactive.fg_stroke.color = theme::MUTED;
             let dv = egui::DragValue::new(v)
                 .speed((hi - lo) as f64 / 400.0)
                 .max_decimals(decimals)
@@ -561,10 +618,10 @@ pub fn fl_slider_origin(
     });
     let w = ui.available_width() - 6.0;
     ui.add_space(-6.0);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 20.0), Sense::click_and_drag());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 18.0), Sense::click_and_drag());
     let track = Rect::from_min_max(
-        egui::pos2(rect.left() + 9.0, rect.center().y - 1.0),
-        egui::pos2(rect.right() - 9.0, rect.center().y + 1.0),
+        egui::pos2(rect.left() + 7.0, rect.center().y - 1.0),
+        egui::pos2(rect.right() - 7.0, rect.center().y + 1.0),
     );
     let to_x = |val: f32| track.left() + track.width() * ((val - lo) / (hi - lo)).clamp(0.0, 1.0);
     if resp.double_clicked() {
@@ -586,9 +643,14 @@ pub fn fl_slider_origin(
             }
         }
     }
+    let hot = resp.hovered() || resp.dragged();
     let p = ui.painter();
     match gradient {
-        Some((a, b)) => gradient_rect(ui, track.expand2(egui::vec2(0.0, 1.0)), a, b),
+        Some((a, b)) => {
+            let a = a.gamma_multiply(0.85);
+            let b = b.gamma_multiply(0.85);
+            gradient_rect(ui, track.expand2(egui::vec2(0.0, 0.5)), a, b)
+        }
         None => {
             p.rect_filled(track, 1.0, theme::TRACK);
             let fill_base = origin.unwrap_or(default);
@@ -598,23 +660,18 @@ pub fn fl_slider_origin(
                 egui::pos2(z.min(k), track.top()),
                 egui::pos2(z.max(k), track.bottom()),
             );
-            p.rect_filled(fill, 1.0, theme::TRACK_FILL);
+            p.rect_filled(fill, 1.0, theme::ACCENT);
         }
     }
     let knob = egui::pos2(to_x(*v), track.center().y);
-    let hot = resp.hovered() || resp.dragged();
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     p.circle(
         knob,
-        8.0,
-        Color32::WHITE,
-        egui::Stroke::new(
-            if hot { 2.0 } else { 1.5 },
-            if hot {
-                theme::TEXT
-            } else {
-                Color32::from_rgb(90, 90, 94)
-            },
-        ),
+        if hot { 7.0 } else { 6.0 },
+        theme::TEXT,
+        egui::Stroke::new(2.0, theme::PANEL),
     );
     ui.add_space(4.0);
     changed
@@ -686,9 +743,9 @@ pub fn segmented_locked<T: Copy + PartialEq>(
     lock_tip: &str,
 ) -> bool {
     let mut changed = false;
-    let w = (ui.available_width() - 6.0) / items.len() as f32;
+    let w = (ui.available_width() - 4.0) / items.len() as f32;
     egui::Frame::new()
-        .fill(Color32::from_rgb(226, 226, 229))
+        .fill(theme::BG)
         .corner_radius(7.0)
         .inner_margin(2.0)
         .show(ui, |ui| {
@@ -698,7 +755,7 @@ pub fn segmented_locked<T: Copy + PartialEq>(
                     let sel = *v == *t;
                     let is_locked = locked.contains(t);
                     let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(w - 1.0, 24.0),
+                        egui::vec2(w - 0.5, 24.0),
                         if is_locked {
                             Sense::hover()
                         } else {
@@ -711,22 +768,21 @@ pub fn segmented_locked<T: Copy + PartialEq>(
                         resp
                     };
                     if sel {
-                        ui.painter().rect(
-                            rect,
-                            6.0,
-                            Color32::WHITE,
-                            egui::Stroke::new(0.5, Color32::from_rgb(200, 200, 204)),
-                            egui::StrokeKind::Inside,
-                        );
+                        ui.painter().rect_filled(rect, 6.0, theme::HOVER);
                     }
+                    let hot = resp.hovered() && !is_locked;
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
                         *name,
-                        egui::FontId::proportional(13.0),
+                        if sel {
+                            theme::medium(12.5)
+                        } else {
+                            egui::FontId::proportional(12.5)
+                        },
                         if is_locked {
-                            Color32::from_rgb(185, 185, 190)
-                        } else if sel {
+                            theme::FAINT
+                        } else if sel || hot {
                             theme::TEXT
                         } else {
                             theme::MUTED
@@ -742,39 +798,48 @@ pub fn segmented_locked<T: Copy + PartialEq>(
     changed
 }
 
-/// Collapsible caps section header with a chevron. Returns whether the
-/// section is open; the state is remembered per title.
+/// Collapsible section header with a chevron. Returns whether the section
+/// is open; the state is remembered per title.
 pub fn fold(ui: &mut Ui, title: &str) -> bool {
     let id = ui.make_persistent_id(("fold", title));
     let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
-    ui.add_space(12.0);
+    ui.add_space(10.0);
+    let line_y = ui.cursor().top();
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        line_y,
+        egui::Stroke::new(1.0, theme::LINE),
+    );
+    ui.add_space(8.0);
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::click());
     let hot = resp.hovered();
-    let col = if hot { theme::ACCENT } else { theme::TEXT };
     let p = ui.painter();
     p.text(
         rect.left_center(),
         egui::Align2::LEFT_CENTER,
         title,
-        egui::FontId::proportional(12.5),
-        col,
+        theme::medium(12.5),
+        if hot { theme::TEXT } else { theme::MUTED },
     );
     let c = egui::pos2(rect.right() - 8.0, rect.center().y);
     let pts = if open {
         vec![
-            c + egui::vec2(-4.0, -2.0),
-            c + egui::vec2(0.0, 2.0),
-            c + egui::vec2(4.0, -2.0),
+            c + egui::vec2(-3.5, -1.75),
+            c + egui::vec2(0.0, 1.75),
+            c + egui::vec2(3.5, -1.75),
         ]
     } else {
         vec![
-            c + egui::vec2(-2.0, -4.0),
-            c + egui::vec2(2.0, 0.0),
-            c + egui::vec2(-2.0, 4.0),
+            c + egui::vec2(-1.75, -3.5),
+            c + egui::vec2(1.75, 0.0),
+            c + egui::vec2(-1.75, 3.5),
         ]
     };
-    p.add(egui::Shape::line(pts, egui::Stroke::new(1.6, col)));
+    p.add(egui::Shape::line(
+        pts,
+        egui::Stroke::new(1.4, if hot { theme::TEXT } else { theme::FAINT }),
+    ));
     if resp.clicked() {
         open = !open;
         ui.data_mut(|d| d.insert_persisted(id, open));
@@ -784,14 +849,15 @@ pub fn fold(ui: &mut Ui, title: &str) -> bool {
     }
     if open {
         ui.add_space(4.0);
-    } else {
-        ui.painter().line_segment(
-            [
-                egui::pos2(rect.left(), rect.bottom() + 3.0),
-                egui::pos2(rect.right(), rect.bottom() + 3.0),
-            ],
-            egui::Stroke::new(0.5, theme::LINE),
-        );
     }
     open
+}
+
+/// Rounded translucent label drawn over the canvas.
+pub fn pill(p: &egui::Painter, center: egui::Pos2, text: &str) -> Rect {
+    let g = p.layout_no_wrap(text.to_string(), theme::medium(12.0), theme::TEXT);
+    let r = Rect::from_center_size(center, g.size() + egui::vec2(22.0, 10.0));
+    p.rect_filled(r, r.height() / 2.0, Color32::from_black_alpha(170));
+    p.galley(r.center() - g.size() / 2.0, g, theme::TEXT);
+    r
 }
