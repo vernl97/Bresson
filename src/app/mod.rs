@@ -539,17 +539,11 @@ impl NlpApp {
                         .color(theme::MUTED),
                 );
                 let display_str = display_dir.to_string_lossy().to_string();
-                let field = egui::Button::new(
-                    egui::RichText::new(&display_str).color(theme::TEXT),
-                )
-                .truncate()
-                .right_text(egui::RichText::new("Change…").color(theme::ACCENT))
-                .min_size(egui::vec2(ui.available_width(), 30.0));
-                if ui
-                    .add(field)
-                    .on_hover_text(&display_str)
-                    .clicked()
-                {
+                let field = egui::Button::new(egui::RichText::new(&display_str).color(theme::TEXT))
+                    .truncate()
+                    .right_text(egui::RichText::new("Change…").color(theme::ACCENT))
+                    .min_size(egui::vec2(ui.available_width(), 30.0));
+                if ui.add(field).on_hover_text(&display_str).clicked() {
                     if let Some(picked) = picker::pick_folder(Some(&display_dir), Some("Choose")) {
                         picked_dir = Some(picked);
                     }
@@ -912,7 +906,11 @@ mod tests {
             sc: Sidecar {
                 settings: Settings::default(),
                 analysis: Some(Analysis {
-                    origins: [ChannelOrigin { white: 10.0, black: 240.0, mean: 0.5 }; 3],
+                    origins: [ChannelOrigin {
+                        white: 10.0,
+                        black: 240.0,
+                        mean: 0.5,
+                    }; 3],
                     auto_wb: AutoWb::default(),
                     base: [0.85, 0.60, 0.40],
                     key: Settings::default().analysis_key(),
@@ -1053,15 +1051,10 @@ mod ui_tests {
                 .map(|s| s.size().x)
                 .unwrap_or(-1.0)
         };
-        // Editor sidebar, every tab and colour sub-tab.
+        // Editor sidebar.
         h.state_mut().open_editor(0);
         settle(&mut h, 60.0);
-        for tab in [
-            editor::Tab::Convert,
-            editor::Tab::Edit,
-            editor::Tab::Advanced,
-        ] {
-            h.state_mut().editor.set_tab(tab);
+        {
             h.run_steps(3);
             let w0 = width(&h, "editor_sidebar");
             for k in 0..60 {
@@ -1075,6 +1068,20 @@ mod ui_tests {
                 "editor sidebar grew from {w0} to {w1}"
             );
         }
+        // Expanding the Conversion section of a converted frame.
+        h.state_mut().convert(vec![0], false);
+        settle(&mut h, 60.0);
+        let w0 = width(&h, "editor_sidebar");
+        let header = egui::pos2(1190.0, 204.0);
+        h.hover_at(header);
+        h.step();
+        h.drag_at(header);
+        h.step();
+        h.drop_at(header);
+        h.run_steps(5);
+        let w1 = width(&h, "editor_sidebar");
+        eprintln!("conversion expanded {w0} -> {w1}");
+        assert!(w1 <= w0 + 0.5, "editor sidebar grew from {w0} to {w1}");
     }
 
     #[test]
@@ -1258,7 +1265,8 @@ mod ui_tests {
             "suffix": "-positive",
             "long_edge": 0
         }"#;
-        let ex: ExportSettings = serde_json::from_str(json).expect("deserialize legacy export settings");
+        let ex: ExportSettings =
+            serde_json::from_str(json).expect("deserialize legacy export settings");
         assert_eq!(ex.output_dir, None);
 
         // Modern JSON with output_dir
@@ -1274,8 +1282,12 @@ mod ui_tests {
             "long_edge": 0,
             "output_dir": "/Users/abe/Pictures/Export"
         }"#;
-        let ex_modern: ExportSettings = serde_json::from_str(modern_json).expect("deserialize modern export settings");
-        assert_eq!(ex_modern.output_dir, Some(PathBuf::from("/Users/abe/Pictures/Export")));
+        let ex_modern: ExportSettings =
+            serde_json::from_str(modern_json).expect("deserialize modern export settings");
+        assert_eq!(
+            ex_modern.output_dir,
+            Some(PathBuf::from("/Users/abe/Pictures/Export"))
+        );
     }
 
     #[test]
@@ -1307,7 +1319,11 @@ mod ui_tests {
         if tmp.exists() {
             app.open_files(vec![tmp.clone()]);
             assert!(app.single_mode, "single image should set single_mode");
-            assert_eq!(app.view, View::Editor, "single image should immediately open editor");
+            assert_eq!(
+                app.view,
+                View::Editor,
+                "single image should immediately open editor"
+            );
             assert_eq!(app.frames.len(), 1);
             let _ = std::fs::remove_file(tmp);
         }

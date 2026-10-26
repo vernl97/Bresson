@@ -40,11 +40,7 @@ impl NlpApp {
     /// Start screen shown before anything is opened.
     fn welcome_ui(&mut self, ui: &mut egui::Ui) {
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
-        let last = self
-            .defaults
-            .last_folder
-            .clone()
-            .filter(|p| p.is_dir());
+        let last = self.defaults.last_folder.clone().filter(|p| p.is_dir());
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG))
             .show(ui, |ui| {
@@ -62,8 +58,7 @@ impl NlpApp {
                     ui.label(RichText::new("Film negative conversion").color(theme::MUTED));
                     ui.add_space(28.0);
 
-                    let (zone, resp) =
-                        ui.allocate_exact_size(vec2(zone_w, zone_h), Sense::click());
+                    let (zone, resp) = ui.allocate_exact_size(vec2(zone_w, zone_h), Sense::click());
                     let p = ui.painter();
                     let (fill, stroke, fg) = if hovering {
                         (
@@ -235,8 +230,7 @@ impl NlpApp {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let conv = self.frames.iter().filter(|f| f.sc.is_converted()).count();
-                    let mut status =
-                        format!("{} frames · {} converted", self.frames.len(), conv);
+                    let mut status = format!("{} frames · {} converted", self.frames.len(), conv);
                     if !self.selected.is_empty() {
                         status += &format!(" · {} selected", self.selected.len());
                     }
@@ -413,8 +407,8 @@ impl NlpApp {
                             }
                             _ => {
                                 // Loading shimmer.
-                                let a = (((now * 2.4 + i as f64 * 0.35).sin() * 0.5 + 0.5)
-                                    * 10.0) as u8
+                                let a = (((now * 2.4 + i as f64 * 0.35).sin() * 0.5 + 0.5) * 10.0)
+                                    as u8
                                     + 6;
                                 p.rect_filled(img_area, 3.0, Color32::from_white_alpha(a));
                                 ui.ctx().request_repaint();
@@ -434,7 +428,11 @@ impl NlpApp {
                         let mut x = rect.right() - 8.0;
                         if f.exporting {
                             let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
-                            p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::WARN.gamma_multiply(a));
+                            p.circle_filled(
+                                pos2(x - 3.0, row_y),
+                                3.0,
+                                theme::WARN.gamma_multiply(a),
+                            );
                             x -= 12.0;
                             ui.ctx().request_repaint();
                         }
@@ -471,11 +469,7 @@ impl NlpApp {
                             (x - name_x - 4.0).max(10.0),
                         );
                         let g = p.layout_job(job);
-                        p.galley(
-                            pos2(name_x, row_y - g.size().y / 2.0),
-                            g,
-                            theme::MUTED,
-                        );
+                        p.galley(pos2(name_x, row_y - g.size().y / 2.0), g, theme::MUTED);
 
                         if resp.double_clicked() {
                             double = Some(i);
@@ -485,9 +479,8 @@ impl NlpApp {
                         let has_clip = self.clipboard.is_some();
                         resp.context_menu(|ui| {
                             let mut item = |ui: &mut egui::Ui, text: &str, key: &str, a, on| {
-                                let b = egui::Button::new(text).shortcut_text(
-                                    RichText::new(key).color(theme::FAINT),
-                                );
+                                let b = egui::Button::new(text)
+                                    .shortcut_text(RichText::new(key).color(theme::FAINT));
                                 if ui.add_enabled(on, b).clicked() {
                                     ctx_action = Some((i, a));
                                     ui.close();

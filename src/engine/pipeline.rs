@@ -683,7 +683,10 @@ mod tests {
         let base_uncropped = auto_base(&src, &uncropped);
         let base_cropped = auto_base(&src, &cropped);
 
-        assert_eq!(base_uncropped, base_cropped, "auto_base must look at the entire image even when cropped");
+        assert_eq!(
+            base_uncropped, base_cropped,
+            "auto_base must look at the entire image even when cropped"
+        );
         assert!((base_cropped[0] - 0.9).abs() < 1e-3);
     }
 }

@@ -448,7 +448,33 @@ impl Settings {
         }
     }
 
-    /// Copy only the Edit/Advanced-tab parameters (used by paste/sync so a
+    /// Restore the per-frame fields (capture, analysis inputs and geometry)
+    /// from `k`, so applying defaults or resetting keeps the conversion.
+    pub fn keep_frame_fields(&mut self, k: &Settings) {
+        (
+            self.source,
+            self.image_type,
+            self.color_model,
+            self.pre_saturation,
+            self.border_buffer,
+            self.film_base,
+            self.film_base_sample,
+            self.use_roll,
+        ) = (
+            k.source,
+            k.image_type,
+            k.color_model,
+            k.pre_saturation,
+            k.border_buffer,
+            k.film_base,
+            k.film_base_sample,
+            k.use_roll,
+        );
+        (self.rotation, self.flip_h, self.straighten, self.crop) =
+            (k.rotation, k.flip_h, k.straighten, k.crop);
+    }
+
+    /// Copy only the adjustment parameters (used by paste/sync so a
     /// frame keeps its own crop and analysis-relevant convert settings).
     pub fn copy_edit_from(&mut self, o: &Settings) {
         let keep = (
@@ -546,20 +572,40 @@ mod tests {
         let initial_key = s.analysis_key();
 
         s.crop = [5.0, 10.0, 5.0, 10.0];
-        assert_eq!(s.analysis_key(), initial_key, "crop must not alter analysis_key");
+        assert_eq!(
+            s.analysis_key(),
+            initial_key,
+            "crop must not alter analysis_key"
+        );
 
         s.straighten = 2.5;
-        assert_eq!(s.analysis_key(), initial_key, "straighten must not alter analysis_key");
+        assert_eq!(
+            s.analysis_key(),
+            initial_key,
+            "straighten must not alter analysis_key"
+        );
 
         s.rotation = 1;
-        assert_eq!(s.analysis_key(), initial_key, "rotation must not alter analysis_key");
+        assert_eq!(
+            s.analysis_key(),
+            initial_key,
+            "rotation must not alter analysis_key"
+        );
 
         s.flip_h = true;
-        assert_eq!(s.analysis_key(), initial_key, "flip_h must not alter analysis_key");
+        assert_eq!(
+            s.analysis_key(),
+            initial_key,
+            "flip_h must not alter analysis_key"
+        );
 
         // Convert settings MUST alter analysis_key
         s.color_model = ColorModel::Frontier;
-        assert_ne!(s.analysis_key(), initial_key, "color_model must alter analysis_key");
+        assert_ne!(
+            s.analysis_key(),
+            initial_key,
+            "color_model must alter analysis_key"
+        );
     }
 
     #[test]
@@ -578,6 +624,9 @@ mod tests {
             "crop": [0, 0, 0, 0]
         }"#;
         let key: Result<AnalysisKey, _> = serde_json::from_str(json);
-        assert!(key.is_ok(), "legacy sidecar with crop fields must deserialize cleanly");
+        assert!(
+            key.is_ok(),
+            "legacy sidecar with crop fields must deserialize cleanly"
+        );
     }
 }

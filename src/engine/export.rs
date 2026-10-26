@@ -409,7 +409,10 @@ mod tests {
         ex.output_dir = Some(PathBuf::from("/Users/abe/Pictures/ExportDir"));
 
         let p = output_path(src, &ex);
-        assert_eq!(p, PathBuf::from("/Users/abe/Pictures/ExportDir/test-01-positive.jpg"));
+        assert_eq!(
+            p,
+            PathBuf::from("/Users/abe/Pictures/ExportDir/test-01-positive.jpg")
+        );
     }
 
     #[test]
@@ -423,6 +426,9 @@ mod tests {
         ex.output_dir = None;
 
         let p = output_path(src, &ex);
-        assert_eq!(p, PathBuf::from("/path/to/scans/Positives/test-01-positive.tif"));
+        assert_eq!(
+            p,
+            PathBuf::from("/path/to/scans/Positives/test-01-positive.tif")
+        );
     }
 }
