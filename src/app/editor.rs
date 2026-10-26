@@ -88,7 +88,7 @@ pub struct Editor {
     pub loading: bool,
     neg: Option<Negative>,
     neg_small: Option<Negative>,
-    neg_key: Option<(AnalysisKey, [i32; 3])>,
+    neg_key: Option<(AnalysisKey, [i32; 4], i32, u8, bool, [i32; 3])>,
     tex: Option<egui::TextureHandle>,
     dirty: bool,
     pub before: bool,
@@ -225,16 +225,9 @@ impl NlpApp {
         {
             s.engine = EnginePreset::Custom;
         }
-        let key_changed = s.analysis_key() != before.analysis_key();
         let wb_changed = s.wb_mode != before.wb_mode;
         self.frames[i].sc.settings = s;
-        if key_changed && self.frames[i].sc.analysis.is_some() {
-            if self.frames[i].is_roll() {
-                self.toast("This frame belongs to a roll — use Convert to re-analyse it with the new conversion settings.", false);
-            } else {
-                self.reanalyze(i);
-            }
-        } else if wb_changed {
+        if wb_changed {
             self.frames[i].apply_wb_mode();
         }
         self.mark_changed(i);
@@ -255,11 +248,7 @@ impl NlpApp {
             self.editor.undo.push(cur.clone());
         }
         self.editor.committed = Some(t.clone());
-        let key_changed = t.analysis_key() != cur.analysis_key();
         self.frames[i].sc.settings = t;
-        if key_changed && self.frames[i].sc.analysis.is_some() && !self.frames[i].is_roll() {
-            self.reanalyze(i);
-        }
         self.mark_changed(i);
         self.editor.dirty = true;
     }
@@ -334,7 +323,14 @@ impl NlpApp {
         let s = self.preview_settings(i);
         let f = &self.frames[i];
         let base = f.base_for(&src);
-        let key = (s.analysis_key(), base.map(|v| (v * 1e5) as i32));
+        let key = (
+            s.analysis_key(),
+            s.crop.map(|v| (v * 100.0).round() as i32),
+            (s.straighten * 100.0).round() as i32,
+            s.rotation,
+            s.flip_h,
+            base.map(|v| (v * 1e5) as i32),
+        );
         if self.editor.neg_key.as_ref() != Some(&key) || self.editor.neg.is_none() {
             let neg = pipeline::prepare_negative(&src, &s, base);
             let (d, w, h) = decode::downscale(&neg.data, neg.width, neg.height, 1024);

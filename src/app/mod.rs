@@ -69,8 +69,8 @@ impl Frame {
     /// Base colour the frame renders with.
     pub fn base_for(&self, src: &SourceImage) -> [f32; 3] {
         match &self.sc.analysis {
-            Some(a) if a.key == self.sc.settings.analysis_key() => a.base,
-            _ => pipeline::resolve_base(
+            Some(a) => a.base,
+            None => pipeline::resolve_base(
                 src,
                 &self.sc.settings,
                 self.is_roll().then(|| self.sc.roll.as_ref().unwrap().base),
@@ -391,6 +391,7 @@ impl NlpApp {
     }
 
     /// Synchronous re-analysis of one frame (after Convert-tab changes).
+    #[allow(dead_code)]
     pub fn reanalyze(&mut self, i: usize) {
         let src = self.frames[i].proxy().or_else(|| {
             self.editor
@@ -986,6 +987,58 @@ pub fn run(open: Option<PathBuf>) -> eframe::Result {
         options,
         Box::new(move |cc| Ok(Box::new(NlpApp::new(cc, open)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::curve::ChannelOrigin;
+    use crate::engine::pipeline::{Analysis, AutoWb};
+
+    #[test]
+    fn converted_frame_base_is_fixed_on_crop() {
+        let mut frame = Frame {
+            path: PathBuf::from("test.dng"),
+            name: "test.dng".into(),
+            sc: Sidecar {
+                settings: Settings::default(),
+                analysis: Some(Analysis {
+                    origins: [ChannelOrigin { white: 10.0, black: 240.0, mean: 0.5 }; 3],
+                    auto_wb: AutoWb::default(),
+                    base: [0.85, 0.60, 0.40],
+                    key: Settings::default().analysis_key(),
+                }),
+                roll: None,
+                metadata: Default::default(),
+                version: 1,
+            },
+            proxy: ProxyState::NotLoaded,
+            thumb_src: None,
+            thumb: None,
+            thumb_dirty: false,
+            dirty_since: None,
+            exporting: false,
+            source_auto: false,
+        };
+
+        let dummy_src = SourceImage {
+            width: 10,
+            height: 10,
+            data: vec![[0.1, 0.1, 0.1]; 100],
+            to_melissa: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            info: Default::default(),
+            as_shot_wb: [1.0; 3],
+            is_raw: false,
+        };
+
+        // Initially base is the analysis base
+        assert_eq!(frame.base_for(&dummy_src), [0.85, 0.60, 0.40]);
+
+        // Change crop
+        frame.sc.settings.crop = [10.0, 10.0, 10.0, 10.0];
+        // The base must REMAIN the fixed analysis base
+        assert_eq!(frame.base_for(&dummy_src), [0.85, 0.60, 0.40]);
+    }
 }
 
 #[cfg(test)]

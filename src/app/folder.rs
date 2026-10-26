@@ -240,15 +240,9 @@ impl NlpApp {
         };
         for i in self.sel_vec() {
             let was_roll = self.frames[i].is_roll();
-            let old_key = self.frames[i].sc.settings.analysis_key();
             self.frames[i].sc.settings.copy_edit_from(&c);
             self.frames[i].sc.settings.use_roll = was_roll;
-            if self.frames[i].sc.analysis.is_some()
-                && old_key != self.frames[i].sc.settings.analysis_key()
-                && !was_roll
-            {
-                self.reanalyze(i);
-            } else if c.wb_mode != WbMode::Custom {
+            if c.wb_mode != WbMode::Custom {
                 self.frames[i].apply_wb_mode();
             }
             self.mark_changed(i);

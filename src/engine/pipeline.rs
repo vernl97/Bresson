@@ -48,16 +48,10 @@ pub struct Analysis {
 
 /// Estimate the film base (brightest, unexposed area) in source space:
 /// the average of pixels between the 98.5th and 99.5th brightness percentile.
-pub fn auto_base(src: &SourceImage, s: &Settings) -> [f32; 3] {
-    let (d, _, _) = decode::geometry(
-        &src.data,
-        src.width,
-        src.height,
-        s.rotation,
-        s.flip_h,
-        s.straighten,
-        s.crop,
-    );
+/// Always uses the entire image (uncropped) so that film borders remain
+/// available for mask neutralisation even when a crop has been set.
+pub fn auto_base(src: &SourceImage, _s: &Settings) -> [f32; 3] {
+    let d = &src.data;
     let mut sums: Vec<(f32, usize)> = d
         .iter()
         .enumerate()
@@ -660,5 +654,36 @@ mod tests {
         assert!(ex.is_empty());
         assert_eq!(o[0].white, 35.0);
         assert_eq!(o[0].black, 210.0);
+    }
+
+    #[test]
+    fn auto_base_samples_entire_image_regardless_of_crop() {
+        let mut data = vec![[0.1f32, 0.1, 0.1]; 100 * 100];
+        // Put unexposed film base in the border (outer 5 rows)
+        for y in 0..5 {
+            for x in 0..100 {
+                data[y * 100 + x] = [0.9f32, 0.6, 0.4];
+            }
+        }
+        let src = SourceImage {
+            width: 100,
+            height: 100,
+            data,
+            to_melissa: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            info: Default::default(),
+            as_shot_wb: [1.0; 3],
+            is_raw: false,
+        };
+
+        let uncropped = Settings::default();
+        let mut cropped = Settings::default();
+        // Crop out the top 20% containing the border
+        cropped.crop = [20.0, 10.0, 10.0, 10.0];
+
+        let base_uncropped = auto_base(&src, &uncropped);
+        let base_cropped = auto_base(&src, &cropped);
+
+        assert_eq!(base_uncropped, base_cropped, "auto_base must look at the entire image even when cropped");
+        assert!((base_cropped[0] - 0.9).abs() < 1e-3);
     }
 }
