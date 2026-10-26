@@ -1,0 +1,765 @@
+//! Shared controls mirroring the plugin's UI conventions:
+//! click a label to reset, ⟳ to cycle a dropdown, typed values may exceed
+//! the slider range.
+
+use eframe::egui::{self, Color32, Rect, Sense, Ui};
+
+pub const LABEL_W: f32 = 92.0;
+
+pub fn gradient_rect(ui: &Ui, rect: Rect, a: Color32, b: Color32) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), a);
+    mesh.colored_vertex(rect.right_top(), b);
+    mesh.colored_vertex(rect.right_bottom(), b);
+    mesh.colored_vertex(rect.left_bottom(), a);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
+/// Integer slider row (e.g. ranges 1..10).
+pub fn slider_u8(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut u8,
+    range: std::ops::RangeInclusive<u8>,
+    default: u8,
+    tip: &str,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let lbl = ui.add_sized(
+            [LABEL_W, 18.0],
+            egui::Label::new(label).sense(Sense::click()),
+        );
+        let lbl = if tip.is_empty() {
+            lbl
+        } else {
+            lbl.on_hover_text(tip)
+        };
+        if lbl.clicked() && *v != default {
+            *v = default;
+            changed = true;
+        }
+        ui.spacing_mut().slider_width = (ui.available_width() - 76.0).max(40.0);
+        changed |= ui.add(egui::Slider::new(v, range)).changed();
+    });
+    changed
+}
+
+/// A dropdown with a ⟳ button that cycles to the next option.
+pub fn combo<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut T,
+    all: &[T],
+    name: impl Fn(T) -> &'static str,
+    tip: &str,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let lbl = ui.add_sized([LABEL_W, 18.0], egui::Label::new(label));
+        if !tip.is_empty() {
+            lbl.on_hover_text(tip);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("⟳")
+                .on_hover_text("Cycle to the next option")
+                .clicked()
+            {
+                let i = all.iter().position(|o| *o == *v).unwrap_or(0);
+                *v = all[(i + 1) % all.len()];
+                changed = true;
+            }
+            let w = (ui.available_width() - 4.0).max(60.0);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                egui::ComboBox::from_id_salt(("combo", label, std::any::type_name::<T>(), ui.id()))
+                    .width(w)
+                    .selected_text(name(*v))
+                    .show_ui(ui, |ui| {
+                        for &o in all {
+                            if ui.selectable_label(*v == o, name(o)).clicked() && *v != o {
+                                *v = o;
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+        });
+    });
+    changed
+}
+
+pub fn section<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(title)
+                    .small()
+                    .strong()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(2.0);
+            add(ui)
+        })
+        .inner
+}
+
+/// Paint an RGB histogram (counts per channel, 256 bins).
+pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 6.0, Color32::from_rgb(232, 232, 235));
+    let max = h
+        .iter()
+        .flat_map(|c| c[2..254].iter())
+        .copied()
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let cols = [
+        Color32::from_rgb(222, 70, 70),
+        Color32::from_rgb(60, 170, 80),
+        Color32::from_rgb(60, 110, 230),
+    ];
+    for (c, col) in cols.iter().enumerate() {
+        let mut pts = Vec::with_capacity(258);
+        pts.push(rect.left_bottom());
+        for (i, &v) in h[c].iter().enumerate() {
+            let x = rect.left() + rect.width() * i as f32 / 255.0;
+            let y = rect.bottom() - rect.height() * ((v as f32 / max).sqrt()).min(1.0);
+            pts.push(egui::pos2(x, y));
+        }
+        pts.push(rect.right_bottom());
+        p.add(egui::Shape::line(pts, egui::Stroke::new(1.2, *col)));
+    }
+}
+
+/// Plot the three channel curves (x = negative input, y = positive output).
+pub fn curves_plot(ui: &mut Ui, samples: &[[f32; 4]], size: egui::Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 3.0, Color32::from_black_alpha(120));
+    for i in 1..4 {
+        let t = i as f32 / 4.0;
+        let s = egui::Stroke::new(0.5, Color32::from_gray(70));
+        p.line_segment(
+            [
+                egui::pos2(rect.left() + rect.width() * t, rect.top()),
+                egui::pos2(rect.left() + rect.width() * t, rect.bottom()),
+            ],
+            s,
+        );
+        p.line_segment(
+            [
+                egui::pos2(rect.left(), rect.top() + rect.height() * t),
+                egui::pos2(rect.right(), rect.top() + rect.height() * t),
+            ],
+            s,
+        );
+    }
+    let cols = [
+        Color32::from_rgb(240, 80, 80),
+        Color32::from_rgb(80, 220, 80),
+        Color32::from_rgb(90, 140, 255),
+    ];
+    for c in 0..3 {
+        let pts: Vec<egui::Pos2> = samples
+            .iter()
+            .map(|s| {
+                egui::pos2(
+                    rect.left() + s[0] * rect.width(),
+                    rect.bottom() - s[c + 1] * rect.height(),
+                )
+            })
+            .collect();
+        p.add(egui::Shape::line(pts, egui::Stroke::new(1.5, cols[c])));
+    }
+}
+
+/// Colours for the opposing-colour sliders.
+pub mod grad {
+    use eframe::egui::Color32;
+    pub const TEMP: (Color32, Color32) = (
+        Color32::from_rgb(60, 110, 230),
+        Color32::from_rgb(230, 200, 40),
+    );
+    pub const TINT: (Color32, Color32) = (
+        Color32::from_rgb(50, 190, 70),
+        Color32::from_rgb(210, 60, 200),
+    );
+    pub const RED_CYAN: (Color32, Color32) = (
+        Color32::from_rgb(220, 60, 60),
+        Color32::from_rgb(40, 200, 210),
+    );
+    pub const GREEN_MAGENTA: (Color32, Color32) = (
+        Color32::from_rgb(50, 190, 70),
+        Color32::from_rgb(210, 60, 200),
+    );
+    pub const BLUE_YELLOW: (Color32, Color32) = (
+        Color32::from_rgb(60, 110, 230),
+        Color32::from_rgb(230, 200, 40),
+    );
+}
+
+// ---- Light editor theme --------------------------------------------------------
+
+pub mod theme {
+    use eframe::egui::{self, Color32, CornerRadius, Stroke};
+
+    pub const TOOLBAR: Color32 = Color32::from_rgb(232, 232, 232);
+    pub const SIDEBAR: Color32 = Color32::from_rgb(247, 247, 247);
+    pub const CANVAS: Color32 = Color32::from_rgb(143, 143, 143);
+    pub const TEXT: Color32 = Color32::from_rgb(28, 28, 30);
+    pub const MUTED: Color32 = Color32::from_rgb(110, 110, 115);
+    pub const LINE: Color32 = Color32::from_rgb(208, 208, 210);
+    pub const TRACK: Color32 = Color32::from_rgb(214, 214, 216);
+    pub const TRACK_FILL: Color32 = Color32::from_rgb(70, 70, 74);
+    pub const ACCENT: Color32 = Color32::from_rgb(10, 122, 255);
+    pub const WARN: Color32 = Color32::from_rgb(196, 120, 0);
+    pub const OK: Color32 = Color32::from_rgb(36, 150, 70);
+
+    pub fn apply(ctx: &egui::Context) {
+        let mut v = egui::Visuals::light();
+        v.panel_fill = SIDEBAR;
+        v.window_fill = Color32::WHITE;
+        v.extreme_bg_color = Color32::WHITE;
+        v.faint_bg_color = Color32::from_rgb(240, 240, 240);
+        v.override_text_color = Some(TEXT);
+        v.selection.bg_fill = ACCENT;
+        v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+        v.window_corner_radius = CornerRadius::same(10);
+        let r = CornerRadius::same(6);
+        for w in [
+            &mut v.widgets.inactive,
+            &mut v.widgets.hovered,
+            &mut v.widgets.active,
+            &mut v.widgets.open,
+        ] {
+            w.corner_radius = r;
+        }
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
+        v.widgets.inactive.weak_bg_fill = Color32::WHITE;
+        v.widgets.inactive.bg_fill = Color32::WHITE;
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(196, 196, 198));
+        v.widgets.inactive.fg_stroke = Stroke::new(1.2, TEXT);
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(244, 244, 246);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(160, 160, 164));
+        v.widgets.active.weak_bg_fill = Color32::from_rgb(230, 230, 233);
+        v.widgets.open.weak_bg_fill = Color32::WHITE;
+        ctx.set_visuals(v);
+        ctx.global_style_mut(|s| {
+            s.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            s.spacing.button_padding = egui::vec2(10.0, 4.0);
+            s.spacing.interact_size.y = 26.0;
+            if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Body) {
+                f.size = 13.5;
+            }
+            if let Some(f) = s.text_styles.get_mut(&egui::TextStyle::Button) {
+                f.size = 13.5;
+            }
+        });
+    }
+}
+
+// ---- Vector icons ----------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Icon {
+    Back,
+    Prev,
+    Next,
+    ZoomOut,
+    ZoomIn,
+    Undo,
+    Redo,
+    Compare,
+    RotateLeft,
+    RotateRight,
+    Flip,
+    Crop,
+    Export,
+    Eyedropper,
+    Folder,
+}
+
+fn arc(c: egui::Pos2, r: f32, a0: f32, a1: f32, n: usize) -> Vec<egui::Pos2> {
+    (0..=n)
+        .map(|i| {
+            let a = a0 + (a1 - a0) * i as f32 / n as f32;
+            egui::pos2(c.x + r * a.cos(), c.y + r * a.sin())
+        })
+        .collect()
+}
+
+pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
+    use egui::{Shape, Stroke, pos2, vec2};
+    let st = Stroke::new(1.7, color);
+    let c = rect.center();
+    let s = rect.width().min(rect.height()) / 20.0; // unit
+    let q = |x: f32, y: f32| pos2(c.x + x * s, c.y + y * s);
+    let line = |pts: Vec<egui::Pos2>| Shape::line(pts, st);
+    let arrow_head = |tip: egui::Pos2, dir: egui::Vec2| {
+        let d = dir.normalized() * 4.0 * s;
+        let n = vec2(-d.y, d.x);
+        line(vec![tip - d + n, tip, tip - d - n])
+    };
+    match icon {
+        Icon::Back => {
+            p.add(line(vec![q(7.0, 0.0), q(-7.0, 0.0)]));
+            p.add(line(vec![q(-1.5, -5.5), q(-7.0, 0.0), q(-1.5, 5.5)]));
+        }
+        Icon::Prev => {
+            p.add(line(vec![q(3.0, -7.0), q(-4.0, 0.0), q(3.0, 7.0)]));
+        }
+        Icon::Next => {
+            p.add(line(vec![q(-3.0, -7.0), q(4.0, 0.0), q(-3.0, 7.0)]));
+        }
+        Icon::ZoomIn | Icon::ZoomOut => {
+            p.circle_stroke(q(-1.5, -1.5), 6.0 * s, st);
+            p.add(line(vec![q(3.0, 3.0), q(7.5, 7.5)]));
+            p.add(line(vec![q(-4.5, -1.5), q(1.5, -1.5)]));
+            if icon == Icon::ZoomIn {
+                p.add(line(vec![q(-1.5, -4.5), q(-1.5, 1.5)]));
+            }
+        }
+        Icon::Undo | Icon::Redo => {
+            let flip = if icon == Icon::Undo { 1.0 } else { -1.0 };
+            let pts: Vec<_> = arc(
+                q(0.0, 2.0),
+                6.0 * s,
+                std::f32::consts::PI * 1.0,
+                std::f32::consts::PI * 2.0,
+                16,
+            )
+            .into_iter()
+            .map(|pt| pos2(c.x + (pt.x - c.x) * flip, pt.y))
+            .collect();
+            let tip = pts[0];
+            p.add(line(pts));
+            p.add(arrow_head(tip + vec2(0.0, 1.0 * s), vec2(0.0, 1.0)));
+        }
+        Icon::RotateLeft | Icon::RotateRight => {
+            let flip = if icon == Icon::RotateLeft { -1.0 } else { 1.0 };
+            let pts: Vec<_> = arc(c, 7.0 * s, -1.2, 4.0, 24)
+                .into_iter()
+                .map(|pt| pos2(c.x + (pt.x - c.x) * flip, pt.y))
+                .collect();
+            let tip = *pts.last().unwrap();
+            let prev = pts[pts.len() - 3];
+            p.add(line(pts));
+            p.add(arrow_head(tip, tip - prev));
+        }
+        Icon::Flip => {
+            for k in 0..5 {
+                let y0 = -8.0 + k as f32 * 3.6;
+                p.add(line(vec![q(0.0, y0), q(0.0, y0 + 1.8)]));
+            }
+            p.add(Shape::closed_line(
+                vec![q(-2.5, -6.0), q(-2.5, 6.0), q(-8.5, 0.0)],
+                st,
+            ));
+            p.add(Shape::convex_polygon(
+                vec![q(2.5, -6.0), q(8.5, 0.0), q(2.5, 6.0)],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Crop => {
+            p.add(line(vec![q(-4.0, -8.0), q(-4.0, 4.0), q(8.0, 4.0)]));
+            p.add(line(vec![q(-8.0, -4.0), q(4.0, -4.0), q(4.0, 8.0)]));
+        }
+        Icon::Export => {
+            p.add(line(vec![
+                q(-4.0, -2.0),
+                q(-7.0, -2.0),
+                q(-7.0, 8.0),
+                q(7.0, 8.0),
+                q(7.0, -2.0),
+                q(4.0, -2.0),
+            ]));
+            p.add(line(vec![q(0.0, 3.0), q(0.0, -8.0)]));
+            p.add(line(vec![q(-3.5, -4.5), q(0.0, -8.0), q(3.5, -4.5)]));
+        }
+        Icon::Compare => {
+            let r = Rect::from_center_size(c, vec2(15.0 * s, 13.0 * s));
+            p.rect_stroke(r, 2.0, st, egui::StrokeKind::Middle);
+            p.add(Shape::convex_polygon(
+                vec![
+                    r.left_top(),
+                    pos2(r.center().x, r.top()),
+                    pos2(r.center().x, r.bottom()),
+                    r.left_bottom(),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Folder => {
+            p.add(Shape::closed_line(
+                vec![
+                    q(-8.0, 6.5),
+                    q(-8.0, -6.0),
+                    q(-3.0, -6.0),
+                    q(-1.5, -4.0),
+                    q(6.0, -4.0),
+                    q(6.0, -1.5),
+                ],
+                st,
+            ));
+            p.add(Shape::convex_polygon(
+                vec![q(-8.0, 6.5), q(-5.0, -1.5), q(9.0, -1.5), q(6.0, 6.5)],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Eyedropper => {
+            p.add(line(vec![q(-7.0, 7.0), q(3.0, -3.0)]));
+            p.add(Shape::line(
+                vec![q(1.0, -5.0), q(5.0, -1.0)],
+                Stroke::new(3.0, color),
+            ));
+            p.circle_filled(q(5.0, -5.0), 2.5 * s, color);
+        }
+    }
+}
+
+/// Toolbar icon button.
+pub fn icon_button(
+    ui: &mut Ui,
+    icon: Icon,
+    tip: &str,
+    selected: bool,
+    enabled: bool,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(34.0, 30.0),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    let p = ui.painter();
+    if selected {
+        p.rect_filled(rect, 6.0, Color32::from_rgb(208, 208, 212));
+    } else if resp.hovered() && enabled {
+        p.rect_filled(rect, 6.0, Color32::from_rgb(220, 220, 224));
+    }
+    let col = if enabled {
+        theme::TEXT
+    } else {
+        Color32::from_rgb(170, 170, 174)
+    };
+    paint_icon(p, rect.shrink2(egui::vec2(7.0, 5.0)), icon, col);
+    resp.on_hover_text(tip)
+}
+
+/// Bold caps section header.
+pub fn header(ui: &mut Ui, title: &str) {
+    ui.add_space(14.0);
+    ui.label(
+        egui::RichText::new(title)
+            .strong()
+            .size(12.5)
+            .color(theme::TEXT),
+    );
+    ui.add_space(4.0);
+}
+
+/// Label-above dropdown, full width.
+pub fn fl_combo<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut T,
+    all: &[T],
+    name: impl Fn(T) -> &'static str,
+    tip: &str,
+) -> bool {
+    let mut changed = false;
+    if !label.is_empty() {
+        let l = ui.label(egui::RichText::new(label).color(theme::TEXT));
+        if !tip.is_empty() {
+            l.on_hover_text(tip);
+        }
+    }
+    egui::ComboBox::from_id_salt(("fl_combo", label, std::any::type_name::<T>(), ui.id()))
+        .width((ui.available_width() - 4.0).max(60.0))
+        .height(400.0)
+        .selected_text(name(*v))
+        .show_ui(ui, |ui| {
+            for &o in all {
+                if ui.selectable_label(*v == o, name(o)).clicked() && *v != o {
+                    *v = o;
+                    changed = true;
+                }
+            }
+        });
+    ui.add_space(4.0);
+    changed
+}
+
+/// Slim slider: label + value on one row, track below. Double-click the
+/// track or click the label to reset; the value can be typed past the range.
+pub fn fl_slider(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    decimals: usize,
+    tip: &str,
+    gradient: Option<(Color32, Color32)>,
+) -> bool {
+    let mut changed = false;
+    let (lo, hi) = (*range.start(), *range.end());
+    ui.horizontal(|ui| {
+        let l = ui.add(
+            egui::Label::new(egui::RichText::new(label).color(theme::TEXT)).sense(Sense::click()),
+        );
+        let l = l.on_hover_text(if tip.is_empty() {
+            "Click to reset".to_string()
+        } else {
+            format!("{tip}\n\nClick the label to reset.")
+        });
+        if l.clicked() && *v != default {
+            *v = default;
+            changed = true;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let fmt = move |x: f64, _r: std::ops::RangeInclusive<usize>| {
+                let s = format!("{:.*}", decimals, x);
+                if x > 0.0 && default == 0.0 {
+                    format!("+{s}")
+                } else {
+                    s
+                }
+            };
+            // Frameless value, editable by click (type) or horizontal drag.
+            let vis = &mut ui.visuals_mut().widgets;
+            for w in [&mut vis.inactive, &mut vis.hovered] {
+                w.bg_stroke = egui::Stroke::NONE;
+                w.weak_bg_fill = Color32::TRANSPARENT;
+                w.bg_fill = Color32::TRANSPARENT;
+            }
+            let dv = egui::DragValue::new(v)
+                .speed((hi - lo) as f64 / 400.0)
+                .max_decimals(decimals)
+                .custom_formatter(fmt);
+            if ui.add(dv.update_while_editing(false)).changed() {
+                changed = true;
+            }
+        });
+    });
+    let w = ui.available_width() - 6.0;
+    ui.add_space(-6.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 20.0), Sense::click_and_drag());
+    let track = Rect::from_min_max(
+        egui::pos2(rect.left() + 9.0, rect.center().y - 1.0),
+        egui::pos2(rect.right() - 9.0, rect.center().y + 1.0),
+    );
+    let to_x = |val: f32| track.left() + track.width() * ((val - lo) / (hi - lo)).clamp(0.0, 1.0);
+    if resp.double_clicked() {
+        *v = default;
+        changed = true;
+    } else if resp.dragged() || resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let t = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
+            let mut nv = lo + t * (hi - lo);
+            if decimals == 0 {
+                nv = nv.round();
+            } else {
+                let m = 10f32.powi(decimals as i32);
+                nv = (nv * m).round() / m;
+            }
+            if (nv - *v).abs() > 1e-6 {
+                *v = nv;
+                changed = true;
+            }
+        }
+    }
+    let p = ui.painter();
+    match gradient {
+        Some((a, b)) => gradient_rect(ui, track.expand2(egui::vec2(0.0, 1.0)), a, b),
+        None => {
+            p.rect_filled(track, 1.0, theme::TRACK);
+            let z = to_x(default.clamp(lo, hi));
+            let k = to_x(*v);
+            let fill = Rect::from_min_max(
+                egui::pos2(z.min(k), track.top()),
+                egui::pos2(z.max(k), track.bottom()),
+            );
+            p.rect_filled(fill, 1.0, theme::TRACK_FILL);
+        }
+    }
+    let knob = egui::pos2(to_x(*v), track.center().y);
+    let hot = resp.hovered() || resp.dragged();
+    p.circle(
+        knob,
+        8.0,
+        Color32::WHITE,
+        egui::Stroke::new(
+            if hot { 2.0 } else { 1.5 },
+            if hot {
+                theme::TEXT
+            } else {
+                Color32::from_rgb(90, 90, 94)
+            },
+        ),
+    );
+    ui.add_space(4.0);
+    changed
+}
+
+pub fn fl_slider_u8(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut u8,
+    range: std::ops::RangeInclusive<u8>,
+    default: u8,
+    tip: &str,
+) -> bool {
+    let mut f = *v as f32;
+    let ch = fl_slider(
+        ui,
+        label,
+        &mut f,
+        *range.start() as f32..=*range.end() as f32,
+        default as f32,
+        0,
+        tip,
+        None,
+    );
+    if ch {
+        *v = f.round().clamp(*range.start() as f32, *range.end() as f32) as u8;
+    }
+    ch
+}
+
+/// Segmented control (pill buttons).
+pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, v: &mut T, items: &[(T, &str)]) -> bool {
+    segmented_locked(ui, v, items, &[], "")
+}
+
+/// Segmented control where the options in `locked` are greyed out and not
+/// selectable (`lock_tip` explains why on hover).
+pub fn segmented_locked<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    v: &mut T,
+    items: &[(T, &str)],
+    locked: &[T],
+    lock_tip: &str,
+) -> bool {
+    let mut changed = false;
+    let w = (ui.available_width() - 6.0) / items.len() as f32;
+    egui::Frame::new()
+        .fill(Color32::from_rgb(226, 226, 229))
+        .corner_radius(7.0)
+        .inner_margin(2.0)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.horizontal(|ui| {
+                for (t, name) in items {
+                    let sel = *v == *t;
+                    let is_locked = locked.contains(t);
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(w - 1.0, 24.0),
+                        if is_locked {
+                            Sense::hover()
+                        } else {
+                            Sense::click()
+                        },
+                    );
+                    let resp = if is_locked && !lock_tip.is_empty() {
+                        resp.on_hover_text(lock_tip)
+                    } else {
+                        resp
+                    };
+                    if sel {
+                        ui.painter().rect(
+                            rect,
+                            6.0,
+                            Color32::WHITE,
+                            egui::Stroke::new(0.5, Color32::from_rgb(200, 200, 204)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        *name,
+                        egui::FontId::proportional(13.0),
+                        if is_locked {
+                            Color32::from_rgb(185, 185, 190)
+                        } else if sel {
+                            theme::TEXT
+                        } else {
+                            theme::MUTED
+                        },
+                    );
+                    if resp.clicked() && !sel && !is_locked {
+                        *v = *t;
+                        changed = true;
+                    }
+                }
+            });
+        });
+    changed
+}
+
+/// Collapsible caps section header with a chevron. Returns whether the
+/// section is open; the state is remembered per title.
+pub fn fold(ui: &mut Ui, title: &str) -> bool {
+    let id = ui.make_persistent_id(("fold", title));
+    let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+    ui.add_space(12.0);
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::click());
+    let hot = resp.hovered();
+    let col = if hot { theme::ACCENT } else { theme::TEXT };
+    let p = ui.painter();
+    p.text(
+        rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(12.5),
+        col,
+    );
+    let c = egui::pos2(rect.right() - 8.0, rect.center().y);
+    let pts = if open {
+        vec![
+            c + egui::vec2(-4.0, -2.0),
+            c + egui::vec2(0.0, 2.0),
+            c + egui::vec2(4.0, -2.0),
+        ]
+    } else {
+        vec![
+            c + egui::vec2(-2.0, -4.0),
+            c + egui::vec2(2.0, 0.0),
+            c + egui::vec2(-2.0, 4.0),
+        ]
+    };
+    p.add(egui::Shape::line(pts, egui::Stroke::new(1.6, col)));
+    if resp.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_persisted(id, open));
+    }
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if open {
+        ui.add_space(4.0);
+    } else {
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left(), rect.bottom() + 3.0),
+                egui::pos2(rect.right(), rect.bottom() + 3.0),
+            ],
+            egui::Stroke::new(0.5, theme::LINE),
+        );
+    }
+    open
+}
