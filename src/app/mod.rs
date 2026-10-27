@@ -182,6 +182,8 @@ pub struct NlpApp {
     pub export_targets: Option<Vec<usize>>,
     /// Open "Convert" dialog: the conversion options before analysis runs.
     pub convert_dialog: Option<folder::ConvertDialog>,
+    /// Crop -> settings -> convert guide shown when an unconverted frame opens.
+    pub wizard: folder::WizardState,
     /// A roll conversion paused because its frames' exposures differ by
     /// more than 1 EV: the frames and the spread.
     pub exposure_prompt: Option<(Vec<jobs::ConvertItem>, f64)>,
@@ -221,6 +223,7 @@ impl NlpApp {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            wizard: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1007,6 +1010,7 @@ impl NlpApp {
         }
         self.request_proxy(i);
         self.view = View::Editor;
+        self.start_wizard(i);
     }
 
     pub fn choose_folder(&mut self) {
@@ -1111,6 +1115,7 @@ impl eframe::App for NlpApp {
         self.toasts_ui(&ctx);
         self.export_dialog(&ctx);
         self.convert_dialog_ui(&ctx);
+        self.wizard_ui(&ctx);
         self.roll_dialog_ui(&ctx);
         self.exposure_prompt_ui(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -1532,6 +1537,7 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            wizard: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1577,6 +1583,7 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            wizard: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1615,6 +1622,7 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            wizard: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1631,6 +1639,12 @@ mod ui_tests {
         let d = app.convert_dialog.as_ref().unwrap();
         assert!(d.as_roll);
         assert_eq!(d.targets, vec![0, 1]);
+    }
+
+    #[test]
+    fn wizard_starts_idle() {
+        let w = folder::WizardState::default();
+        assert!(w.active.is_none() && w.seen.is_empty());
     }
 
     #[test]
@@ -1693,6 +1707,7 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            wizard: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),

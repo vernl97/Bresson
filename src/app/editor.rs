@@ -47,7 +47,7 @@ enum Handle {
 
 /// Uncommitted crop / straighten state while crop mode is open.
 #[derive(Clone, Copy)]
-struct CropEdit {
+pub(super) struct CropEdit {
     insets: [f32; 4],
     angle: f32,
     drag: Option<Handle>,
@@ -104,7 +104,7 @@ pub struct Editor {
     /// Display scale (screen points per preview pixel); `None` = fit.
     zoom: Option<f32>,
     pan: egui::Vec2,
-    crop: Option<CropEdit>,
+    pub(super) crop: Option<CropEdit>,
     pub export_open: bool,
     zoom_req: Option<ZoomReq>,
     zoom_anim: Option<ZoomAnim>,

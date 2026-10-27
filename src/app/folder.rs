@@ -4,7 +4,7 @@
 use eframe::egui::{self, Color32, RichText, Sense, pos2, vec2};
 
 use super::widgets::{self, Icon, icon_button, theme};
-use super::{NlpApp, ProxyState};
+use super::{NlpApp, ProxyState, View};
 use crate::engine::settings::*;
 
 /// One-line hint shown under the scan source.
@@ -720,6 +720,89 @@ pub struct ConvertDialog {
     pub settings: Settings,
 }
 
+/// The conversion options shared by the folder Convert dialog and the editor wizard.
+pub fn conversion_fields(ui: &mut egui::Ui, s: &mut Settings, start: Option<&std::path::Path>) {
+    widgets::fl_combo(
+        ui,
+        "Image type",
+        &mut s.image_type,
+        ImageType::ALL,
+        ImageType::label,
+        "",
+    );
+    if widgets::fl_combo(
+        ui,
+        "Scan source",
+        &mut s.source,
+        Source::ALL,
+        Source::label,
+        "",
+    ) {
+        s.film_base = match s.source {
+            Source::TifScan | Source::LinearScan => FilmBase::Off,
+            _ => FilmBase::Auto,
+        };
+    }
+    ui.add(
+        egui::Label::new(
+            RichText::new(source_instructions(s.source))
+                .small()
+                .color(theme::FAINT),
+        )
+        .wrap(),
+    );
+    ui.add_space(6.0);
+    widgets::fl_combo(
+        ui,
+        "Colour model",
+        &mut s.color_model,
+        ColorModel::ALL,
+        ColorModel::label,
+        "Basic: neutral · Frontier: teal-blues, golden yellows, warm skin · Noritsu: cleaner and cooler · B+W: monochrome · None: no calibration",
+    );
+    widgets::fl_combo(
+        ui,
+        "Film base",
+        &mut s.film_base,
+        FilmBase::ALL,
+        FilmBase::label,
+        "Neutralises the orange mask before analysis. Sampled uses each frame's own border sample.",
+    );
+    flat_field_ui(ui, &mut s.flat_field, start);
+    ui.add_space(4.0);
+    widgets::fl_slider_u8(
+        ui,
+        "Pre-saturation",
+        &mut s.pre_saturation,
+        1..=5,
+        3,
+        "1–2: fewer distinct hues, warmer · 4–5: more separation, cooler",
+    );
+    widgets::fl_slider(
+        ui,
+        "Border buffer",
+        &mut s.border_buffer,
+        0.0..=25.0,
+        5.0,
+        0,
+        "Percent of the frame edge ignored by the analysis",
+        None,
+    );
+    widgets::fl_combo(
+        ui,
+        "White balance",
+        &mut s.wb_mode,
+        WbMode::ALL,
+        WbMode::label,
+        "",
+    );
+    ui.add_space(6.0);
+    ui.checkbox(&mut s.auto_crop, "Auto-crop frames")
+        .on_hover_text(
+            "Find each uncropped frame inside the film rebate and holder, and straighten it",
+        );
+}
+
 impl NlpApp {
     pub fn open_convert_dialog(&mut self, targets: Vec<usize>, as_roll: bool) {
         let Some(&first) = targets.first() else {
@@ -760,64 +843,11 @@ impl NlpApp {
                 };
                 ui.label(RichText::new(title).font(theme::medium(16.0)).color(theme::TEXT));
                 ui.add_space(16.0);
-                let s = &mut d.settings;
-                widgets::fl_combo(ui, "Image type", &mut s.image_type, ImageType::ALL, ImageType::label, "");
-                if widgets::fl_combo(ui, "Scan source", &mut s.source, Source::ALL, Source::label, "") {
-                    s.film_base = match s.source {
-                        Source::TifScan | Source::LinearScan => FilmBase::Off,
-                        _ => FilmBase::Auto,
-                    };
-                }
-                ui.add(
-                    egui::Label::new(RichText::new(source_instructions(s.source)).small().color(theme::FAINT))
-                        .wrap(),
-                );
-                ui.add_space(6.0);
-                widgets::fl_combo(
-                    ui,
-                    "Colour model",
-                    &mut s.color_model,
-                    ColorModel::ALL,
-                    ColorModel::label,
-                    "Basic: neutral · Frontier: teal-blues, golden yellows, warm skin · Noritsu: cleaner and cooler · B+W: monochrome · None: no calibration",
-                );
-                widgets::fl_combo(
-                    ui,
-                    "Film base",
-                    &mut s.film_base,
-                    FilmBase::ALL,
-                    FilmBase::label,
-                    "Neutralises the orange mask before analysis. Sampled uses each frame's own border sample.",
-                );
                 let start = d
                     .targets
                     .first()
                     .and_then(|&i| self.frames[i].path.parent().map(|p| p.to_path_buf()));
-                flat_field_ui(ui, &mut s.flat_field, start.as_deref());
-                ui.add_space(4.0);
-                widgets::fl_slider_u8(
-                    ui,
-                    "Pre-saturation",
-                    &mut s.pre_saturation,
-                    1..=5,
-                    3,
-                    "1–2: fewer distinct hues, warmer · 4–5: more separation, cooler",
-                );
-                widgets::fl_slider(
-                    ui,
-                    "Border buffer",
-                    &mut s.border_buffer,
-                    0.0..=25.0,
-                    5.0,
-                    0,
-                    "Percent of the frame edge ignored by the analysis",
-                    None,
-                );
-                widgets::fl_combo(ui, "White balance", &mut s.wb_mode, WbMode::ALL, WbMode::label, "");
-                ui.add_space(6.0);
-                ui.checkbox(&mut s.auto_crop, "Auto-crop frames").on_hover_text(
-                    "Find each uncropped frame inside the film rebate and holder, and straighten it",
-                );
+                conversion_fields(ui, &mut d.settings, start.as_deref());
                 if count > 1 {
                     ui.add_space(6.0);
                     ui.checkbox(&mut d.as_roll, "Convert as roll")
@@ -849,40 +879,205 @@ impl NlpApp {
                 });
             });
         if go {
-            let o = &d.settings;
             for &i in &d.targets {
-                let s = &mut self.frames[i].sc.settings;
-                let (was_type, was_model) = (s.image_type, s.color_model);
-                (s.image_type, s.source, s.color_model, s.film_base) =
-                    (o.image_type, o.source, o.color_model, o.film_base);
-                s.flat_field = o.flat_field.clone();
-                (
-                    s.pre_saturation,
-                    s.border_buffer,
-                    s.wb_mode,
-                    s.roll_mode,
-                    s.auto_crop,
-                ) = (
-                    o.pre_saturation,
-                    o.border_buffer,
-                    o.wb_mode,
-                    o.roll_mode,
-                    o.auto_crop,
-                );
-                if s.image_type != was_type && s.image_type != ImageType::Negative {
-                    s.apply_positive_defaults();
-                    s.wb_mode = o.wb_mode;
-                }
-                if s.color_model != was_model && s.is_monochrome() {
-                    s.apply_mono_defaults();
-                    s.wb_mode = o.wb_mode;
-                }
-                self.mark_changed(i);
+                self.apply_conversion_options(i, &d.settings);
             }
             self.convert(d.targets, d.as_roll);
         } else if !(cancel || r.should_close()) {
             self.convert_dialog = Some(d);
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WizardStep {
+    Crop,
+    Settings,
+    Convert,
+}
+
+/// The guided first conversion of an unconverted frame.
+pub struct ConvertWizard {
+    pub frame: usize,
+    pub step: WizardStep,
+    pub settings: Settings,
+}
+
+#[derive(Default)]
+pub struct WizardState {
+    pub active: Option<ConvertWizard>,
+    /// Frames the wizard was already shown for this session.
+    pub seen: std::collections::HashSet<std::path::PathBuf>,
+}
+
+impl NlpApp {
+    /// Opens the wizard for an unconverted frame that hasn't had it yet.
+    pub fn start_wizard(&mut self, i: usize) {
+        let f = &self.frames[i];
+        if f.sc.is_converted() || self.wizard.seen.contains(&f.path) {
+            return;
+        }
+        self.begin_wizard(i);
+    }
+
+    /// Opens the wizard at the crop step, whether or not it was seen before.
+    pub fn begin_wizard(&mut self, i: usize) {
+        let path = self.frames[i].path.clone();
+        self.wizard.seen.insert(path);
+        let settings = self.frames[i].sc.settings.clone();
+        self.enter_crop(i);
+        self.wizard.active = Some(ConvertWizard {
+            frame: i,
+            step: WizardStep::Crop,
+            settings,
+        });
+    }
+
+    pub fn wizard_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut w) = self.wizard.active.take() else {
+            return;
+        };
+        // Leaving the editor or switching frames abandons the wizard.
+        if self.view != View::Editor || self.active != Some(w.frame) {
+            return;
+        }
+        let mut go = false;
+        let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape)) && w.step != WizardStep::Crop;
+        match w.step {
+            WizardStep::Crop => {
+                // The editor's own crop tool runs; Done or Cancel there moves on.
+                if self.editor.crop.is_none() {
+                    w.step = WizardStep::Settings;
+                    w.settings = self.frames[w.frame].sc.settings.clone();
+                } else {
+                    egui::Area::new(egui::Id::new("wizard_hint"))
+                        .anchor(egui::Align2::CENTER_TOP, vec2(0.0, 52.0))
+                        .show(ctx, |ui| {
+                            egui::Frame::new()
+                                .fill(theme::PANEL)
+                                .stroke(egui::Stroke::new(1.0, theme::LINE))
+                                .corner_radius(10.0)
+                                .inner_margin(egui::Margin::symmetric(14, 8))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new("Step 1 of 3 · Crop the frame, then press Done")
+                                            .color(theme::TEXT),
+                                    );
+                                });
+                        });
+                }
+            }
+            WizardStep::Settings | WizardStep::Convert => {
+                let frame = egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .stroke(egui::Stroke::new(1.0, theme::LINE))
+                    .corner_radius(12.0)
+                    .inner_margin(egui::Margin::same(22))
+                    .shadow(ctx.global_style().visuals.window_shadow);
+                let settings_step = w.step == WizardStep::Settings;
+                let mut back = false;
+                let r = egui::Modal::new(egui::Id::new("wizard_modal"))
+                    .backdrop_color(Color32::from_black_alpha(150))
+                    .frame(frame)
+                    .show(ctx, |ui| {
+                        ui.set_width(420.0);
+                        let title = if settings_step {
+                            "Step 2 of 3 · Conversion settings"
+                        } else {
+                            "Step 3 of 3 · Convert"
+                        };
+                        ui.label(RichText::new(title).font(theme::medium(16.0)).color(theme::TEXT));
+                        ui.add_space(16.0);
+                        if settings_step {
+                            let start = self.frames[w.frame].path.parent().map(|p| p.to_path_buf());
+                            conversion_fields(ui, &mut w.settings, start.as_deref());
+                        } else {
+                            let s = &w.settings;
+                            for line in [
+                                format!("Type: {}", s.image_type.label()),
+                                format!("Source: {}", s.source.label()),
+                                format!("Colour model: {}", s.color_model.label()),
+                                format!("Film base: {}", s.film_base.label()),
+                                format!("White balance: {}", s.wb_mode.label()),
+                            ] {
+                                ui.label(RichText::new(line).color(theme::TEXT));
+                            }
+                        }
+                        ui.add_space(22.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let label = if settings_step { "Next" } else { "Convert" };
+                            if ui.add(widgets::primary(label).min_size(vec2(96.0, 30.0))).clicked()
+                                || (!ui.ctx().egui_wants_keyboard_input()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                            {
+                                go = true;
+                            }
+                            if ui.add(widgets::ghost("Back").min_size(vec2(80.0, 30.0))).clicked() {
+                                back = true;
+                            }
+                            if ui.add(widgets::ghost("Cancel").min_size(vec2(80.0, 30.0))).clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+                if r.should_close() {
+                    cancel = true;
+                }
+                if back {
+                    if settings_step {
+                        self.enter_crop(w.frame);
+                        w.step = WizardStep::Crop;
+                    } else {
+                        w.step = WizardStep::Settings;
+                    }
+                } else if go {
+                    if settings_step {
+                        w.step = WizardStep::Convert;
+                    } else {
+                        let i = w.frame;
+                        self.apply_conversion_options(i, &w.settings);
+                        self.convert(vec![i], false);
+                        return;
+                    }
+                }
+            }
+        }
+        if !cancel {
+            self.wizard.active = Some(w);
+        }
+    }
+}
+
+impl NlpApp {
+    /// Copies the Convert-dialog options into frame `i`'s settings.
+    pub fn apply_conversion_options(&mut self, i: usize, o: &Settings) {
+        let s = &mut self.frames[i].sc.settings;
+        let (was_type, was_model) = (s.image_type, s.color_model);
+        (s.image_type, s.source, s.color_model, s.film_base) =
+            (o.image_type, o.source, o.color_model, o.film_base);
+        s.flat_field = o.flat_field.clone();
+        (
+            s.pre_saturation,
+            s.border_buffer,
+            s.wb_mode,
+            s.roll_mode,
+            s.auto_crop,
+        ) = (
+            o.pre_saturation,
+            o.border_buffer,
+            o.wb_mode,
+            o.roll_mode,
+            o.auto_crop,
+        );
+        if s.image_type != was_type && s.image_type != ImageType::Negative {
+            s.apply_positive_defaults();
+            s.wb_mode = o.wb_mode;
+        }
+        if s.color_model != was_model && s.is_monochrome() {
+            s.apply_mono_defaults();
+            s.wb_mode = o.wb_mode;
+        }
+        self.mark_changed(i);
     }
 }
 
