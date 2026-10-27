@@ -412,15 +412,19 @@ impl NlpApp {
         self.editor.dirty = use_small;
     }
 
-    fn zoom_by(&mut self, factor: f32, fit: f32) {
+    /// Zoom by `factor` keeping the image point under `rel` (cursor relative
+    /// to the canvas centre) fixed.
+    fn zoom_by(&mut self, factor: f32, fit: f32, rel: egui::Vec2) {
         self.editor.zoom_anim = None;
         let cur = self.editor.zoom.unwrap_or(fit);
-        let next = (cur * factor).clamp(fit * 0.5, 8.0);
+        let next = (cur * factor).clamp(fit, 8.0f32.max(fit));
         if next <= fit * 1.001 && factor < 1.0 {
             self.editor.zoom = None;
             self.editor.pan = egui::Vec2::ZERO;
         } else {
-            self.editor.zoom = Some(next.max(fit));
+            let k = next / cur;
+            self.editor.pan = (self.editor.pan - rel) * k + rel;
+            self.editor.zoom = Some(next);
         }
     }
 
@@ -1629,6 +1633,18 @@ impl NlpApp {
                 self.editor.pan = egui::Vec2::ZERO;
             }
         }
+        // Zoom with ⌘/Ctrl + scroll or pinch (about the cursor); scroll pans
+        // when zoomed. Applied before the geometry below so it takes effect
+        // in the same frame.
+        if let Some(hover) = ui.input(|inp| inp.pointer.hover_pos()).filter(|h| avail.contains(*h)) {
+            let (zoom_delta, scroll) = ui.input(|inp| (inp.zoom_delta(), inp.smooth_scroll_delta));
+            if zoom_delta != 1.0 {
+                self.zoom_by(zoom_delta, fit, hover - center);
+            } else if self.editor.zoom.is_some() && scroll != egui::Vec2::ZERO {
+                self.editor.zoom_anim = None;
+                self.editor.pan += scroll;
+            }
+        }
         let scale = self.editor.zoom.unwrap_or(fit);
         let size = ts * scale;
         // Clamp pan so the image never leaves the canvas entirely.
@@ -1636,16 +1652,6 @@ impl NlpApp {
         self.editor.pan = self.editor.pan.clamp(-maxp, maxp);
         let rect = Rect::from_center_size(center + self.editor.pan, size);
         let resp = ui.allocate_rect(avail, Sense::click_and_drag());
-
-        // Zoom with ⌘/Ctrl + scroll or pinch; scroll pans when zoomed.
-        if resp.hovered() {
-            let (zoom_delta, scroll) = ui.input(|inp| (inp.zoom_delta(), inp.smooth_scroll_delta));
-            if zoom_delta != 1.0 {
-                self.zoom_by(zoom_delta, fit);
-            } else if self.editor.zoom.is_some() && scroll != egui::Vec2::ZERO {
-                self.editor.pan += scroll;
-            }
-        }
 
         let p = ui.painter_at(avail);
         p.add(
@@ -1664,7 +1670,7 @@ impl NlpApp {
             &self.editor.tex,
         ) {
             (Some(n), Some(v), _) if self.gpu => {
-                gpu::paint(&p, rect, 0, n, v, [0.0, 0.0, 1.0, 1.0])
+                gpu_paint_clipped(&p, rect, avail, 0, n, v, [0.0, 0.0, 1.0, 1.0])
             }
             (_, _, Some(t)) => {
                 p.image(t.id(), rect, full_uv, Color32::WHITE);
@@ -1690,7 +1696,7 @@ impl NlpApp {
                 &self.editor.gpu_before,
                 &self.editor.before_tex,
             ) {
-                (Some(n), Some(b), _) => gpu::paint(&p, left, 1, n, b, [0.0, 0.0, k, 1.0]),
+                (Some(n), Some(b), _) => gpu_paint_clipped(&p, left, avail, 1, n, b, [0.0, 0.0, k, 1.0]),
                 (_, _, Some(t)) => {
                     p.image(
                         t.id(),
@@ -2252,4 +2258,32 @@ fn sample(d: &[[f32; 3]], w: usize, h: usize, u: f32, v: f32, r: isize) -> [f32;
         }
     }
     acc.map(|v| v / n.max(1.0))
+}
+
+/// Draw the part of `rect` that lies inside `clip`. The GPU callback's
+/// viewport is clipped to the canvas, so a zoomed rectangle has to be cut down
+/// together with its UVs, otherwise the whole image is squeezed into the view.
+fn gpu_paint_clipped(
+    painter: &egui::Painter,
+    rect: Rect,
+    clip: Rect,
+    slot: u8,
+    neg: &std::sync::Arc<gpu::NegData>,
+    view: &std::sync::Arc<gpu::ViewData>,
+    part: [f32; 4],
+) {
+    let vis = rect.intersect(clip);
+    if vis.width() <= 0.0 || vis.height() <= 0.0 {
+        return;
+    }
+    let fx = |x: f32| (x - rect.left()) / rect.width();
+    let fy = |y: f32| (y - rect.top()) / rect.height();
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let uv = [
+        lerp(part[0], part[2], fx(vis.left())),
+        lerp(part[1], part[3], fy(vis.top())),
+        lerp(part[0], part[2], fx(vis.right())),
+        lerp(part[1], part[3], fy(vis.bottom())),
+    ];
+    gpu::paint(painter, vis, slot, neg, view, uv);
 }
