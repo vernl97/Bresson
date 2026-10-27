@@ -283,7 +283,7 @@ impl NlpApp {
                             }
                             ui.label(
                                 RichText::new(format!("{n} selected")).small().color(theme::MUTED),
-                            );
+                            ).on_hover_text(super::LAB_KEYS_HELP);
                         }
                         // Fixed slot so the buttons don't shift when jobs start/finish.
                         ui.add_space(4.0);
@@ -317,7 +317,8 @@ impl NlpApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         ui.spacing_mut().slider_width = 90.0;
-                        let tiny = |t: &str| RichText::new(t.to_owned()).small().color(theme::FAINT);
+                        let tiny =
+                            |t: &str| RichText::new(t.to_owned()).small().color(theme::FAINT);
                         ui.label(tiny("Large"));
                         ui.add(
                             egui::Slider::new(&mut self.thumb_size, 110.0..=340.0)
@@ -572,13 +573,16 @@ impl NlpApp {
                             p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::OK);
                             x -= 12.0;
                             if let Some(r) = lab::readout(&f.sc.settings) {
-                                let g = p.layout_no_wrap(
-                                    r,
-                                    egui::FontId::monospace(9.5),
-                                    theme::MUTED,
-                                );
+                                let g =
+                                    p.layout_no_wrap(r, egui::FontId::monospace(9.5), theme::MUTED);
                                 let sz = g.size();
-                                p.galley(pos2(x - sz.x, row_y - sz.y / 2.0), g, theme::MUTED);
+                                let r = egui::Rect::from_min_size(
+                                    pos2(x - sz.x, row_y - sz.y / 2.0),
+                                    sz,
+                                );
+                                ui.interact(r, ui.id().with(("lab_readout", i)), Sense::hover())
+                                    .on_hover_text(super::LAB_KEYS_HELP);
+                                p.galley(r.min, g, theme::MUTED);
                                 x -= sz.x + 6.0;
                             }
                         }
@@ -628,9 +632,7 @@ impl NlpApp {
                 });
                 // Clicking empty space below the grid clears the selection.
                 let rest = ui.available_rect_before_wrap();
-                if rest.height() > 0.0
-                    && ui.allocate_rect(rest, Sense::click()).clicked()
-                {
+                if rest.height() > 0.0 && ui.allocate_rect(rest, Sense::click()).clicked() {
                     bg_click = true;
                 }
             });
@@ -860,8 +862,19 @@ impl NlpApp {
                 let (was_type, was_model) = (s.image_type, s.color_model);
                 (s.image_type, s.source, s.color_model, s.film_base) =
                     (o.image_type, o.source, o.color_model, o.film_base);
-                (s.pre_saturation, s.border_buffer, s.wb_mode, s.roll_mode, s.auto_crop) =
-                    (o.pre_saturation, o.border_buffer, o.wb_mode, o.roll_mode, o.auto_crop);
+                (
+                    s.pre_saturation,
+                    s.border_buffer,
+                    s.wb_mode,
+                    s.roll_mode,
+                    s.auto_crop,
+                ) = (
+                    o.pre_saturation,
+                    o.border_buffer,
+                    o.wb_mode,
+                    o.roll_mode,
+                    o.auto_crop,
+                );
                 if s.image_type != was_type && s.image_type != ImageType::Negative {
                     s.apply_positive_defaults();
                     s.wb_mode = o.wb_mode;

@@ -24,6 +24,10 @@ use jobs::{JobResult, Jobs};
 
 pub const THUMB_SIZE: usize = 360;
 
+/// The [`lab_key`] legend, shown wherever lab corrections appear.
+pub const LAB_KEYS_HELP: &str =
+    "Lab keys: 7 8 9 add C M Y · 1 2 3 remove · 4 / 6 darker / lighter · 0 reset";
+
 /// A Frontier/Noritsu-style correction key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LabKey {
@@ -33,7 +37,7 @@ pub enum LabKey {
 
 /// The lab correction key pressed this frame, on the number row or numpad:
 /// 7 8 9 add C M Y, 1 2 3 take it away, 4 / 6 print darker / lighter
-/// (density + / −), 0 resets.
+/// (density + / −), 0 resets. Keep [`LAB_KEYS_HELP`] in sync.
 pub fn lab_key(ctx: &egui::Context) -> Option<LabKey> {
     use egui::Key;
     use lab::Channel::*;
@@ -1273,7 +1277,12 @@ mod ui_tests {
         shot(&mut h, &out, "7_editor_detect_frame");
         h.key_press(egui::Key::Enter);
         settle(&mut h, 30.0);
-        for k in [egui::Key::Num4, egui::Key::Num4, egui::Key::Num7, egui::Key::Num9] {
+        for k in [
+            egui::Key::Num4,
+            egui::Key::Num4,
+            egui::Key::Num7,
+            egui::Key::Num9,
+        ] {
             h.key_press(k);
             h.run_steps(2);
         }

@@ -662,7 +662,9 @@ impl NlpApp {
                 "{}{}{}",
                 s.tone_profile.label(),
                 if f.is_roll() { " · roll" } else { "" },
-                lab::readout(s).map(|r| format!(" · {r}")).unwrap_or_default()
+                lab::readout(s)
+                    .map(|r| format!(" · {r}"))
+                    .unwrap_or_default()
             )
         } else {
             "Not converted".to_string()
@@ -682,6 +684,15 @@ impl NlpApp {
             egui::FontId::proportional(11.5),
             theme::MUTED,
         );
+        // Explain the "D+1 C0 …" readout in the subtitle.
+        if lab::readout(s).is_some() && self.editor.crop.is_none() && !self.editor.before {
+            let r = Rect::from_center_size(
+                pos2(rect.center().x, rect.center().y + 9.0),
+                vec2(240.0, 14.0),
+            );
+            ui.interact(r, ui.id().with("lab_readout"), Sense::hover())
+                .on_hover_text(super::LAB_KEYS_HELP);
+        }
 
         let n = self.frames.len();
         ui.horizontal_centered(|ui| {
@@ -854,7 +865,10 @@ impl NlpApp {
             };
             if ui
                 .add(widgets::ghost(label))
-                .on_hover_text(format!("Copy these details to {} other frame(s)", others.len()))
+                .on_hover_text(format!(
+                    "Copy these details to {} other frame(s)",
+                    others.len()
+                ))
                 .clicked()
             {
                 let m = self.frames[i].sc.metadata.clone();
@@ -862,7 +876,10 @@ impl NlpApp {
                     self.frames[k].sc.metadata = m.clone();
                     self.frames[k].dirty_since = Some(self.time);
                 }
-                self.toast(format!("Film details copied to {} frame(s)", others.len()), false);
+                self.toast(
+                    format!("Film details copied to {} frame(s)", others.len()),
+                    false,
+                );
             }
         }
         ui.add_space(8.0);
@@ -1257,6 +1274,75 @@ impl NlpApp {
             ) {
                 s.wb_tint = k;
                 s.wb_mode = WbMode::Custom;
+            }
+        }
+        if widgets::fold(ui, "Lab correction") {
+            let clicks = lab::clicks(s);
+            let rows = [
+                (
+                    lab::Channel::D,
+                    "D",
+                    "Print lighter (6)",
+                    "Print darker (4)",
+                ),
+                (lab::Channel::C, "C", "Remove cyan (1)", "Add cyan (7)"),
+                (
+                    lab::Channel::M,
+                    "M",
+                    "Remove magenta (2)",
+                    "Add magenta (8)",
+                ),
+                (lab::Channel::Y, "Y", "Remove yellow (3)", "Add yellow (9)"),
+            ];
+            ui.horizontal(|ui| {
+                for (k, (ch, name, minus_tip, plus_tip)) in rows.into_iter().enumerate() {
+                    ui.vertical(|ui| {
+                        let v = match clicks[k] {
+                            0 => "0".to_string(),
+                            v if v > 0 => format!("+{v}"),
+                            v => format!("−{}", -v),
+                        };
+                        ui.label(RichText::new(format!("{name} {v}")).monospace().color(
+                            if clicks[k] == 0 {
+                                theme::MUTED
+                            } else {
+                                theme::TEXT
+                            },
+                        ));
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            if ui
+                                .add(widgets::ghost("−"))
+                                .on_hover_text(minus_tip)
+                                .clicked()
+                            {
+                                lab::nudge(s, ch, -1);
+                            }
+                            if ui
+                                .add(widgets::ghost("+"))
+                                .on_hover_text(plus_tip)
+                                .clicked()
+                            {
+                                lab::nudge(s, ch, 1);
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+            ui.add(
+                egui::Label::new(
+                    RichText::new(super::LAB_KEYS_HELP)
+                        .small()
+                        .color(theme::MUTED),
+                )
+                .wrap(),
+            );
+            if ui
+                .add_enabled(lab::readout(s).is_some(), widgets::ghost("Reset (0)"))
+                .clicked()
+            {
+                lab::reset(s);
             }
         }
         if widgets::fold(ui, "Colour toning") {
@@ -1706,7 +1792,8 @@ impl NlpApp {
                 egui::FontId::proportional(11.0),
                 theme::CANVAS,
             );
-            let handle = Rect::from_center_size(pos2(x, shown.center().y), vec2(24.0, shown.height()));
+            let handle =
+                Rect::from_center_size(pos2(x, shown.center().y), vec2(24.0, shown.height()));
             let h = ui.interact(handle, ui.id().with("split_handle"), Sense::drag());
             if h.hovered() || h.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
@@ -1816,8 +1903,18 @@ impl NlpApp {
             let u = (pos.x - rect.left()) / rect.width();
             let v = (pos.y - rect.top()) / rect.height();
             if let Some(text) = self.readout(u, v) {
-                let w = p.layout_no_wrap(text.clone(), theme::medium(12.0), theme::TEXT).size().x;
-                pill(&p, pos2(avail.left() + 16.0 + (w + 22.0) / 2.0, avail.bottom() - 22.0), &text);
+                let w = p
+                    .layout_no_wrap(text.clone(), theme::medium(12.0), theme::TEXT)
+                    .size()
+                    .x;
+                pill(
+                    &p,
+                    pos2(
+                        avail.left() + 16.0 + (w + 22.0) / 2.0,
+                        avail.bottom() - 22.0,
+                    ),
+                    &text,
+                );
             }
         }
         // Zoom chip: click to toggle between fit and 100 %.
@@ -1893,25 +1990,39 @@ impl NlpApp {
             ui.close();
         }
         ui.separator();
-        if ui.checkbox(&mut self.editor.before.clone(), "Before / after").clicked() {
+        if ui
+            .checkbox(&mut self.editor.before.clone(), "Before / after")
+            .clicked()
+        {
             self.editor.before = !self.editor.before;
             self.editor.split = false;
             self.editor.dirty = true;
             ui.close();
         }
-        if ui.checkbox(&mut self.editor.split.clone(), "Split view").clicked() {
+        if ui
+            .checkbox(&mut self.editor.split.clone(), "Split view")
+            .clicked()
+        {
             self.editor.split = !self.editor.split;
             self.editor.before = false;
             self.editor.dirty = true;
             ui.close();
         }
-        if converted && ui.checkbox(&mut self.editor.clip_view.clone(), "Show clipping").clicked() {
+        if converted
+            && ui
+                .checkbox(&mut self.editor.clip_view.clone(), "Show clipping")
+                .clicked()
+        {
             self.editor.clip_view = !self.editor.clip_view;
             self.editor.dirty = true;
             ui.close();
         }
         if ui
-            .button(if self.editor.zoom.is_some() { "Zoom to fit" } else { "Zoom in" })
+            .button(if self.editor.zoom.is_some() {
+                "Zoom to fit"
+            } else {
+                "Zoom in"
+            })
             .clicked()
         {
             self.editor.zoom_req = Some(if self.editor.zoom.is_some() {
@@ -2117,7 +2228,8 @@ impl NlpApp {
         if self.editor.px.len() != w * h || w == 0 {
             return None;
         }
-        let rgb = sample(&self.editor.px, w, h, u, v, 1).map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
+        let rgb =
+            sample(&self.editor.px, w, h, u, v, 1).map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
         let mut text = format!("RGB {} {} {}", rgb[0], rgb[1], rgb[2]);
         if let Some(neg) = &self.editor.neg {
             let d = pipeline::density_above_base(sample(&neg.data, neg.width, neg.height, u, v, 1));
