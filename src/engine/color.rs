@@ -243,22 +243,10 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
     }
 }
 
-/// HSL lightness.
-#[inline]
-pub fn hsl_lightness(c: [f32; 3]) -> f32 {
-    (c[0].max(c[1]).max(c[2]) + c[0].min(c[1]).min(c[2])) * 0.5
-}
-
 /// Rec.709-ish luminance on encoded values (used for display helpers / sharpening).
 #[inline]
 pub fn luma(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
-}
-
-/// Relative luminance (Y) of linear MelissaRGB.
-pub fn melissa_luminance_weights() -> [f32; 3] {
-    let m = rgb_to_xyz(&MELISSA);
-    [m[1][0] as f32, m[1][1] as f32, m[1][2] as f32]
 }
 
 // ---- CIELAB ------------------------------------------------------------------

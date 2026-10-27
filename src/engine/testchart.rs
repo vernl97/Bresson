@@ -201,6 +201,12 @@ pub struct ChartMetrics {
     /// Mean CIEDE2000 of the 18 colour patches with lightness matched, i.e.
     /// hue and saturation error independent of the tone curve.
     pub color_de: f64,
+    /// Mean CIEDE2000 of the 18 colour patches against what a perfect film
+    /// would print through the same tone curve: the reference reflectance
+    /// of each channel mapped through that channel's measured grey curve.
+    /// Isolates the colour errors of the negative process (crosstalk,
+    /// crossover, balance) from the choice of tone curve.
+    pub tone_matched_de: f64,
     /// Mean CIEDE2000 of all 24 patches.
     pub full_de: f64,
     /// Mean chroma (C*ab) of the neutral patches and ramp.
@@ -209,8 +215,8 @@ pub struct ChartMetrics {
     pub neutral_cast_max: f64,
 }
 
-/// CIELAB D50 of each patch from encoded sRGB output pixels.
-pub fn patch_lab(chart: &Chart, srgb: &[[f32; 3]]) -> Vec<[f64; 3]> {
+/// Mean linear ProPhoto colour of each patch from encoded sRGB output pixels.
+fn patch_rgb(chart: &Chart, srgb: &[[f32; 3]]) -> Vec<[f64; 3]> {
     let to_pp = color::rgb_to_rgb(&SRGB, &PROPHOTO);
     chart
         .patches
@@ -222,10 +228,70 @@ pub fn patch_lab(chart: &Chart, srgb: &[[f32; 3]]) -> Vec<[f64; 3]> {
                     m[c] += color::srgb_decode(srgb[i][c].clamp(0.0, 1.0)) as f64;
                 }
             }
-            let m = m.map(|v| v / p.pixels.len().max(1) as f64);
-            color::rgb_to_lab(&PROPHOTO, color::mat_vec(&to_pp, m))
+            color::mat_vec(&to_pp, m.map(|v| v / p.pixels.len().max(1) as f64))
         })
         .collect()
+}
+
+/// CIELAB D50 of each patch from encoded sRGB output pixels.
+pub fn patch_lab(chart: &Chart, srgb: &[[f32; 3]]) -> Vec<[f64; 3]> {
+    patch_rgb(chart, srgb)
+        .into_iter()
+        .map(|m| color::rgb_to_lab(&PROPHOTO, m))
+        .collect()
+}
+
+/// Piecewise linear interpolation through sorted `(x, y)` points,
+/// continuing the end segments outside them.
+fn interp(pts: &[(f64, f64)], x: f64) -> f64 {
+    let i = pts
+        .windows(2)
+        .position(|w| x <= w[1].0)
+        .unwrap_or(pts.len() - 2);
+    let ((x0, y0), (x1, y1)) = (pts[i], pts[i + 1]);
+    if (x1 - x0).abs() < 1e-12 {
+        return y0;
+    }
+    y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+}
+
+/// Colour error against a perfect film printed with the same curves.
+fn tone_matched(chart: &Chart, rgb: &[[f64; 3]]) -> f64 {
+    let to_srgb = color::rgb_to_rgb(&PROPHOTO, &SRGB);
+    let to_pp = color::rgb_to_rgb(&SRGB, &PROPHOTO);
+    // Each channel's grey curve: log reflectance → encoded output.
+    let curves: [Vec<(f64, f64)>; 3] = std::array::from_fn(|c| {
+        let mut pts: Vec<(f64, f64)> = chart
+            .patches
+            .iter()
+            .zip(rgb)
+            .filter(|(p, _)| p.neutral)
+            .map(|(p, o)| {
+                let y = color::lab_to_xyz(p.lab, D50)[1];
+                (y.log10(), color::srgb_encode(o[c].max(0.0) as f32) as f64)
+            })
+            .collect();
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        pts
+    });
+    let mut sum = 0.0;
+    for (p, o) in chart.patches.iter().zip(rgb).take(18) {
+        let r = reflectance(p.lab);
+        let ideal: [f64; 3] = std::array::from_fn(|c| {
+            let e = interp(&curves[c], r[c].log10()).clamp(0.0, 1.0);
+            color::srgb_decode(e as f32) as f64
+        });
+        // Clip to the sRGB output gamut like the rendered patch.
+        let ideal = color::mat_vec(
+            &to_pp,
+            color::mat_vec(&to_srgb, ideal).map(|v| v.clamp(0.0, 1.0)),
+        );
+        sum += color::delta_e2000(
+            color::rgb_to_lab(&PROPHOTO, ideal),
+            color::rgb_to_lab(&PROPHOTO, *o),
+        );
+    }
+    sum / 18.0
 }
 
 /// CIEDE2000 between two colours ignoring their lightness difference.
@@ -234,7 +300,11 @@ pub fn color_de(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 pub fn measure(chart: &Chart, srgb: &[[f32; 3]]) -> ChartMetrics {
-    let labs = patch_lab(chart, srgb);
+    let rgb = patch_rgb(chart, srgb);
+    let labs: Vec<[f64; 3]> = rgb
+        .iter()
+        .map(|m| color::rgb_to_lab(&PROPHOTO, *m))
+        .collect();
     let mut color_sum = 0.0;
     let mut full_sum = 0.0;
     let (mut cast_sum, mut cast_max, mut n_neutral) = (0.0f64, 0.0f64, 0usize);
@@ -254,6 +324,7 @@ pub fn measure(chart: &Chart, srgb: &[[f32; 3]]) -> ChartMetrics {
     }
     ChartMetrics {
         color_de: color_sum / 18.0,
+        tone_matched_de: tone_matched(chart, &rgb),
         full_de: full_sum / 24.0,
         neutral_cast: cast_sum / n_neutral as f64,
         neutral_cast_max: cast_max,

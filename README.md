@@ -39,18 +39,18 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
   - Left: back (Space), previous/next (←/→, wraps; skips unconverted frames when the current one is converted), zoom (+/−, ⌘-scroll or double-click), undo/redo (⌘Z / ⇧⌘Z).
   - Centre: file name, tone profile and the lab correction offsets (`D+2 C−1 M0 Y+1`).
   - Right: before/after (B; ⇧B for a split view with a draggable divider), rotate, flip, crop/straighten (C), export.
-- Lab correction keys, like a Frontier/Noritsu keyboard (number row or numpad): 7 8 9 add cyan, magenta, yellow; 1 2 3 take them away; 4 / 6 print denser (darker) / lighter in 1/6 EV steps; 0 resets. They move the Exposure and mid-tone colour sliders.
+- Lab correction keys, like a Frontier/Noritsu keyboard (number row or numpad): 7 8 9 add cyan, magenta, yellow; 1 2 3 take them away; 4 / 6 print denser (darker) / lighter in 1/6 EV steps; 0 resets. They move the print exposure and the printing filtration (2.5 CC per click).
 - J shows clipping: red where a channel is blown, blue where the shadows are blocked. The histogram marks clipped channels in its corners.
 - Hovering the image shows the output RGB and the negative's density above the film base.
 - Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. Detect finds the frame inside the film rebate and holder. Reset Crop / Cancel (Esc) / Apply (Enter).
 - A single-column sidebar with a histogram on top:
   - Before conversion it shows the conversion inputs (Source, Analysis). Dragging the border buffer slider outlines the analysed area on the canvas. Afterwards they fold into a one-line **Conversion** summary with Re-convert.
-  - **Tone**: tone profile, Exposure, Brightness, Contrast, Lights, Darks, Whites, Blacks; *Glow, fade & clipping* holds Lab Glow/Fade, Soft Highs/Lows and White/Black clip.
-  - **White balance**: presets, a neutral eyedropper and Temp/Tint.
+  - **Tone**: tone profile, Exposure, Brightness, Contrast, Lights, Darks, Whites, Blacks; *Glow, fade & clipping* holds Lab Glow/Fade and White/Black clip.
+  - **White balance**: presets, a neutral eyedropper and Temp/Tint (yellow and magenta filtration in CC).
   - **Colour toning**: mids, highs and shadows.
   - **Look**: LUT with amount and saturation, sharpening.
   - **Film** (collapsed): film stock, ISO, developer and camera details for the EXIF and the file name tokens; *Apply to roll/folder* copies them.
-  - **Engine** (collapsed): engine presets v2.1 to v3.1, curve points, processing order, WB density and type, plus a curve and analysis readout. Roll frames get *Use roll analysis* and the roll process.
+  - **Analysis** (collapsed): the print curves and each channel's analysed densities. Roll frames get *Use roll analysis* and the roll process.
   - The ⋯ menu beside Re-convert: save/apply default, reset edits, unconvert and the LUT folder.
 - Film-base eyedropper for sampling the unexposed border.
 
@@ -58,24 +58,31 @@ Settings are saved inside the `NLP/` subfolder as `<file>.nlp.json`.
 
 ## Engine (`src/engine`)
 
-| Module | Ported from |
-|---|---|
-| `curve.rs` | `CurveEngineV3.lua`: tanh sigmoids, auto-tone gamma, every tone and colour layer, colour-protected and linear clipping, node inversion, single- and multi-pass curves |
-| `pipeline.rs` | `NLPImageProcessorV3.lua`: 600 px analysis, border buffer, σ=2 blur, CDF clipping (0.01 % / 0.05 %), HSB-zone auto WB; `NLPRolls.lua`: roll aggregation (min/max origins, 2.2 power-mean means, 2σ colour-ratio outliers) exposure matching by EXIF shutter/aperture/ISO (`commonEV`), and the Pro Lab / Basic Lab / Darkroom Paper roll processes |
-| `presets.rs` | `NegativePresets.lua`: tone profiles, colour models, pre-saturation, film WB presets, engine presets |
-| `lut.rs` | Reads the plugin's real 3D LUTs from `LR Files/CameraRaw/Settings/NLP Enhanced Settings/*.xmp` (Adobe base85 + zlib RGB tables, 32³) |
-| `color.rs` | `NLPColorV3.lua`: MelissaRGB working space, output spaces, generated ICC profiles |
-| `export.rs` | `NLPExportServiceProviderV3.lua`, `ExifV3.lua`, `GammaUtilityV3.lua` |
+The engine started as a port of the Lightroom plugin and now models the film itself: a scan becomes density, density is printed onto a paper curve.
 
-### Where it differs from the plugin
-- **Raw processing.** `rawler` decodes the raw files.
-- **Camera profiles.** The plugin's *Negative Lab v2.3* camera profiles (`LR Files/CameraRaw/CameraProfiles`) are applied automatically.
-  - Matching follows Lightroom: the DNG UniqueCameraModel, or make + model. VueScan/SilverFast DNGs use the generic scanner profile, as the plugin's DNG updater arranges.
-  - The pipeline follows the DNG spec: film base as the white balance, interpolated colour matrix, look table, baseline exposure offset and Adobe's hue-preserving tone curve.
-  - Cameras without a profile fall back to `rawler`'s colour matrix.
-  - Adobe's own raw processing (demosaic, highlight handling) still differs from `rawler`'s, so results are close to Lightroom but not identical.
-- **Film base.** Lightroom's border-eyedropper white balance becomes the **Film base** option. *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper.
-- **Exposure.** The plugin's Exposure slider (±50 curve units, applied in node space before the other tone layers) is replaced by a print exposure in EV (±5). It models paper density and is applied to the finished curve. Sidecars from older versions are converted at `exposure / 10`.
+1. **Density.** `pipeline::prepare_negative` takes linear camera RGB through the camera matrix, divides out the film base and stores `log10(base / transmittance)` per channel, unclamped. A C-41 dye crosstalk correction (the dyes' unwanted absorptions) and the colour model's calibration are applied in density.
+2. **Levels.** `pipeline::analyze` measures each channel's density range (exact 0.05 % / 99.99 % quantiles and the median) on the 600 px, border-cropped, blurred analysis buffer. Normalising every channel to its own range matches the layers' different H&D slopes, so neutrals stay neutral from shadows to highlights.
+3. **Print.** `curve.rs` shapes the normalised density (brightness, contrast, lights/darks, whites/blacks, toning), turns it into paper log exposure plus printing filtration (white balance and the C·M·Y keys, in CC) and print time (EV), and prints it on a logistic paper curve with a toe and shoulder. The result is baked into density-indexed LUTs.
+4. **Auto colour.** Auto-Neutral is the filtration that prints the near-neutral pixels grey.
+5. **Rolls.** The roll's levels are the median of its frames, with frames of an outlying colour balance left out. EXIF exposure differences are exact density offsets (`log10 2` per stop). Pro Lab keeps the roll's colour balance on each frame's own density range.
+
+`testchart.rs` models a ColorChecker shot on C-41 film; `chart_quality` measures colour error, neutrality and roll consistency against it.
+
+| Module | Role |
+|---|---|
+| `curve.rs` | Print engine: normalisation, tone and colour shaping, paper curve, LUTs, eyedropper |
+| `pipeline.rs` | Film base, density, crosstalk, analysis, auto colour, roll aggregation, renderer |
+| `presets.rs` | Colour models, pre-saturation, film WB presets, sharpening |
+| `lut.rs` | Reads the plugin's 3D looks from `LR Files/CameraRaw/Settings/NLP Enhanced Settings/*.xmp` (Adobe base85 + zlib RGB tables, 32³) |
+| `color.rs` | Working and output spaces, CIELAB / CIEDE2000, generated ICC profiles |
+| `testchart.rs` | Physically modelled test negative and quality metrics |
+| `export.rs` | Positive copies with ICC and EXIF, TIF scan prep |
+
+### Notes
+- **Raw processing.** `rawler` decodes the raw files and supplies the camera matrix.
+- **Camera profiles.** The plugin's *Negative Lab* DCPs only identify VueScan/SilverFast DNGs. Their tone curves and look tables are made for scenes, so the conversion doesn't apply them.
+- **Film base.** *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper.
+- **Sidecars** from before the density engine keep their settings and metadata but need a new Convert.
 - **LUT folder.** The app finds the LUTs automatically in `../NLP Lightroom Plugin/...` or in Lightroom's CameraRaw settings folder. If they are missing, it uses built-in approximations of each look.
 - **Not ported:** licensing and the Lightroom catalog/DNG-profile plumbing, which a standalone app doesn't need.
 

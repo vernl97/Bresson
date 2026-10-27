@@ -213,21 +213,9 @@ impl NlpApp {
     }
 
     /// Commit a settings change made in the editor.
-    fn apply_change(&mut self, i: usize, before: &Settings, mut s: Settings) {
+    fn apply_change(&mut self, i: usize, before: &Settings, s: Settings) {
         if s == *before {
             return;
-        }
-        if s.engine != before.engine {
-            let p = s.engine;
-            s.apply_engine_preset(p);
-        } else if s.curve_points != before.curve_points
-            || s.correction_type != before.correction_type
-            || s.layer_order != before.layer_order
-            || s.wb_tonality != before.wb_tonality
-            || s.wb_method != before.wb_method
-            || s.clip_method != before.clip_method
-        {
-            s.engine = EnginePreset::Custom;
         }
         let wb_changed = s.wb_mode != before.wb_mode;
         self.frames[i].sc.settings = s;
@@ -364,7 +352,7 @@ impl NlpApp {
         let origins = if self.editor.before {
             None
         } else {
-            pipeline::origins_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
+            pipeline::levels_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
         };
         let mp = (src.info.full_width * src.info.full_height) as f32 / 1e6;
         let r = Renderer::new(&s, origins.as_ref(), OutputSpace::Srgb).with_megapixels(mp);
@@ -1019,21 +1007,9 @@ impl NlpApp {
         if open {
             self.conversion_settings(ui, s);
         } else {
-            let profile = match self.editor.src.as_ref().map(|src| src.is_raw) {
-                Some(true) => match self
-                    .editor
-                    .src
-                    .as_ref()
-                    .and_then(|src| pipeline::camera_profile(src))
-                {
-                    Some(_) => " · profile ✓",
-                    None => " · camera matrix",
-                },
-                _ => "",
-            };
             ui.label(
                 RichText::new(format!(
-                    "{} · {} · base {}{profile}",
+                    "{} · {} · base {}",
                     s.source.label(),
                     s.color_model.label(),
                     s.film_base.label().to_lowercase(),
@@ -1057,8 +1033,7 @@ impl NlpApp {
             ) {
                 if s.image_type == ImageType::Negative {
                     let d = Settings::default();
-                    (s.tone_profile, s.wb_mode, s.correction_type) =
-                        (d.tone_profile, d.wb_mode, d.correction_type);
+                    (s.tone_profile, s.wb_mode) = (d.tone_profile, d.wb_mode);
                 } else {
                     s.apply_positive_defaults();
                 }
@@ -1098,37 +1073,6 @@ impl NlpApp {
             {
                 s.apply_mono_defaults();
             }
-            ui.label(RichText::new("Camera profile").small().color(theme::MUTED));
-            match self
-                .editor
-                .src
-                .as_ref()
-                .map(|src| (src.is_raw, pipeline::camera_profile(src)))
-            {
-                Some((_, Some(p))) => {
-                    widgets::status_line(ui, Icon::Check, theme::OK, &p.name)
-                        .on_hover_text(format!("{}\n{}", p.camera, p.path.display()));
-                }
-                Some((true, None)) => {
-                    widgets::status_line(
-                        ui,
-                        Icon::Warn,
-                        theme::WARN,
-                        "No Negative Lab profile for this camera, so the camera matrix is used.",
-                    );
-                }
-                Some((false, None)) => {
-                    ui.label(
-                        RichText::new("Not used for TIF / JPEG scans")
-                            .small()
-                            .color(theme::FAINT),
-                    );
-                }
-                None => {
-                    ui.label(RichText::new("…").small().color(theme::FAINT));
-                }
-            }
-            ui.add_space(8.0);
             ui.label(RichText::new("Film base").small().color(theme::MUTED))
                 .on_hover_text("Neutralises the orange mask before analysis");
             self.combo_with_picker(
@@ -1229,11 +1173,6 @@ impl NlpApp {
                     "Negative values recover crushed shadows",
                     None,
                 );
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut s.soft_highlights, "Soft highs");
-                    ui.add_space(16.0);
-                    ui.checkbox(&mut s.soft_shadows, "Soft lows");
-                });
             }
         }
         if widgets::fold(ui, "White balance") {
@@ -1252,10 +1191,10 @@ impl NlpApp {
                 ui,
                 "Temp",
                 &mut t,
-                -75.0..=75.0,
+                -50.0..=50.0,
                 0.0,
-                2,
-                "Blue ↔ Yellow: most film conversions need some warmth",
+                1,
+                "Yellow printing filtration in CC: blue ↔ yellow",
                 Some(grad::TEMP),
             ) {
                 s.wb_temp = t;
@@ -1266,10 +1205,10 @@ impl NlpApp {
                 ui,
                 "Tint",
                 &mut k,
-                -75.0..=75.0,
+                -50.0..=50.0,
                 0.0,
-                2,
-                "Green ↔ Magenta",
+                1,
+                "Magenta printing filtration in CC: green ↔ magenta",
                 Some(grad::TINT),
             ) {
                 s.wb_tint = k;
@@ -1473,7 +1412,6 @@ impl NlpApp {
         } else if s.is_monochrome() {
             s.apply_mono_defaults();
         }
-        s.apply_engine_preset(keep.engine);
         self.refresh_wb(i, s);
     }
 
@@ -1523,98 +1461,29 @@ impl NlpApp {
         lut_folder_ui(self, ui);
     }
 
-    /// Engine internals and the curve diagnostics, collapsed by default.
+    /// The print curves and the analysed density levels, collapsed by default.
     fn engine_section(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
-        if widgets::fold_with(ui, "Engine", false) {
-            fl_combo(
-                ui,
-                "Engine preset",
-                &mut s.engine,
-                EnginePreset::ALL,
-                EnginePreset::label,
-                "",
-            );
-            fl_combo(
-                ui,
-                "Curve points",
-                &mut s.curve_points,
-                CurvePoints::ALL,
-                CurvePoints::label,
-                "Auto: by tonal range · Smooth: 4 · Precise: 14 · Manual: 2–14",
-            );
-            if s.curve_points == CurvePoints::Manual {
-                fl_slider_u8(ui, "Points", &mut s.curve_resolution, 2..=14, 7, "");
-            }
-            fl_combo(
-                ui,
-                "Processing",
-                &mut s.correction_type,
-                CorrectionType::ALL,
-                CorrectionType::label,
-                "",
-            );
-            fl_combo(
-                ui,
-                "Order",
-                &mut s.layer_order,
-                LayerOrder::ALL,
-                LayerOrder::label,
-                "Colors First keeps colour stable while editing tones",
-            );
-            fl_combo(
-                ui,
-                "WB density",
-                &mut s.wb_tonality,
-                WbTonality::ALL,
-                WbTonality::label,
-                "",
-            );
-            fl_combo(
-                ui,
-                "WB type",
-                &mut s.wb_method,
-                WbMethod::ALL,
-                WbMethod::label,
-                "",
-            );
-            fl_combo(
-                ui,
-                "Toning",
-                &mut s.toning_method,
-                ToningMethod::ALL,
-                ToningMethod::label,
-                "",
-            );
-            fl_combo(
-                ui,
-                "Clipping",
-                &mut s.clip_method,
-                ClipMethod::ALL,
-                ClipMethod::label,
-                "",
-            );
+        if widgets::fold_with(ui, "Analysis", false) {
             if !self.editor.curves.is_empty() {
                 ui.add_space(8.0);
                 widgets::curves_plot(ui, &self.editor.curves, vec2(ui.available_width(), 150.0));
             }
             let f = &self.frames[i];
-            let o = pipeline::origins_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
-                .map(|fo| fo.origins);
-            if let Some(o) = o {
+            if let Some(o) = pipeline::levels_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref()) {
                 ui.add_space(6.0);
                 egui::Grid::new("origins")
                     .num_columns(4)
                     .spacing([18.0, 2.0])
                     .show(ui, |ui| {
-                        for h in ["", "White", "Black", "Mean"] {
+                        for h in ["", "Black D", "White D", "Median D"] {
                             ui.label(RichText::new(h).small().color(theme::MUTED));
                         }
                         ui.end_row();
                         for (c, n) in ["R", "G", "B"].iter().enumerate() {
                             ui.label(*n);
-                            ui.label(format!("{:.0}", o[c].white));
-                            ui.label(format!("{:.0}", o[c].black));
-                            ui.label(format!("{:.3}", o[c].mean));
+                            ui.label(format!("{:.2}", o[c].lo));
+                            ui.label(format!("{:.2}", o[c].hi));
+                            ui.label(format!("{:.2}", o[c].mid));
                             ui.end_row();
                         }
                     });
@@ -2232,7 +2101,7 @@ impl NlpApp {
             sample(&self.editor.px, w, h, u, v, 1).map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
         let mut text = format!("RGB {} {} {}", rgb[0], rgb[1], rgb[2]);
         if let Some(neg) = &self.editor.neg {
-            let d = pipeline::density_above_base(sample(&neg.data, neg.width, neg.height, u, v, 1));
+            let d = sample(&neg.data, neg.width, neg.height, u, v, 1);
             text += &format!("  ·  D {:.2} {:.2} {:.2}", d[0], d[1], d[2]);
         }
         Some(text)
@@ -2245,19 +2114,14 @@ impl NlpApp {
             Pick::WhiteBalance => {
                 let Some(neg) = &self.editor.neg else { return };
                 let f = &self.frames[i];
-                let Some(fo) =
-                    pipeline::origins_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
+                let Some(levels) =
+                    pipeline::levels_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
                 else {
                     self.toast("Convert the negative first, then pick a neutral.", true);
                     return;
                 };
-                let avg = sample(&neg.data, neg.width, neg.height, u, v, 3);
-                let origins = fo.origins;
-                let lut = crate::engine::curve::CurveLut::from_curves(
-                    &crate::engine::curve::update_tone_curve_roll(&origins, &s, fo.roll_clip),
-                );
-                let pos = [0, 1, 2].map(|c| lut.apply(c, avg[c]) as f64);
-                match crate::engine::curve::eyedropper_wb(pos, &origins, &s) {
+                let avg = sample(&neg.data, neg.width, neg.height, u, v, 3).map(|d| d as f64);
+                match crate::engine::curve::eyedropper_wb(avg, &levels, &s) {
                     Ok((t, n)) => {
                         s.wb_temp = (t * 100.0).round() / 100.0;
                         s.wb_tint = (n * 100.0).round() / 100.0;

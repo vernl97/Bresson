@@ -961,8 +961,8 @@ impl NlpApp {
             let s = &f.sc.settings;
             let base = f.base_for(src);
             let neg = pipeline::prepare_negative(src, s, base);
-            let origins = pipeline::origins_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref());
-            let r = Renderer::new(s, origins.as_ref(), OutputSpace::Srgb);
+            let levels = pipeline::levels_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref());
+            let r = Renderer::new(s, levels.as_ref(), OutputSpace::Srgb);
             let px = r.render(&neg, 0.0);
             let img = to_color_image(&px, neg.width, neg.height);
             match &mut f.thumb {
@@ -1128,7 +1128,7 @@ pub fn run(open: Option<PathBuf>) -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::curve::ChannelOrigin;
+    use crate::engine::curve::ChannelLevels;
     use crate::engine::pipeline::{Analysis, AutoWb};
 
     #[test]
@@ -1139,10 +1139,10 @@ mod tests {
             sc: Sidecar {
                 settings: Settings::default(),
                 analysis: Some(Analysis {
-                    origins: [ChannelOrigin {
-                        white: 10.0,
-                        black: 240.0,
-                        mean: 0.5,
+                    levels: [ChannelLevels {
+                        lo: 0.1,
+                        hi: 1.2,
+                        mid: 0.6,
                     }; 3],
                     auto_wb: AutoWb::default(),
                     base: [0.85, 0.60, 0.40],
@@ -1151,7 +1151,7 @@ mod tests {
                 }),
                 roll: None,
                 metadata: Default::default(),
-                version: 1,
+                version: crate::engine::sidecar::VERSION,
             },
             proxy: ProxyState::NotLoaded,
             thumb_src: None,
@@ -1255,8 +1255,7 @@ mod ui_tests {
             let app = h.state_mut();
             let i = app.active.unwrap();
             app.frames[i].sc.settings.rotation = 3;
-            app.frames[i].sc.settings.tone_profile =
-                crate::engine::settings::ToneProfile::LogarithmicRich;
+            app.frames[i].sc.settings.tone_profile = crate::engine::settings::ToneProfile::Rich;
             app.editor.invalidate();
         }
         settle(&mut h, 30.0);
@@ -1383,14 +1382,14 @@ mod ui_tests {
         h.get_by_value(label).click();
         h.run_steps(4);
         assert!(
-            h.query_by_label("Cinematic - Rich").is_some(),
+            h.query_by_label("Rich").is_some(),
             "Tones dropdown should be open"
         );
-        h.get_by_label("Cinematic - Rich").click();
+        h.get_by_label("Rich").click();
         h.run_steps(4);
         assert_eq!(
             h.state().frames[0].sc.settings.tone_profile,
-            crate::engine::settings::ToneProfile::LogarithmicRich
+            crate::engine::settings::ToneProfile::Rich
         );
     }
 

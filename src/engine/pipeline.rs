@@ -1,34 +1,33 @@
-//! Negative preparation, analysis (NLPImageProcessorV3.lua) and rendering.
+//! Negative preparation (scan → density), analysis and rendering.
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::color::{self, hsl_lightness, rgb_to_hsv};
-use super::curve::{ChannelOrigin, CurveLut, Origins, RollClip, update_tone_curve_roll};
+use super::color;
+use super::curve::{self, ChannelLevels, CurveLut, Levels};
 use super::dcp;
 use super::decode::{self, SourceImage};
 use super::look::{self, Look};
-use super::presets::{self, TEMP_MULTIPLIER, WbZone, ZONE_COOL, ZONE_NEUTRAL, ZONE_WARM};
+use super::presets;
 use super::settings::{AnalysisKey, FilmBase, ImageType, OutputSpace, RollMode, Settings, WbMode};
 use super::sidecar::RollData;
 
-/// Long edge of the analysis rendition (`LR_size_maxHeight = 600`).
+/// Long edge of the analysis rendition.
 pub const ANALYSIS_SIZE: usize = 600;
 /// Film base is mapped to this linear level after neutralisation.
 const BASE_LEVEL: f32 = 0.97;
+/// Channel weights for monochrome density and for saturation in density.
+const DENSITY_WEIGHTS: [f32; 3] = [0.30, 0.55, 0.15];
 
-/// Per-channel density above the film base of a prepared negative pixel,
-/// like a lab scanner's densitometer readout.
-pub fn density_above_base(p: [f32; 3]) -> [f32; 3] {
-    p.map(|v| {
-        (BASE_LEVEL / color::srgb_decode(v).max(1e-4))
-            .log10()
-            .max(0.0)
-    })
-}
+/// Residual unwanted absorption of C-41 dyes after the masking couplers, as
+/// a camera sees it: measured density per unit of dye (rows R/G/B channel,
+/// columns C/M/Y dye). Mostly the magenta dye's blue absorption and the
+/// cyan dye's green absorption.
+const C41_CROSSTALK: color::Mat3 = [[1.00, 0.06, 0.02], [0.10, 1.00, 0.05], [0.04, 0.15, 1.00]];
 
-/// The prepared negative: encoded MelissaRGB (0..1), i.e. the pixels the
-/// plugin's tone curves operate on.
+/// The prepared negative: per-channel density above the film base
+/// (`log10(base / transmittance)`), dye crosstalk removed. Not clamped:
+/// anything thinner than the base is negative.
 #[derive(Clone)]
 pub struct Negative {
     pub width: usize,
@@ -36,28 +35,30 @@ pub struct Negative {
     pub data: Vec<[f32; 3]>,
 }
 
-/// Auto white-balance candidates as (temp, tint).
+/// Auto white-balance candidates as (temp, tint) in CC.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct AutoWb {
     pub neutral: (f32, f32),
     pub warm: (f32, f32),
     pub cool: (f32, f32),
     pub avg: (f32, f32),
-    /// Smart-colour zone averages (neutral, warm, cool) as RGB, after the
-    /// plugin's integer HSB rounding; roll analysis averages these.
+    /// Mean density of the near-neutral pixels; roll analysis averages it.
     #[serde(default)]
-    pub colors: [[f32; 3]; 3],
+    pub grey: [f64; 3],
+    /// Mean density of all image pixels.
+    #[serde(default)]
+    pub mean: [f64; 3],
 }
 
 /// Per-frame result of "Convert".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Analysis {
-    pub origins: Origins,
+    pub levels: Levels,
     pub auto_wb: AutoWb,
     /// Film base colour (source space) used for neutralisation.
     pub base: [f32; 3],
     pub key: AnalysisKey,
-    /// Exposure value of the capture (`L19_1`), when the EXIF has it.
+    /// Exposure value of the capture, when the EXIF has it.
     #[serde(default)]
     pub ev: Option<f64>,
 }
@@ -117,11 +118,12 @@ pub fn base_multipliers(src: &SourceImage, s: &Settings, base: [f32; 3]) -> [f32
     }
 }
 
-/// Calibration + pre-saturation matrix (applied to the linear negative, like
-/// Lightroom applies Camera Calibration and Saturation before the tone curve).
-fn negative_color_matrix(s: &Settings) -> [[f32; 3]; 3] {
+/// Colour model calibration and pre-saturation, applied in density: hue
+/// shifts mix each primary towards a neighbour, saturation scales the
+/// distance from the neutral axis (channel separation).
+fn calibration_matrix(s: &Settings) -> [[f32; 3]; 3] {
     let cal = presets::calibration(s.color_model, s.source);
-    let yw = color::melissa_luminance_weights();
+    let yw = DENSITY_WEIGHTS;
     const K: f32 = 0.25 / 100.0;
     // Primary columns.
     let mut cols = [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -154,21 +156,43 @@ fn negative_color_matrix(s: &Settings) -> [[f32; 3]; 3] {
             }
         }
     }
-    // Saturation (Lightroom −100..100) around luminance.
     let f = 1.0 + presets::pre_saturation(s.pre_saturation) / 100.0;
     let sat_m: [[f32; 3]; 3] = std::array::from_fn(|r| {
         std::array::from_fn(|c| yw[c] * (1.0 - f) + if r == c { f } else { 0.0 })
     });
-    let mut out = [[0.0f32; 3]; 3];
-    for r in 0..3 {
-        for c in 0..3 {
-            out[r][c] = (0..3).map(|k| sat_m[r][k] * m[k][c]).sum();
+    mat_mul_f32(&sat_m, &m)
+}
+
+fn mat_mul_f32(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    std::array::from_fn(|r| std::array::from_fn(|c| (0..3).map(|k| a[r][k] * b[k][c]).sum()))
+}
+
+/// Dye crosstalk correction: the inverse of the dye mixing, with its rows
+/// normalised so a neutral density stays neutral.
+fn crosstalk_correction() -> [[f32; 3]; 3] {
+    let mut m = color::mat_inv(&C41_CROSSTALK);
+    for row in m.iter_mut() {
+        let sum: f64 = row.iter().sum();
+        for v in row.iter_mut() {
+            *v /= sum;
         }
     }
-    out
+    color::to_f32(&m)
+}
+
+/// Density-space matrix of a frame: crosstalk correction (colour negatives),
+/// then the colour model calibration.
+fn density_matrix(s: &Settings) -> [[f32; 3]; 3] {
+    let cal = calibration_matrix(s);
+    if s.image_type == ImageType::Negative && !s.is_monochrome() {
+        mat_mul_f32(&cal, &crosstalk_correction())
+    } else {
+        cal
+    }
 }
 
 /// The plugin's Negative Lab camera profile for this source, if one matches.
+/// Only used to recognise scanner DNGs.
 pub fn camera_profile(src: &SourceImage) -> Option<std::sync::Arc<dcp::DcpProfile>> {
     if src.is_raw {
         dcp::profile_for(&src.info)
@@ -204,30 +228,8 @@ pub fn detect_source(src: &SourceImage) -> super::settings::Source {
     }
 }
 
-/// Camera profile transform with the film base as white balance (like
-/// sampling the border with Lightroom's WB eyedropper).
-fn dcp_transform(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Option<dcp::DcpTransform> {
-    let p = camera_profile(src)?;
-    let base64 = base.map(|v| v.max(1e-6) as f64);
-    let (neutral, level_ref) = match s.film_base {
-        FilmBase::Auto | FilmBase::Sampled => (base64, Some(base)),
-        FilmBase::AsShot => {
-            let wb = src.as_shot_wb;
-            (
-                [
-                    1.0 / wb[0].max(1e-6) as f64,
-                    1.0 / wb[1].max(1e-6) as f64,
-                    1.0 / wb[2].max(1e-6) as f64,
-                ],
-                Some(base),
-            )
-        }
-        FilmBase::Off => (p.xy_to_neutral(color::D65), None),
-    };
-    Some(dcp::DcpTransform::new(p, neutral, level_ref, BASE_LEVEL))
-}
-
-/// Build the encoded negative from source pixels.
+/// Build the negative's density image from linear source pixels: camera
+/// matrix, film base neutralisation, `log10`, crosstalk and calibration.
 pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Negative {
     let (d, w, h) = decode::geometry(
         &src.data,
@@ -238,26 +240,33 @@ pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Nega
         s.straighten,
         s.crop,
     );
-    let mul = base_multipliers(src, s, base);
-    let to_mel = src.to_melissa;
-    let dcp = dcp_transform(src, s, base);
-    let cm = negative_color_matrix(s);
-    let mono = presets::calibration(s.color_model, s.source).grayscale;
-    let yw = color::melissa_luminance_weights();
-    let enc = color::srgb_encode_lut();
+    let edit_only = s.image_type == ImageType::EditOnly;
+    // Already positive scans keep their own levels: density is −log10 of
+    // the linear value.
+    let (mul, level) = if edit_only {
+        ([1.0; 3], 1.0)
+    } else {
+        (base_multipliers(src, s, base), BASE_LEVEL)
+    };
+    let to_lin = src.to_melissa;
+    let m = density_matrix(s);
+    let mono = s.is_monochrome();
+    let yw = DENSITY_WEIGHTS;
     let data = d
         .par_iter()
         .map(|p| {
-            let m = match &dcp {
-                Some(t) => t.apply(*p),
-                None => color::mul3(&to_mel, [p[0] * mul[0], p[1] * mul[1], p[2] * mul[2]]),
-            };
-            let mut m = color::mul3(&cm, [m[0].max(0.0), m[1].max(0.0), m[2].max(0.0)]);
-            if mono {
-                let y = m[0] * yw[0] + m[1] * yw[1] + m[2] * yw[2];
-                m = [y, y, y];
+            let t = color::mul3(&to_lin, [p[0] * mul[0], p[1] * mul[1], p[2] * mul[2]]);
+            let dens = t.map(|v| (level / v.max(1e-5)).log10());
+            if edit_only {
+                return dens;
             }
-            [enc.get(m[0]), enc.get(m[1]), enc.get(m[2])]
+            let dens = color::mul3(&m, dens);
+            if mono {
+                let y = dens[0] * yw[0] + dens[1] * yw[1] + dens[2] * yw[2];
+                [y, y, y]
+            } else {
+                dens
+            }
         })
         .collect();
     Negative {
@@ -283,235 +292,209 @@ pub fn analysis_buffer(neg: &Negative, s: &Settings) -> Negative {
     }
 }
 
-/// CDF clipping (L50_1): returns (whitePointOrigin, blackPointOrigin, meanPoint).
-/// The Lua histogram is 1-based (`L51_1` stores level v at index v+1), so its
-/// `index - 1` is the level itself, i.e. `i` here.
-pub fn cdf_origins(hist: &[u64; 256], total: u64, t: ImageType) -> ChannelOrigin {
+/// Value at quantile `q` (0..1) of `v` (reordered in place).
+fn quantile(v: &mut [f32], q: f64) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let i = ((v.len() - 1) as f64 * q.clamp(0.0, 1.0)).round() as usize;
+    let (_, x, _) = v.select_nth_unstable_by(i, |a, b| a.total_cmp(b));
+    *x as f64
+}
+
+/// Density range of each channel: exact quantiles at the clip thresholds
+/// and the median, independently per channel.
+fn channel_quantiles(buf: &Negative, t: ImageType) -> Levels {
     let (white_t, black_t) = presets::clip_thresholds(t);
-    let total = total.max(1) as f64;
-    let mut white = 0i64;
-    let mut acc = 0.0;
-    for (i, &v) in hist.iter().enumerate() {
-        acc += v as f64 / total;
-        if acc > white_t {
-            white = i as i64;
+    std::array::from_fn(|c| {
+        let mut v: Vec<f32> = buf.data.iter().map(|p| p[c]).collect();
+        // Negatives print thin black, positives print thin white.
+        let (lo_q, hi_q) = match t {
+            ImageType::Positive => (white_t, 1.0 - black_t),
+            _ => (black_t, 1.0 - white_t),
+        };
+        let lo = quantile(&mut v, lo_q);
+        let hi = quantile(&mut v, hi_q).max(lo + 0.05);
+        let mid = quantile(&mut v, 0.5);
+        ChannelLevels { lo, hi, mid }
+    })
+}
+
+/// Analysed levels: green's own density range, with red and blue placed on
+/// the image's neutral axis (see [`neutral_axis`]) so their slopes match the
+/// film's per-layer H&D slopes. Falls back to each channel's own range when
+/// the image has too little near-neutral content.
+pub fn levels_from_buffer(buf: &Negative, t: ImageType) -> Levels {
+    let mut l = channel_quantiles(buf, t);
+    let own = l;
+    for _ in 0..3 {
+        let Some(fit) = neutral_axis(buf, &l, t) else {
             break;
+        };
+        for c in [0, 2] {
+            let (a, b) = fit[c];
+            // Keep the fitted slope within reach of the channel's own range.
+            let own_b = (own[c].hi - own[c].lo) / (own[1].hi - own[1].lo).max(1e-3);
+            let b = b.clamp(own_b * 0.8, own_b * 1.25);
+            let at = |g: f64| a + b * g;
+            l[c] = ChannelLevels {
+                lo: at(l[1].lo),
+                hi: at(l[1].hi).max(at(l[1].lo) + 0.05),
+                mid: own[c].mid,
+            };
         }
     }
-    let mut black = 255i64;
-    acc = 0.0;
-    for i in (0..256).rev() {
-        acc += hist[i] as f64 / total;
-        if acc > black_t {
-            black = i as i64;
-            break;
+    l
+}
+
+/// The neutral axis of an image: near-neutral pixels (normalised channels
+/// within 0.1 of each other under the current levels `l`), binned by green
+/// density into tonal steps, and a weighted line `D_c = a + b · D_green`
+/// through the bins' median densities for each channel. `None` without
+/// near-neutral pixels in at least four tonal steps.
+fn neutral_axis(buf: &Negative, l: &Levels, t: ImageType) -> Option<[(f64, f64); 3]> {
+    const BINS: usize = 10;
+    let mut bins: Vec<Vec<[f32; 3]>> = vec![Vec::new(); BINS];
+    for p in &buf.data {
+        let x: [f64; 3] = std::array::from_fn(|c| normalised(l, t, c, p[c] as f64));
+        let (lo, hi) = x
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        if hi - lo < 0.1 && (0.03..0.97).contains(&x[1]) {
+            bins[((x[1] * BINS as f64) as usize).min(BINS - 1)].push(*p);
         }
     }
-    if black <= white {
-        black = (white + 1).min(255);
-        white = black - 1;
+    let min_count = (buf.data.len() / 500).max(8);
+    let steps: Vec<([f64; 3], f64)> = bins
+        .into_iter()
+        .filter(|b| b.len() >= min_count)
+        .map(|b| {
+            let w = (b.len() as f64).sqrt();
+            let med = std::array::from_fn(|c| median(b.iter().map(|p| p[c] as f64).collect()));
+            (med, w)
+        })
+        .collect();
+    if steps.len() < 4 {
+        return None;
     }
-    let ks = (white as f64 * 1.005).round() as i64;
-    let ke = (black as f64 * 0.995).round() as i64;
-    let span = (ke - ks).max(1) as f64;
-    let step = 256.0 / span;
-    let (mut num, mut den) = (0.0f64, 0.0f64);
-    for i in ks.max(0)..=ke.min(255) {
-        let hv = hist[i as usize] as f64;
-        den += hv;
-        num += hv * (i - ks) as f64 * step;
+    Some(std::array::from_fn(|c| {
+        let sw: f64 = steps.iter().map(|s| s.1).sum();
+        let mx = steps.iter().map(|s| s.1 * s.0[1]).sum::<f64>() / sw;
+        let my = steps.iter().map(|s| s.1 * s.0[c]).sum::<f64>() / sw;
+        let sxx: f64 = steps.iter().map(|s| s.1 * (s.0[1] - mx).powi(2)).sum();
+        let sxy: f64 = steps
+            .iter()
+            .map(|s| s.1 * (s.0[1] - mx) * (s.0[c] - my))
+            .sum();
+        let b = if sxx > 1e-9 { sxy / sxx } else { 1.0 };
+        (my - b * mx, b)
+    }))
+}
+
+/// Normalised density (0 prints black … 1 prints white).
+fn normalised(l: &Levels, t: ImageType, c: usize, d: f64) -> f64 {
+    let x = (d - l[c].lo) / (l[c].hi - l[c].lo).max(1e-6);
+    if t == ImageType::Positive { 1.0 - x } else { x }
+}
+
+/// Mean density of the image pixels and of its near-neutral pixels. Pixels
+/// count as neutral when their normalised channels agree within 0.12 once
+/// the overall cast is taken out; the cast estimate is refined a few times.
+fn grey_and_mean(buf: &Negative, l: &Levels, t: ImageType) -> ([f64; 3], [f64; 3]) {
+    let px: Vec<([f64; 3], [f64; 3])> = buf
+        .data
+        .iter()
+        .map(|p| {
+            let d = p.map(|v| v as f64);
+            (d, std::array::from_fn(|c| normalised(l, t, c, d[c])))
+        })
+        .filter(|(_, x)| x.iter().all(|v| (0.02..0.98).contains(v)))
+        .collect();
+    let mean_of = |sel: &[&([f64; 3], [f64; 3])]| -> Option<([f64; 3], [f64; 3])> {
+        if sel.is_empty() {
+            return None;
+        }
+        let n = sel.len() as f64;
+        let mut d = [0.0; 3];
+        let mut x = [0.0; 3];
+        for (pd, px) in sel {
+            for c in 0..3 {
+                d[c] += pd[c] / n;
+                x[c] += px[c] / n;
+            }
+        }
+        Some((d, x))
+    };
+    let all: Vec<_> = px.iter().collect();
+    let Some((mean, mut cast_x)) = mean_of(&all) else {
+        let mid = [0, 1, 2].map(|c| l[c].mid);
+        return (mid, mid);
+    };
+    let mut grey = mean;
+    for _ in 0..4 {
+        let m = (cast_x[0] + cast_x[1] + cast_x[2]) / 3.0;
+        let off = cast_x.map(|v| v - m);
+        let sel: Vec<_> = px
+            .iter()
+            .filter(|(_, x)| {
+                let y: [f64; 3] = std::array::from_fn(|c| x[c] - off[c]);
+                y.iter().fold(f64::MIN, |a, &b| a.max(b))
+                    - y.iter().fold(f64::MAX, |a, &b| a.min(b))
+                    < 0.12
+            })
+            .collect();
+        if sel.len() * 100 < px.len() {
+            break;
+        }
+        (grey, cast_x) = mean_of(&sel).unwrap();
     }
-    let mut mean = if den > 0.0 { num / den / 256.0 } else { 0.5 };
-    if t == ImageType::Negative {
-        mean = 1.0 - mean;
-    }
-    ChannelOrigin {
-        white: white as f64,
-        black: black as f64,
+    (grey, mean)
+}
+
+/// White balance (temp, tint) that prints density `d` neutral.
+fn wb_for_density(l: &Levels, t: ImageType, d: [f64; 3]) -> (f32, f32) {
+    curve::balance_wb(std::array::from_fn(|c| normalised(l, t, c, d[c])))
+}
+
+/// Auto WB candidates from the mean grey and mean densities.
+fn auto_wb_from(l: &Levels, t: ImageType, grey: [f64; 3], mean: [f64; 3]) -> AutoWb {
+    let neutral = wb_for_density(l, t, grey);
+    AutoWb {
+        neutral,
+        warm: (neutral.0 + 6.0, neutral.1 + 1.5),
+        cool: (neutral.0 - 6.0, neutral.1),
+        avg: wb_for_density(l, t, mean),
+        grey,
         mean,
     }
 }
 
-pub fn histograms(data: &[[f32; 3]]) -> [[u64; 256]; 3] {
-    let mut h = [[0u64; 256]; 3];
-    for p in data {
-        for c in 0..3 {
-            h[c][(p[c].clamp(0.0, 1.0) * 255.0).round() as usize] += 1;
-        }
-    }
-    h
+pub fn auto_wb(buf: &Negative, l: &Levels, t: ImageType) -> AutoWb {
+    let (grey, mean) = grey_and_mean(buf, l, t);
+    auto_wb_from(l, t, grey, mean)
 }
 
-pub fn origins_from_buffer(buf: &Negative, t: ImageType) -> Origins {
-    let h = histograms(&buf.data);
-    let n = buf.data.len() as u64;
-    [
-        cdf_origins(&h[0], n, t),
-        cdf_origins(&h[1], n, t),
-        cdf_origins(&h[2], n, t),
-    ]
-}
-
-/// The image the smart-colour zones are measured on (`L3_2`/`L4_2` in
-/// NLPImageProcessorV3): the analysis rendition in 8-bit ProPhoto (gamma 1.8),
-/// each channel stretched with ImageMagick's `-normalize`, and inverted with
-/// `-negate` unless the frame is a positive.
-fn zone_source(buf: &Negative, t: ImageType) -> Vec<[f32; 3]> {
-    let dec = color::srgb_decode_lut();
-    let pp: Vec<[f32; 3]> = buf
-        .data
-        .iter()
-        .map(|p| p.map(|v| (dec.get(v).max(0.0).powf(1.0 / 1.8) * 255.0).round() / 255.0))
-        .collect();
-    let mut out = pp.clone();
-    for c in 0..3 {
-        let (lo, hi) = normalize_levels(pp.iter().map(|p| p[c]));
-        let span = hi - lo;
-        for (o, p) in out.iter_mut().zip(&pp) {
-            if span > 0.0 {
-                o[c] = ((p[c] - lo) / span).clamp(0.0, 1.0);
-            }
-        }
-    }
-    if t != ImageType::Positive {
-        for o in &mut out {
-            *o = o.map(|v| 1.0 - v);
-        }
-    }
-    out
-}
-
-/// Black and white levels of ImageMagick's `-normalize`
-/// (`-contrast-stretch 2%x1%`) on 8-bit values.
-fn normalize_levels(values: impl Iterator<Item = f32>) -> (f32, f32) {
-    let mut hist = [0u64; 256];
-    let mut n = 0u64;
-    for v in values {
-        hist[(v.clamp(0.0, 1.0) * 255.0).round() as usize] += 1;
-        n += 1;
-    }
-    let (black_t, white_t) = (0.02 * n as f64, 0.01 * n as f64);
-    let mut acc = 0u64;
-    let mut black = 0usize;
-    while black < 255 {
-        acc += hist[black];
-        if acc as f64 >= black_t {
-            break;
-        }
-        black += 1;
-    }
-    acc = 0;
-    let mut white = 255usize;
-    while white > 0 {
-        acc += hist[white];
-        if acc as f64 >= white_t {
-            break;
-        }
-        white -= 1;
-    }
-    (black as f32 / 255.0, white as f32 / 255.0)
-}
-
-/// Binary zone mask (`L4_2`): HSB hue in the zone (`-black-threshold`,
-/// `-white-threshold`, `-opaque white`, `-threshold 0`, then `-negate` for
-/// inverted zones, which therefore include greys), saturation below
-/// `100 − satThreshold` and HSL lightness in range. All plugin zones set
-/// `isWeightedLuminosity = false`, so the lightness mask is thresholded too.
-fn zone_mask(p: [f32; 3], z: &WbZone) -> bool {
-    let (h, s, _) = rgb_to_hsv(p);
-    let hue = h / 3.6;
-    let in_hue = hue > 0.0 && hue >= z.hue_low && hue <= z.hue_high && hue < 100.0;
-    if in_hue == z.invert_hue {
-        return false;
-    }
-    if s * 100.0 >= 100.0 - z.sat_threshold {
-        return false;
-    }
-    let l = hsl_lightness(p) * 100.0;
-    l > 0.0 && l >= z.lum_low && l <= z.lum_high && l < 100.0
-}
-
-/// `linearBalance("r")` followed by `updateFilm`'s conversion: the offsets of
-/// green and blue from red (in 8-bit units) become Tint and Temp.
-pub fn linear_balance_wb(c: [f64; 3]) -> (f32, f32) {
-    if c == [0.0; 3] {
-        return (0.0, 0.0);
-    }
-    let v2 = 255.0 * (c[0] - c[1]);
-    let v3 = 255.0 * (c[0] - c[2]);
-    (
-        (-v3 / TEMP_MULTIPLIER) as f32,
-        (-v2 / TEMP_MULTIPLIER) as f32,
-    )
-}
-
-/// One "smart colour" zone: average the zone image under the mask
-/// (`-compose CopyOpacity -scale 1x1!`) and round to integer HSB like the
-/// plugin's metadata. An empty mask gives black.
-fn zone_color(img: &[[f32; 3]], z: &WbZone) -> [f32; 3] {
-    let (mut acc, mut n) = ([0.0f64; 3], 0u64);
-    for p in img {
-        if zone_mask(*p, z) {
-            for c in 0..3 {
-                acc[c] += p[c] as f64;
-            }
-            n += 1;
-        }
-    }
-    if n == 0 {
-        return [0.0; 3];
-    }
-    round_hsb(acc.map(|v| (v / n as f64) as f32))
-}
-
-/// Integer HSB as stored in the plugin's metadata (`formatHSV`).
-fn round_hsb(c: [f32; 3]) -> [f32; 3] {
-    let (h, s, v) = rgb_to_hsv(c);
-    color::hsv_to_rgb(
-        h.round(),
-        (s * 100.0).round() / 100.0,
-        (v * 100.0).round() / 100.0,
-    )
-}
-
-/// `L45_1` (NLPViewControllerV3): no saturation means no correction,
-/// otherwise `linearBalance("r")`.
-fn smart_color_wb(c: [f32; 3]) -> (f32, f32) {
-    let (_, s, _) = rgb_to_hsv(c);
-    if s == 0.0 {
-        return (0.0, 0.0);
-    }
-    linear_balance_wb([c[0] as f64, c[1] as f64, c[2] as f64])
-}
-
-/// "Auto-AVG" (autoColor): linear balance of the channel means.
-fn avg_wb(o: &Origins) -> (f32, f32) {
-    linear_balance_wb([o[0].mean, o[1].mean, o[2].mean])
-}
-
-/// Origins and auto WB that Edit Only frames get instead of an analysis
-/// (`L56_1`): full 0..255 range, mean 0.5, grey smart-colour samples.
-pub fn edit_only_origins() -> Origins {
-    [ChannelOrigin {
-        white: 0.0,
-        black: 255.0,
-        mean: 0.5,
+/// Levels that Edit Only frames get instead of an analysis.
+pub fn edit_only_levels() -> Levels {
+    [ChannelLevels {
+        lo: 0.0,
+        hi: 1.0,
+        mid: 0.5,
     }; 3]
 }
 
-/// Full conversion analysis of a prepared negative. Edit Only frames skip
-/// the analysis, as `processPhotos` hands them straight to `L56_1`.
+/// Full conversion analysis of a prepared negative. Edit Only frames skip it.
 pub fn analyze(neg: &Negative, s: &Settings, base: [f32; 3], ev: Option<f64>) -> Analysis {
-    let (origins, auto_wb) = if s.image_type == ImageType::EditOnly {
-        (edit_only_origins(), AutoWb::default())
+    let (levels, auto_wb) = if s.image_type == ImageType::EditOnly {
+        (edit_only_levels(), AutoWb::default())
     } else {
         let buf = analysis_buffer(neg, s);
-        let origins = origins_from_buffer(&buf, s.image_type);
-        let wb = auto_wb(&buf, &origins, s.image_type);
-        (origins, wb)
+        let levels = levels_from_buffer(&buf, s.image_type);
+        let wb = auto_wb(&buf, &levels, s.image_type);
+        (levels, wb)
     };
     Analysis {
-        origins,
+        levels,
         auto_wb,
         base,
         key: s.analysis_key(),
@@ -519,26 +502,7 @@ pub fn analyze(neg: &Negative, s: &Settings, base: [f32; 3], ev: Option<f64>) ->
     }
 }
 
-pub fn auto_wb(buf: &Negative, origins: &Origins, t: ImageType) -> AutoWb {
-    let img = zone_source(buf, t);
-    auto_wb_from(
-        [ZONE_NEUTRAL, ZONE_WARM, ZONE_COOL].map(|z| zone_color(&img, &z)),
-        origins,
-    )
-}
-
-/// Auto WB candidates from the zone colours and the channel means.
-fn auto_wb_from(colors: [[f32; 3]; 3], origins: &Origins) -> AutoWb {
-    AutoWb {
-        neutral: smart_color_wb(colors[0]),
-        warm: smart_color_wb(colors[1]),
-        cool: smart_color_wb(colors[2]),
-        avg: avg_wb(origins),
-        colors,
-    }
-}
-
-/// (temp, tint) for a WB dropdown choice (`updateFilm`); `None` keeps the current values.
+/// (temp, tint) for a WB dropdown choice; `None` keeps the current values.
 pub fn wb_for_mode(mode: WbMode, a: &AutoWb) -> Option<(f32, f32)> {
     if let Some((magenta, yellow)) = presets::film_character(mode) {
         return Some((yellow, magenta));
@@ -555,22 +519,17 @@ pub fn wb_for_mode(mode: WbMode, a: &AutoWb) -> Option<(f32, f32)> {
 
 // ---- roll ---------------------------------------------------------------------------
 
-/// A roll built by "Convert as roll" (`createRoll` in NLPRolls).
+/// A roll built by "Convert as roll".
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RollAggregate {
-    /// Minimum white points, maximum black points and the 2.2 power mean
-    /// (`rgbAvg`) of the frames' mean points.
-    pub origins: Origins,
-    /// Roll colour ratios `[green, blue]` relative to red (`L23_1`).
-    pub multipliers: [f64; 2],
+    /// Median density range of the frames.
+    pub levels: Levels,
     pub auto_wb: AutoWb,
-    /// The roll's most common exposure (`commonEV`); `None` without exposure data.
+    /// The roll's most common exposure; `None` without exposure data.
     pub common_ev: Option<f64>,
 }
 
-// ---- roll exposure ---------------------------------------------------------------
-
-/// `UtilV3.roundEV`: snap to thirds of a stop.
+/// Snap to thirds of a stop.
 fn round_ev(ev: f64) -> f64 {
     let base = ev.floor();
     let f = ev - base;
@@ -585,24 +544,17 @@ fn round_ev(ev: f64) -> f64 {
     }
 }
 
-/// `UtilV3.exposureValue(shutter, aperture, iso)`: `log2(N²/t) + log2(iso/100)`,
-/// rounded to thirds.
+/// `log2(N²/t) + log2(iso/100)`, rounded to thirds.
 pub fn exposure_value(t: f64, n: f64, iso: f64) -> f64 {
     round_ev((n * n / t).log2() + (iso / 100.0).log2())
 }
 
-/// The frame's exposure value from its EXIF (`L19_1`).
+/// The frame's exposure value from its EXIF.
 pub fn frame_ev(info: &decode::SourceInfo) -> Option<f64> {
     info.exposure.map(|[t, n, iso]| exposure_value(t, n, iso))
 }
 
-/// `UtilV3.adjustExposure`: scale an 8-bit level by `ev` stops in gamma 2.2,
-/// clipped at 255.
-pub fn adjust_exposure(v: f64, ev: f64) -> f64 {
-    (v / 255.0 * 2f64.powf(ev / 2.2)).min(1.0) * 255.0
-}
-
-/// `UtilV3.mode(evs)[1]`: the most frequent exposure (ties go to the first frame).
+/// The most frequent exposure (ties go to the first frame).
 pub fn common_ev(frames: &[Analysis]) -> Option<f64> {
     let evs: Vec<f64> = frames.iter().filter_map(|a| a.ev).collect();
     let count = |e: f64| evs.iter().filter(|&&x| (x - e).abs() < 1e-9).count();
@@ -614,8 +566,8 @@ pub fn common_ev(frames: &[Analysis]) -> Option<f64> {
         })
 }
 
-/// Largest exposure difference from the common one (`L22_1`); above 1 EV
-/// the plugin asks whether to continue without exposure data.
+/// Largest exposure difference from the common one; above 1 EV the app
+/// asks whether to continue without exposure data.
 pub fn ev_spread(frames: &[Analysis], common: f64) -> f64 {
     frames
         .iter()
@@ -624,98 +576,99 @@ pub fn ev_spread(frames: &[Analysis], common: f64) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// Origins moved by `ev` stops (`L22_1`): white and black points, and the
-/// mean on the 8-bit scale.
-fn exposure_adjusted(o: &Origins, ev: f64, means: bool) -> Origins {
-    o.map(|c| ChannelOrigin {
-        white: adjust_exposure(c.white, ev),
-        black: adjust_exposure(c.black, ev),
-        mean: if means {
-            adjust_exposure(c.mean * 255.0, ev) / 255.0
-        } else {
-            c.mean
-        },
+/// Density offset of a scan made `ev` stops from the common exposure: one
+/// stop less light reads `log10 2` denser against a shared base.
+fn ev_density(ev: f64) -> f64 {
+    ev * std::f64::consts::LOG10_2
+}
+
+fn shift_levels(l: &Levels, d: f64) -> Levels {
+    l.map(|c| ChannelLevels {
+        lo: c.lo + d,
+        hi: c.hi + d,
+        mid: c.mid + d,
     })
 }
 
-/// `UtilV3.rgbAvg`: power mean with exponent 2.2.
-fn rgb_avg(v: impl Iterator<Item = f64>) -> f64 {
-    let (mut sum, mut n) = (0.0, 0usize);
-    for x in v {
-        sum += x.max(0.0).powf(2.2);
-        n += 1;
+fn median(mut v: Vec<f64>) -> f64 {
+    if v.is_empty() {
+        return 0.0;
     }
-    if n == 0 {
-        0.0
-    } else {
-        (sum / n as f64).powf(1.0 / 2.2)
-    }
-}
-
-/// `UtilV3.standardDeviation` (sample, n − 1) and mean.
-fn std_dev(v: &[f64]) -> (f64, f64) {
+    v.sort_by(f64::total_cmp);
     let n = v.len();
-    let mean = v.iter().sum::<f64>() / n.max(1) as f64;
-    if n < 2 {
-        return (0.0, mean);
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
     }
-    let ss: f64 = v.iter().map(|x| (x - mean).powi(2)).sum();
-    ((ss / (n - 1) as f64).sqrt(), mean)
 }
 
-/// Roll aggregation (`createRoll`, NLPRolls.lua). With a `common_ev`, each
-/// frame's origins are first moved onto that exposure (`L22_1`). The origins
-/// use every frame; the colour multipliers (`L23_1`) drop frames whose green
-/// or blue ratio is more than 2σ above the mean. Returns the roll and the
-/// indices of the frames left out of the multipliers.
+/// Indices of outliers in `v`: further from the median than 3.5 robust
+/// standard deviations (1.4826 · MAD), and at least `floor` away.
+fn outliers(v: &[f64], floor: f64) -> Vec<usize> {
+    let m = median(v.to_vec());
+    let mad = median(v.iter().map(|x| (x - m).abs()).collect());
+    let limit = (3.5 * 1.4826 * mad).max(floor);
+    (0..v.len()).filter(|&i| (v[i] - m).abs() > limit).collect()
+}
+
+/// Roll aggregation. With a `common_ev`, each frame is first moved onto that
+/// exposure. Frames whose colour balance (green and blue range relative to
+/// red) is far from the rest of the roll (robust outlier test, at least
+/// 0.05 D off) are left out; the roll's range is the median of the rest.
+/// Returns the roll and the excluded frame indices.
 pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggregate, Vec<usize>) {
-    let adj: Vec<Origins> = frames
+    let t = frames[0].key.image_type;
+    let shift = |a: &Analysis| match (common_ev, a.ev) {
+        (Some(c), Some(e)) => -ev_density(e - c),
+        _ => 0.0,
+    };
+    let adj: Vec<Levels> = frames
         .iter()
-        .map(|a| match (common_ev, a.ev) {
-            (Some(c), Some(e)) if e != c => exposure_adjusted(&a.origins, e - c, true),
-            _ => a.origins,
+        .map(|a| shift_levels(&a.levels, shift(a)))
+        .collect();
+    let features: Vec<[f64; 4]> = adj
+        .iter()
+        .map(|l| {
+            [
+                l[1].lo - l[0].lo,
+                l[2].lo - l[0].lo,
+                l[1].hi - l[0].hi,
+                l[2].hi - l[0].hi,
+            ]
         })
         .collect();
-    let mut origins = adj[0];
-    for c in 0..3 {
-        origins[c].white = adj.iter().map(|o| o[c].white).fold(f64::MAX, f64::min);
-        origins[c].black = adj.iter().map(|o| o[c].black).fold(f64::MIN, f64::max);
-        origins[c].mean = rgb_avg(adj.iter().map(|o| o[c].mean));
-    }
-    let ratio = |o: &Origins, c: usize| {
-        let r = origins[0].black - o[0].white;
-        (origins[c].black - o[c].white) / if r.abs() < 1e-9 { 1e-9 } else { r }
-    };
-    let g: Vec<f64> = adj.iter().map(|o| ratio(o, 1)).collect();
-    let b: Vec<f64> = adj.iter().map(|o| ratio(o, 2)).collect();
-    let ((g_sd, g_mean), (b_sd, b_mean)) = (std_dev(&g), std_dev(&b));
-    let excluded: Vec<usize> = (0..frames.len())
-        .filter(|&i| b[i] > b_mean + 2.0 * b_sd || g[i] > g_mean + 2.0 * g_sd)
-        .collect();
-    let kept = |v: &[f64]| {
-        let k: Vec<f64> = (0..v.len())
-            .filter(|i| !excluded.contains(i))
-            .map(|i| v[i])
-            .collect();
-        if k.is_empty() {
-            v.iter().sum::<f64>() / v.len() as f64
-        } else {
-            k.iter().sum::<f64>() / k.len() as f64
+    let mut excluded: Vec<usize> = Vec::new();
+    if frames.len() >= 3 {
+        for k in 0..4 {
+            let v: Vec<f64> = features.iter().map(|f| f[k]).collect();
+            excluded.extend(outliers(&v, 0.05));
         }
-    };
-    let multipliers = [kept(&g), kept(&b)];
-    // `L24_1`: average each zone's colour over the roll (2.2 power mean).
-    // Unlike the per-frame samples, the roll's HSB is stored unrounded.
-    let colors = std::array::from_fn(|z| {
-        std::array::from_fn(|c| {
-            rgb_avg(frames.iter().map(|a| a.auto_wb.colors[z][c] as f64)) as f32
-        })
+        excluded.sort_unstable();
+        excluded.dedup();
+    }
+    let kept: Vec<usize> = (0..frames.len())
+        .filter(|i| !excluded.contains(i))
+        .collect();
+    let levels: Levels = std::array::from_fn(|c| ChannelLevels {
+        lo: median(kept.iter().map(|&i| adj[i][c].lo).collect()),
+        hi: median(kept.iter().map(|&i| adj[i][c].hi).collect()),
+        mid: median(kept.iter().map(|&i| adj[i][c].mid).collect()),
     });
-    let auto_wb = auto_wb_from(colors, &origins);
+    let avg = |f: &dyn Fn(&AutoWb) -> [f64; 3]| -> [f64; 3] {
+        let mut m = [0.0; 3];
+        for &i in &kept {
+            let v = f(&frames[i].auto_wb);
+            for c in 0..3 {
+                m[c] += (v[c] + shift(&frames[i])) / kept.len() as f64;
+            }
+        }
+        m
+    };
+    let auto_wb = auto_wb_from(&levels, t, avg(&|w| w.grey), avg(&|w| w.mean));
     (
         RollAggregate {
-            origins,
-            multipliers,
+            levels,
             auto_wb,
             common_ev,
         },
@@ -723,45 +676,54 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
     )
 }
 
-/// Pro Lab roll origins for one frame (`L34_1`, process version 3): keep the
-/// frame's own density range in one anchor channel and place the other two
-/// with the roll's colour ratios, so the roll's balance fits the frame.
-pub fn lab_origins(roll: &Origins, mult: [f64; 2], frame: &Origins) -> Origins {
-    let (gm, bm) = (mult[0], mult[1]);
-    let span_r = roll[0].black - frame[0].white;
-    let span_r = if span_r.abs() < 1e-9 { 1e-9 } else { span_r };
-    let fg = (roll[1].black - frame[1].white) / span_r;
-    let fb = (roll[2].black - frame[2].white) / span_r;
-    let (dg, db) = (gm - fg, bm - fb);
-    // Factors converting a span in the anchor channel to the other channels.
-    let (anchor, k) = if dg < 0.0 && dg < db {
-        (1, [1.0 / gm, 1.0, bm / gm])
-    } else if db < 0.0 && dg > db {
-        (2, [1.0 / bm, gm / bm, 1.0])
-    } else {
-        (0, [1.0, gm, bm])
+/// Pick the levels a frame renders with: its own analysis, or the roll's
+/// according to the Roll Process. Pro Lab keeps the roll's colour balance
+/// but places it on the frame's own overall density range; Darkroom Paper
+/// prints every frame with the roll's levels; Basic Lab is halfway between
+/// the two. A film exposure change moves each channel's density in
+/// proportion to its H&D slope, i.e. its density span, so Pro Lab moves the
+/// roll's ends by the same fraction of each channel's span.
+pub fn levels_for(
+    s: &Settings,
+    frame: Option<&Analysis>,
+    roll: Option<&RollData>,
+) -> Option<Levels> {
+    let Some(roll) = roll.filter(|_| s.use_roll) else {
+        return frame.map(|a| a.levels);
     };
-    let span = roll[anchor].black - frame[anchor].white;
-    let range = frame[anchor].black - frame[anchor].white;
-    std::array::from_fn(|c| {
-        let white = if c == anchor {
-            frame[c].white
-        } else {
-            roll[c].black - span * k[c]
-        };
-        ChannelOrigin {
-            white,
-            black: white + range * k[c],
-            mean: roll[c].mean,
+    // Move the roll onto this frame's exposure.
+    let roll_levels = match (roll.common_ev, frame.and_then(|a| a.ev)) {
+        (Some(c), Some(e)) => shift_levels(&roll.levels, ev_density(e - c)),
+        _ => roll.levels,
+    };
+    let Some(frame) = frame.filter(|_| s.roll_mode != RollMode::DarkroomPaper) else {
+        return Some(roll_levels);
+    };
+    let span = |c: usize| (roll_levels[c].hi - roll_levels[c].lo).max(1e-3);
+    let mean = |f: &dyn Fn(usize) -> f64| (f(0) + f(1) + f(2)) / 3.0;
+    let k = if s.roll_mode == RollMode::BasicLab {
+        0.5
+    } else {
+        1.0
+    };
+    let dlo = k * mean(&|c| (frame.levels[c].lo - roll_levels[c].lo) / span(c));
+    let dhi = k * mean(&|c| (frame.levels[c].hi - roll_levels[c].hi) / span(c));
+    Some(std::array::from_fn(|c| {
+        let r = roll_levels[c];
+        ChannelLevels {
+            lo: r.lo + dlo * span(c),
+            hi: r.hi + dhi * span(c),
+            mid: r.mid + (dlo + dhi) / 2.0 * span(c),
         }
-    })
+    }))
 }
 
 // ---- rendering --------------------------------------------------------------------
 
-/// Everything needed to turn negative pixels into output pixels.
+/// Everything needed to turn negative densities into output pixels.
 pub struct Renderer {
-    lut: Option<CurveLut>,
+    lut: CurveLut,
+    converted: bool,
     look: Look,
     out_m: [[f32; 3]; 3],
     out_enc: color::EncodeLut,
@@ -769,15 +731,15 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// `origins == None` renders the negative as-is (unconverted).
-    pub fn new(s: &Settings, origins: Option<&FrameOrigins>, space: OutputSpace) -> Self {
-        let lut = origins.map(|o| {
-            CurveLut::from_curves(&update_tone_curve_roll(&o.origins, s, o.roll_clip))
-                .with_print_exposure(s.print_exposure)
-        });
+    /// `levels == None` renders the negative as scanned (unconverted).
+    pub fn new(s: &Settings, levels: Option<&Levels>, space: OutputSpace) -> Self {
         let (out_m, f) = color::output_transform(space);
         Self {
-            lut,
+            lut: match levels {
+                Some(l) => CurveLut::new(l, s),
+                None => CurveLut::negative_view(),
+            },
+            converted: levels.is_some(),
             look: Look::new(s),
             out_m,
             out_enc: color::EncodeLut::new(f),
@@ -785,8 +747,8 @@ impl Renderer {
         }
     }
 
-    /// Scale sharpening for the image size like `updateSharpening`
-    /// (relative to 24 MP; strength capped at 150 %, radius at 1–3 px).
+    /// Scale sharpening for the image size (relative to 24 MP; strength
+    /// capped at 150 %, radius at 1–3 px).
     pub fn with_megapixels(mut self, mp: f32) -> Self {
         if let Some(sd) = &mut self.sharpen {
             let f = (mp - 24.0) / 2.0 / 24.0 + 1.0;
@@ -798,7 +760,7 @@ impl Renderer {
     }
 
     pub fn curve_lut(&self) -> Option<&CurveLut> {
-        self.lut.as_ref()
+        self.converted.then_some(&self.lut)
     }
 
     pub fn uses_lut_table(&self) -> bool {
@@ -807,12 +769,16 @@ impl Renderer {
 
     /// Encoded MelissaRGB positive (before output conversion).
     #[inline]
-    pub fn positive(&self, p: [f32; 3]) -> [f32; 3] {
-        match &self.lut {
-            Some(l) => self
-                .look
-                .apply([l.apply(0, p[0]), l.apply(1, p[1]), l.apply(2, p[2])]),
-            None => p,
+    pub fn positive(&self, d: [f32; 3]) -> [f32; 3] {
+        let p = [
+            self.lut.apply(0, d[0]),
+            self.lut.apply(1, d[1]),
+            self.lut.apply(2, d[2]),
+        ];
+        if self.converted {
+            self.look.apply(p)
+        } else {
+            p
         }
     }
 
@@ -840,62 +806,11 @@ impl Renderer {
             .par_iter()
             .map(|p| self.output(self.positive(*p)))
             .collect();
-        if let (Some(sd), true) = (self.sharpen, sharpen_scale > 0.0 && self.lut.is_some()) {
+        if let (Some(sd), true) = (self.sharpen, sharpen_scale > 0.0 && self.converted) {
             look::sharpen(&mut out, neg.width, neg.height, sd, sharpen_scale);
         }
         out
     }
-}
-
-/// The origins (and roll clip offsets) a frame renders with.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FrameOrigins {
-    pub origins: Origins,
-    pub roll_clip: RollClip,
-}
-
-impl From<Origins> for FrameOrigins {
-    fn from(origins: Origins) -> Self {
-        Self {
-            origins,
-            roll_clip: RollClip::default(),
-        }
-    }
-}
-
-/// Pick the origins a frame should render with (`getOriginsOfPhotoForRoll`):
-/// the frame's own analysis, or the roll's according to the Roll Process.
-pub fn origins_for(
-    s: &Settings,
-    frame: Option<&Analysis>,
-    roll: Option<&RollData>,
-) -> Option<FrameOrigins> {
-    let Some(roll) = roll.filter(|_| s.use_roll) else {
-        return frame.map(|a| a.origins.into());
-    };
-    // Move the roll onto this frame's exposure (white and black points only).
-    let roll_origins = match (roll.common_ev, frame.and_then(|a| a.ev)) {
-        (Some(c), Some(e)) if c != 0.0 && e != c => exposure_adjusted(&roll.origins, c - e, false),
-        _ => roll.origins,
-    };
-    let lab = match (s.roll_mode, roll.multipliers, frame) {
-        (RollMode::DarkroomPaper, _, _) | (_, None, _) | (_, _, None) => {
-            return Some(roll_origins.into());
-        }
-        (_, Some(m), Some(a)) => lab_origins(&roll_origins, m, &a.origins),
-    };
-    let roll_clip = if s.roll_mode == RollMode::BasicLab {
-        RollClip {
-            white: (roll_origins[0].white - lab[0].white) / 2.0,
-            black: (lab[0].black - roll_origins[0].black) / 2.0,
-        }
-    } else {
-        RollClip::default()
-    };
-    Some(FrameOrigins {
-        origins: lab,
-        roll_clip,
-    })
 }
 
 #[cfg(test)]
@@ -903,16 +818,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cdf_finds_range() {
-        let mut h = [0u64; 256];
-        for (i, v) in h.iter_mut().enumerate().take(201).skip(40) {
-            *v = 100 + i as u64;
-        }
-        let total: u64 = h.iter().sum();
-        let o = cdf_origins(&h, total, ImageType::Negative);
-        assert_eq!(o.white, 40.0, "{o:?}");
-        assert_eq!(o.black, 200.0, "{o:?}");
-        assert!(o.mean > 0.3 && o.mean < 0.7);
+    fn levels_find_the_density_range() {
+        let data: Vec<[f32; 3]> = (0..1000)
+            .map(|i| {
+                let v = 0.2 + i as f32 / 999.0;
+                [v, v + 0.1, v + 0.3]
+            })
+            .collect();
+        let buf = Negative {
+            width: 1000,
+            height: 1,
+            data,
+        };
+        let l = levels_from_buffer(&buf, ImageType::Negative);
+        assert!(
+            (l[0].lo - 0.2).abs() < 0.01 && (l[0].hi - 1.2).abs() < 0.01,
+            "{l:?}"
+        );
+        assert!((l[2].mid - 1.0).abs() < 0.01, "{l:?}");
     }
 
     #[test]
@@ -944,12 +867,12 @@ mod tests {
         );
     }
 
-    fn frame(w: [f64; 3], b: [f64; 3]) -> Analysis {
+    fn frame(lo: [f64; 3], hi: [f64; 3]) -> Analysis {
         Analysis {
-            origins: std::array::from_fn(|c| ChannelOrigin {
-                white: w[c],
-                black: b[c],
-                mean: 0.5,
+            levels: std::array::from_fn(|c| ChannelLevels {
+                lo: lo[c],
+                hi: hi[c],
+                mid: (lo[c] + hi[c]) / 2.0,
             }),
             auto_wb: AutoWb::default(),
             base: [1.0; 3],
@@ -958,74 +881,64 @@ mod tests {
         }
     }
 
-    #[test]
-    fn roll_aggregation_extremes() {
-        let (r, _) = aggregate_roll(
-            &[
-                frame([40.0; 3], [200.0; 3]),
-                frame([35.0; 3], [210.0; 3]),
-                frame([45.0; 3], [190.0; 3]),
-            ],
-            None,
-        );
-        assert_eq!(r.origins[0].white, 35.0);
-        assert_eq!(r.origins[0].black, 210.0);
-        // rgbAvg of equal means is the mean itself.
-        assert!((r.origins[0].mean - 0.5).abs() < 1e-9);
+    fn roll_of(agg: &RollAggregate, frames: usize) -> RollData {
+        RollData {
+            id: "r".into(),
+            levels: agg.levels,
+            base: [1.0; 3],
+            frames,
+            excluded: vec![],
+            auto_wb: Some(agg.auto_wb),
+            common_ev: agg.common_ev,
+        }
     }
 
     #[test]
-    fn lab_origins_keep_frame_range_and_roll_ratios() {
-        let frames = [
-            frame([40.0, 60.0, 80.0], [200.0, 210.0, 220.0]),
-            frame([50.0, 70.0, 90.0], [190.0, 200.0, 210.0]),
-        ];
-        let (r, _) = aggregate_roll(&frames, None);
-        let f = &frames[1].origins;
-        let o = lab_origins(&r.origins, r.multipliers, f);
-        let [gm, bm] = r.multipliers;
-        // Red anchor: the frame's own red range survives unchanged.
-        assert_eq!(o[0].white, f[0].white);
-        assert!((o[0].black - f[0].black).abs() < 1e-9);
-        // The other channels follow the roll's colour ratios.
-        let span = r.origins[0].black - o[0].white;
-        assert!((r.origins[1].black - o[1].white - span * gm).abs() < 1e-9);
-        assert!((r.origins[2].black - o[2].white - span * bm).abs() < 1e-9);
+    fn roll_takes_the_median_and_drops_outliers() {
+        let mut frames: Vec<Analysis> = (0..6)
+            .map(|i| {
+                let k = i as f64 * 0.01;
+                frame([0.10 + k, 0.15 + k, 0.20 + k], [1.0 + k, 1.1 + k, 1.2 + k])
+            })
+            .collect();
+        // A frame with a very different colour balance.
+        frames.push(frame([0.10, 0.45, 0.20], [1.0, 1.4, 1.2]));
+        let (r, excluded) = aggregate_roll(&frames, None);
+        assert_eq!(excluded, vec![6]);
+        assert!((r.levels[0].lo - 0.125).abs() < 0.006, "{:?}", r.levels);
+        assert!((r.levels[1].hi - 1.125).abs() < 0.006, "{:?}", r.levels);
     }
 
     #[test]
     fn roll_process_modes() {
         let frames = [
-            frame([40.0, 60.0, 80.0], [200.0, 210.0, 220.0]),
-            frame([50.0, 70.0, 90.0], [190.0, 200.0, 210.0]),
+            frame([0.10, 0.15, 0.20], [1.00, 1.10, 1.20]),
+            frame([0.20, 0.27, 0.36], [1.20, 1.28, 1.42]),
         ];
         let (agg, _) = aggregate_roll(&frames, None);
-        let roll = RollData {
-            id: "r".into(),
-            origins: agg.origins,
-            base: [1.0; 3],
-            frames: 2,
-            excluded: vec![],
-            auto_wb: Some(agg.auto_wb),
-            multipliers: Some(agg.multipliers),
-            common_ev: None,
+        let roll = roll_of(&agg, 2);
+        let mut s = Settings {
+            use_roll: true,
+            ..Settings::default()
         };
-        let mut s = Settings::default();
-        s.use_roll = true;
-        let get = |s: &Settings| origins_for(s, Some(&frames[1]), Some(&roll)).unwrap();
+        let get = |s: &Settings| levels_for(s, Some(&frames[1]), Some(&roll)).unwrap();
         s.roll_mode = RollMode::DarkroomPaper;
-        assert_eq!(get(&s), FrameOrigins::from(agg.origins));
+        assert_eq!(get(&s), agg.levels);
         s.roll_mode = RollMode::ProLab;
         let pro = get(&s);
-        assert_eq!(pro.roll_clip, RollClip::default());
-        assert_eq!(pro.origins[0].white, 50.0);
+        // Every channel moves by the same fraction of its span: the roll's
+        // colour balance on the frame's overall range.
+        let frac = |c: usize, f: fn(&ChannelLevels) -> f64| {
+            (f(&pro[c]) - f(&agg.levels[c])) / (agg.levels[c].hi - agg.levels[c].lo)
+        };
+        assert!((frac(0, |c| c.lo) - frac(2, |c| c.lo)).abs() < 1e-9);
+        assert!((frac(1, |c| c.hi) - frac(2, |c| c.hi)).abs() < 1e-9);
+        assert!(frac(0, |c| c.lo) > 0.0, "the frame is denser than the roll");
         s.roll_mode = RollMode::BasicLab;
         let basic = get(&s);
-        assert_eq!(basic.origins, pro.origins);
-        assert_eq!(basic.roll_clip.white, (40.0 - 50.0) / 2.0);
-        assert_eq!(basic.roll_clip.black, (190.0 - 200.0) / 2.0);
+        assert!((basic[0].lo - (agg.levels[0].lo + pro[0].lo) / 2.0).abs() < 1e-9);
         s.use_roll = false;
-        assert_eq!(get(&s), FrameOrigins::from(frames[1].origins));
+        assert_eq!(get(&s), frames[1].levels);
     }
 
     #[test]
@@ -1036,51 +949,36 @@ mod tests {
         assert!((round_ev(10.3) - (10.0 + 1.0 / 3.0)).abs() < 1e-12);
         assert!((round_ev(10.7) - (10.0 + 2.0 / 3.0)).abs() < 1e-12);
         assert_eq!(round_ev(10.9), 11.0);
-        assert!((adjust_exposure(100.0, 2.2) - 200.0).abs() < 1e-9);
-        assert_eq!(adjust_exposure(200.0, 2.2), 255.0);
     }
 
     #[test]
     fn roll_exposure_matching() {
+        let third = 1.0 / 3.0;
+        let shift = third * std::f64::consts::LOG10_2;
         let mut frames = [
-            frame([40.0; 3], [200.0; 3]),
-            frame([40.0; 3], [200.0; 3]),
-            frame([40.0; 3], [200.0; 3]),
+            frame([0.2; 3], [1.2; 3]),
+            frame([0.2; 3], [1.2; 3]),
+            frame([0.2 + shift; 3], [1.2 + shift; 3]),
         ];
         frames[0].ev = Some(12.0);
         frames[1].ev = Some(12.0);
-        frames[2].ev = Some(12.0 + 1.0 / 3.0);
+        frames[2].ev = Some(12.0 + third);
         let c = common_ev(&frames).unwrap();
         assert_eq!(c, 12.0);
         assert!(ev_spread(&frames, c) < 1.0);
+        // The +1/3 EV scan reads denser; moved onto the common exposure it
+        // matches the others exactly.
         let (agg, _) = aggregate_roll(&frames, Some(c));
-        let shifted = adjust_exposure(40.0, 1.0 / 3.0);
-        // The +1/3 EV frame is moved onto the common exposure first.
-        assert_eq!(agg.origins[0].white, 40.0);
-        assert!((agg.origins[0].black - adjust_exposure(200.0, 1.0 / 3.0)).abs() < 1e-9);
-        assert!(shifted > 40.0);
-        let roll = RollData {
-            id: "r".into(),
-            origins: agg.origins,
-            base: [1.0; 3],
-            frames: 3,
-            excluded: vec![],
-            auto_wb: Some(agg.auto_wb),
-            multipliers: Some(agg.multipliers),
-            common_ev: agg.common_ev,
-        };
+        assert!((agg.levels[0].lo - 0.2).abs() < 1e-6, "{:?}", agg.levels);
+        let roll = roll_of(&agg, 3);
         let s = Settings {
             use_roll: true,
             roll_mode: RollMode::DarkroomPaper,
             ..Settings::default()
         };
         // Rendering that frame moves the roll back onto its own exposure.
-        let o = origins_for(&s, Some(&frames[2]), Some(&roll)).unwrap();
-        let back = adjust_exposure(agg.origins[0].black, -1.0 / 3.0);
-        assert!((o.origins[0].black - back).abs() < 1e-9);
-        assert_eq!(o.origins[0].mean, agg.origins[0].mean);
-        let same = origins_for(&s, Some(&frames[0]), Some(&roll)).unwrap();
-        assert_eq!(same.origins, agg.origins);
+        let l = levels_for(&s, Some(&frames[2]), Some(&roll)).unwrap();
+        assert!((l[0].hi - frames[2].levels[0].hi).abs() < 1e-6);
         // More than 1 EV apart asks before matching.
         frames[2].ev = Some(13.5);
         assert!(ev_spread(&frames, common_ev(&frames).unwrap()) > 1.0);
@@ -1146,38 +1044,36 @@ mod tests {
     }
 
     #[test]
-    fn auto_neutral_reduces_the_cast() {
+    fn auto_neutral_keeps_greys_neutral() {
         let (src, grey) = synthetic_negative();
         let mut s = Settings::default();
         s.lut = crate::engine::settings::Lut::None;
         let base = resolve_base(&src, &s, None);
         let neg = prepare_negative(&src, &s, base);
         let a = analyze(&neg, &s, base, None);
-        let render = |s: &Settings| {
-            Renderer::new(s, Some(&a.origins.into()), OutputSpace::Srgb).render(&neg, 0.0)
-        };
-        let mut plain = s.clone();
-        plain.wb_temp = 0.0;
-        plain.wb_tint = 0.0;
-        let before = cast(&render(&plain), &grey);
         let (t, n) = wb_for_mode(WbMode::AutoNeutral, &a.auto_wb).unwrap();
         let mut wb = s.clone();
         wb.wb_temp = t;
         wb.wb_tint = n;
-        let after = cast(&render(&wb), &grey);
-        assert!(
-            after < before,
-            "auto WB {:?}: cast {before} -> {after}",
-            (t, n)
-        );
+        let px = Renderer::new(&wb, Some(&a.levels), OutputSpace::Srgb).render(&neg, 0.0);
+        let after = cast(&px, &grey);
+        assert!(after < 0.01, "auto WB {:?}: cast {after}", (t, n));
     }
 
     #[test]
-    fn density_reads_zero_at_the_base() {
-        let base = color::srgb_encode(BASE_LEVEL);
-        assert!(density_above_base([base; 3]).iter().all(|d| d.abs() < 1e-4));
-        let d = density_above_base([color::srgb_encode(BASE_LEVEL / 10.0); 3]);
-        assert!((d[0] - 1.0).abs() < 1e-3, "{d:?}");
+    fn base_is_zero_density() {
+        let (src, _) = synthetic_negative();
+        let s = Settings::default();
+        let base = resolve_base(&src, &s, None);
+        let neg = prepare_negative(&src, &s, base);
+        // The border is unexposed base.
+        assert!(
+            neg.data[0].iter().all(|d| d.abs() < 0.02),
+            "{:?}",
+            neg.data[0]
+        );
+        // Image areas are denser.
+        assert!(neg.data[150 * 300 + 150].iter().all(|d| *d > 0.1));
     }
 
     #[test]
@@ -1190,7 +1086,7 @@ mod tests {
         let neg = prepare_negative(&src, &s, base);
         let a = analyze(&neg, &s, base, None);
         let mean = |s: &Settings| {
-            let px = Renderer::new(s, Some(&a.origins.into()), OutputSpace::Srgb).render(&neg, 0.0);
+            let px = Renderer::new(s, Some(&a.levels), OutputSpace::Srgb).render(&neg, 0.0);
             let mut m = [0.0f32; 3];
             for &i in &grey {
                 for c in 0..3 {
@@ -1222,7 +1118,7 @@ mod tests {
         let base = resolve_base(&src, &s, None);
         let neg = prepare_negative(&src, &s, base);
         let a = analyze(&neg, &s, base, None);
-        assert_eq!(a.origins, edit_only_origins());
+        assert_eq!(a.levels, edit_only_levels());
         assert_eq!(a.auto_wb, AutoWb::default());
     }
 
@@ -1241,8 +1137,8 @@ mod tests {
         if let Some((t, n)) = wb_for_mode(s.wb_mode, &wb) {
             (s.wb_temp, s.wb_tint) = (t, n);
         }
-        let o = origins_for(&s, Some(a), roll).unwrap();
-        Renderer::new(&s, Some(&o), OutputSpace::Srgb).render(&neg, 0.0)
+        let l = levels_for(&s, Some(a), roll).unwrap();
+        Renderer::new(&s, Some(&l), OutputSpace::Srgb).render(&neg, 0.0)
     }
 
     fn chart_settings() -> Settings {
@@ -1283,7 +1179,23 @@ mod tests {
         let s = chart_settings();
         let chart = negative(0.0);
         let a = analyse_chart(&chart, &s);
-        let m = measure(&chart, &convert_chart(&chart, &s, &a, None));
+        let out = convert_chart(&chart, &s, &a, None);
+        let m = measure(&chart, &out);
+        if std::env::var("NLP_CHART_DEBUG").is_ok() {
+            let labs = crate::engine::testchart::patch_lab(&chart, &out);
+            for (p, l) in chart.patches.iter().zip(&labs).take(24) {
+                eprintln!(
+                    "ref {:6.1} {:6.1} {:6.1}  out {:6.1} {:6.1} {:6.1}  dE {:5.2}",
+                    p.lab[0],
+                    p.lab[1],
+                    p.lab[2],
+                    l[0],
+                    l[1],
+                    l[2],
+                    crate::engine::testchart::color_de(p.lab, *l)
+                );
+            }
+        }
 
         let charts: Vec<_> = [-1.0, 0.0, 1.0].into_iter().map(negative).collect();
         let analyses: Vec<_> = charts.iter().map(|c| analyse_chart(c, &s)).collect();
@@ -1294,14 +1206,8 @@ mod tests {
             .collect();
         let (agg, _) = aggregate_roll(&analyses, None);
         let roll = RollData {
-            id: "chart".into(),
-            origins: agg.origins,
             base: analyses[1].base,
-            frames: 3,
-            excluded: vec![],
-            auto_wb: Some(agg.auto_wb),
-            multipliers: Some(agg.multipliers),
-            common_ev: None,
+            ..roll_of(&agg, 3)
         };
         let rolled: Vec<_> = charts
             .iter()
@@ -1315,9 +1221,11 @@ mod tests {
             .map(|f| measure(&chart, f).neutral_cast)
             .fold(0.0, f64::max);
         eprintln!(
-            "chart: colour dE00 {:.2}, full dE00 {:.2}, neutral C* {:.2} (max {:.2}); \
-             frame spread {:.2}, roll spread {:.2}, roll neutral C* {:.2}",
+            "chart: colour dE00 {:.2}, tone-matched dE00 {:.2}, full dE00 {:.2}, \
+             neutral C* {:.2} (max {:.2}); frame spread {:.2}, roll spread {:.2}, \
+             roll neutral C* {:.2}",
             m.color_de,
+            m.tone_matched_de,
             m.full_de,
             m.neutral_cast,
             m.neutral_cast_max,
@@ -1325,17 +1233,25 @@ mod tests {
             roll_spread,
             roll_cast
         );
-        // Baseline of the plugin-port engine; the bounds only ever tighten.
-        assert!(m.color_de < 5.3, "colour dE00 {}", m.color_de);
-        assert!(m.neutral_cast < 3.3, "neutral C* {}", m.neutral_cast);
+        // Plugin-port engine baseline: tone-matched 5.00, neutral C* 3.22
+        // (max 6.86), frame spread 2.78, roll spread 3.70, roll C* 4.66. The
+        // bounds only tighten. Plain colour dE (5.21 before) is shown but
+        // only loosely bounded: it also scores the tone curve's contrast.
         assert!(
-            m.neutral_cast_max < 7.0,
+            m.tone_matched_de < 2.7,
+            "tone-matched dE00 {}",
+            m.tone_matched_de
+        );
+        assert!(m.color_de < 5.5, "colour dE00 {}", m.color_de);
+        assert!(m.neutral_cast < 1.7, "neutral C* {}", m.neutral_cast);
+        assert!(
+            m.neutral_cast_max < 3.0,
             "neutral C* max {}",
             m.neutral_cast_max
         );
-        assert!(frame_spread < 2.9, "frame spread {frame_spread}");
-        assert!(roll_spread < 3.8, "roll spread {roll_spread}");
-        assert!(roll_cast < 4.8, "roll neutral C* {roll_cast}");
+        assert!(frame_spread < 1.5, "frame spread {frame_spread}");
+        assert!(roll_spread < 1.8, "roll spread {roll_spread}");
+        assert!(roll_cast < 1.4, "roll neutral C* {roll_cast}");
     }
 
     #[test]

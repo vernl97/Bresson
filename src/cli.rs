@@ -20,7 +20,7 @@ USAGE:
 CONVERT OPTIONS:
   --roll               Analyse all files as one roll
   --roll-process NAME  Pro Lab (default) | Basic Lab | Darkroom Paper
-  --tone NAME          Tone profile (e.g. \"LAB - Standard\", \"Cinematic - Rich\")
+  --tone NAME          Tone profile: Standard | Soft | Hard | Rich | Flat (for grading) | Linear
   --wb NAME            White balance (Auto-Neutral, Kodak, Fuji, ...)
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
   --border PCT         Border buffer percent (default 5)
@@ -101,7 +101,7 @@ fn convert(args: Vec<String>) -> Result<()> {
     if files.is_empty() {
         bail!("no input files\n{HELP}");
     }
-    // `createRoll` only runs for more than one frame.
+    // A roll needs more than one frame.
     let roll = roll && files.len() > 1;
     // Analyse every frame on its proxy.
     let mut frames = Vec::new();
@@ -138,8 +138,8 @@ fn convert(args: Vec<String>) -> Result<()> {
         ));
     }
     let roll_data = roll.then(|| {
-        // `L22_1`: with more than 1 EV between frames there is no prompt in
-        // batch mode, so continue without exposure data.
+        // With more than 1 EV between frames there is no prompt in batch
+        // mode, so continue without exposure data.
         let common_ev = pipeline::common_ev(&analyses).filter(|&c| {
             let spread = pipeline::ev_spread(&analyses, c);
             if spread > 1.0 {
@@ -153,11 +153,10 @@ fn convert(args: Vec<String>) -> Result<()> {
         let (agg, excluded) = pipeline::aggregate_roll(&analyses, common_ev);
         RollData {
             id: format!("roll-{}", std::process::id()),
-            origins: agg.origins,
+            levels: agg.levels,
             base: roll_base.unwrap_or_else(|| analyses[0].base),
             frames: files.len(),
             auto_wb: Some(agg.auto_wb),
-            multipliers: Some(agg.multipliers),
             common_ev: agg.common_ev,
             excluded: excluded
                 .iter()
