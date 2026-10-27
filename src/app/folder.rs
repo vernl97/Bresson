@@ -38,6 +38,18 @@ impl NlpApp {
         self.selected.iter().copied().collect()
     }
 
+    /// Save and close the open folder, then show the Projects (rolls) list.
+    fn close_to_projects(&mut self) {
+        self.save_all();
+        self.frames.clear();
+        self.selected.clear();
+        self.active = None;
+        self.anchor = None;
+        self.single_mode = false;
+        self.editor = super::editor::Editor::default();
+        self.show_projects();
+    }
+
     /// Start screen shown before anything is opened.
     fn welcome_ui(&mut self, ui: &mut egui::Ui) {
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
@@ -175,6 +187,13 @@ impl NlpApp {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
+                    if ui
+                        .add(widgets::ghost("‹ Rolls"))
+                        .on_hover_text("Back to all rolls")
+                        .clicked()
+                    {
+                        self.close_to_projects();
+                    }
                     let r = icon_button(ui, Icon::Folder, "Open…", false, true);
                     egui::Popup::menu(&r).show(|ui| {
                         if ui.button("Open folder…").clicked() {
