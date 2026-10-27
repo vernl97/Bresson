@@ -1,6 +1,7 @@
 //! NLP Studio GUI: a Folder View for browsing / batch-editing a set of scans
 //! and an Editor View for fine-tuning a single frame.
 
+mod auto;
 mod editor;
 mod folder;
 mod gpu;
@@ -193,6 +194,8 @@ pub struct NlpApp {
     pub roll: roll::RollState,
     /// The editor preview is drawn on the GPU (wgpu available).
     pub gpu: bool,
+    /// Conversions and exports the app runs by itself.
+    pub auto: auto::AutoState,
 }
 
 impl NlpApp {
@@ -224,6 +227,7 @@ impl NlpApp {
             export_targets: None,
             convert_dialog: None,
             wizard: Default::default(),
+            auto: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -553,6 +557,8 @@ impl NlpApp {
         self.export_targets = Some(targets);
     }
 
+    /// Export frames `idx`. Unconverted frames are converted first and
+    /// exported when their analysis arrives.
     pub fn export_with_settings(&mut self, idx: Vec<usize>, ex: ExportSettings) {
         let items: Vec<_> = idx
             .iter()
@@ -560,6 +566,7 @@ impl NlpApp {
             .collect();
         let targets = crate::engine::export::batch_paths(&items, &ex);
         let mut n = 0;
+        let mut unconverted = Vec::new();
         for (i, target) in idx.into_iter().zip(targets) {
             let f = &mut self.frames[i];
             if f.exporting {
@@ -567,28 +574,14 @@ impl NlpApp {
             }
             f.exporting = true;
             n += 1;
-            let (path, s, a, roll, meta, ex) = (
-                f.path.clone(),
-                f.sc.settings.clone(),
-                f.sc.analysis.clone(),
-                f.sc.roll.clone(),
-                f.sc.metadata.clone(),
-                ex.clone(),
-            );
-            self.jobs.spawn(move || {
-                let result = crate::engine::export::export_frame(
-                    &path,
-                    &s,
-                    a.as_ref(),
-                    roll.as_ref(),
-                    &meta,
-                    &ex,
-                    &target,
-                )
-                .map_err(|e| format!("{e:#}"));
-                JobResult::Exported { path, result }
-            });
+            if f.sc.is_converted() {
+                self.spawn_export(i, target, ex.clone());
+            } else {
+                unconverted.push(i);
+                self.auto.export_waiting.push((f.path.clone(), target, ex.clone()));
+            }
         }
+        self.convert(unconverted, false);
         if n > 0 {
             if self.export_done >= self.export_total {
                 self.export_total = 0;
@@ -596,6 +589,30 @@ impl NlpApp {
             }
             self.export_total += n;
         }
+    }
+
+    pub fn spawn_export(&mut self, i: usize, target: PathBuf, ex: ExportSettings) {
+        let f = &self.frames[i];
+        let (path, s, a, roll, meta) = (
+            f.path.clone(),
+            f.sc.settings.clone(),
+            f.sc.analysis.clone(),
+            f.sc.roll.clone(),
+            f.sc.metadata.clone(),
+        );
+        self.jobs.spawn(move || {
+            let result = crate::engine::export::export_frame(
+                &path,
+                &s,
+                a.as_ref(),
+                roll.as_ref(),
+                &meta,
+                &ex,
+                &target,
+            )
+            .map_err(|e| format!("{e:#}"));
+            JobResult::Exported { path, result }
+        });
     }
 
     pub fn export_dialog(&mut self, ctx: &egui::Context) {
@@ -985,6 +1002,7 @@ impl NlpApp {
                     }
                     self.toast(format!("Converted {n} frame(s)"), false);
                     self.editor.invalidate();
+                    self.flush_waiting_exports();
                 }
                 JobResult::Exported { path, result } => {
                     self.export_done += 1;
@@ -1596,6 +1614,7 @@ mod ui_tests {
             export_targets: None,
             convert_dialog: None,
             wizard: Default::default(),
+            auto: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1642,6 +1661,7 @@ mod ui_tests {
             export_targets: None,
             convert_dialog: None,
             wizard: Default::default(),
+            auto: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1681,6 +1701,7 @@ mod ui_tests {
             export_targets: None,
             convert_dialog: None,
             wizard: Default::default(),
+            auto: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1766,6 +1787,7 @@ mod ui_tests {
             export_targets: None,
             convert_dialog: None,
             wizard: Default::default(),
+            auto: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),

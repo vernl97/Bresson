@@ -615,7 +615,7 @@ impl NlpApp {
         }
         if c {
             if self.editor.crop.is_some() {
-                self.cancel_crop();
+                self.apply_crop(i);
             } else {
                 self.enter_crop(i);
             }
@@ -813,6 +813,7 @@ impl NlpApp {
                 .clicked()
                 {
                     self.editor.before = !self.editor.before;
+                    self.editor.split = false;
                     self.editor.dirty = true;
                 }
                 if self.editor.loading || self.jobs.busy() > 0 {
@@ -1049,7 +1050,7 @@ impl NlpApp {
         {
             if fl_combo(
                 ui,
-                "",
+                "Image type",
                 &mut s.image_type,
                 ImageType::ALL,
                 ImageType::label,
@@ -1117,7 +1118,7 @@ impl NlpApp {
             super::folder::flat_field_ui(ui, &mut s.flat_field, start.as_deref());
         }
         self.editor.border_preview = false;
-        if widgets::fold_with(ui, "Analysis", false) {
+        if widgets::fold_with(ui, "Analysis area", false) {
             fl_slider_u8(
                 ui,
                 "Pre-saturation",
@@ -1145,7 +1146,7 @@ impl NlpApp {
         if widgets::fold(ui, "Tone") {
             fl_combo(
                 ui,
-                "",
+                "Tone profile",
                 &mut s.tone_profile,
                 ToneProfile::ALL,
                 ToneProfile::label,
@@ -1420,7 +1421,7 @@ impl NlpApp {
             }
         }
         if widgets::fold(ui, "Look") {
-            fl_combo(ui, "", &mut s.lut, Lut::ALL, Lut::label, "");
+            fl_combo(ui, "LUT", &mut s.lut, Lut::ALL, Lut::label, "");
             fl_slider(
                 ui,
                 "Amount",
@@ -1441,7 +1442,7 @@ impl NlpApp {
             );
             fl_combo(
                 ui,
-                "",
+                "Sharpening",
                 &mut s.sharpening,
                 Sharpening::ALL,
                 Sharpening::label,
