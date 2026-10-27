@@ -208,11 +208,16 @@ fn density_matrix(s: &Settings) -> [[f32; 3]; 3] {
     }
 }
 
-/// The scan source implied by a file: bitmaps are TIF scans, raw files
-/// digital camera captures. VueScan / SilverFast DNGs are set by hand.
+/// The scan source implied by a file: demosaiced (LinearRaw) DNGs and
+/// files written by scanner software are VueScan / SilverFast DNGs, other
+/// raw files digital camera captures, bitmaps TIF scans.
 pub fn detect_source(src: &SourceImage) -> super::settings::Source {
     use super::settings::Source;
-    if src.is_raw {
+    let sw = src.info.software.to_ascii_lowercase();
+    let scanner = ["vuescan", "silverfast"].iter().any(|s| sw.contains(s));
+    if src.is_raw && (src.info.linear_raw || scanner) {
+        Source::VueScanRaw
+    } else if src.is_raw {
         Source::DigitalCamera
     } else {
         Source::TifScan
@@ -1262,6 +1267,20 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detect_source_from_the_file() {
+        use super::super::settings::Source;
+        let mut src = super::super::testchart::negative(0.0).src;
+        assert_eq!(detect_source(&src), Source::TifScan);
+        src.is_raw = true;
+        assert_eq!(detect_source(&src), Source::DigitalCamera);
+        src.info.software = "VueScan 9.8.45".into();
+        assert_eq!(detect_source(&src), Source::VueScanRaw);
+        src.info.software.clear();
+        src.info.linear_raw = true;
+        assert_eq!(detect_source(&src), Source::VueScanRaw);
+    }
 
     #[test]
     fn levels_find_the_density_range() {

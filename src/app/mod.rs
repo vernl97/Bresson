@@ -91,6 +91,9 @@ pub struct Frame {
     pub exporting: bool,
     /// No saved settings yet: the scan source is set from the file.
     pub source_auto: bool,
+    /// Not converted when the folder opened: cropped and converted by
+    /// itself (see `auto.rs`) until the user converts it by hand.
+    pub auto_convert: bool,
 }
 
 impl Frame {
@@ -346,6 +349,7 @@ impl NlpApp {
                     sc.settings.film_base = crate::engine::settings::FilmBase::Off;
                     sc.settings.source = crate::engine::settings::Source::TifScan;
                 }
+                let auto_convert = !sc.is_converted();
                 Frame {
                     name: path
                         .file_name()
@@ -360,6 +364,7 @@ impl NlpApp {
                     dirty_since: None,
                     exporting: false,
                     source_auto,
+                    auto_convert,
                 }
             })
             .collect();
@@ -369,6 +374,7 @@ impl NlpApp {
         self.anchor = None;
         self.view = View::Folder;
         self.editor = editor::Editor::default();
+        self.auto = Default::default();
         for i in 0..self.frames.len() {
             self.request_proxy(i);
         }
@@ -471,6 +477,7 @@ impl NlpApp {
         if idx.is_empty() {
             return;
         }
+        self.auto_release(&idx);
         let items = idx
             .iter()
             .map(|&i| jobs::ConvertItem {
@@ -483,6 +490,7 @@ impl NlpApp {
     }
 
     pub fn unconvert(&mut self, idx: &[usize]) {
+        self.auto_release(idx);
         for &i in idx {
             let f = &mut self.frames[i];
             f.sc.analysis = None;
@@ -911,7 +919,9 @@ impl NlpApp {
         while let Ok(r) = self.jobs.rx.try_recv() {
             match r {
                 JobResult::ExposureVariance { items, spread } => {
-                    self.exposure_prompt = Some((items, spread));
+                    if let Some(items) = self.auto_exposure_variance(items, spread) {
+                        self.exposure_prompt = Some((items, spread));
+                    }
                 }
                 JobResult::Proxy { path, result } => {
                     let Some(i) = self.index_of(&path) else {
@@ -930,6 +940,7 @@ impl NlpApp {
                             });
                             self.frames[i].proxy = ProxyState::Ready(p);
                             self.frames[i].thumb_dirty = true;
+                            self.auto_queue(i);
                         }
                         Err(e) => {
                             self.frames[i].proxy = ProxyState::Failed(e.clone());
@@ -961,6 +972,8 @@ impl NlpApp {
                         self.toast(e, true);
                     }
                     let n = frames.len();
+                    let paths: Vec<PathBuf> = frames.iter().map(|f| f.0.clone()).collect();
+                    let auto = self.auto_converted(&paths, roll.is_some());
                     for (path, src, a, detected) in frames {
                         let Some(i) = self.index_of(&path) else {
                             continue;
@@ -1000,7 +1013,11 @@ impl NlpApp {
                             );
                         }
                     }
-                    self.toast(format!("Converted {n} frame(s)"), false);
+                    if !auto {
+                        self.toast(format!("Converted {n} frame(s)"), false);
+                    } else if roll.is_some() {
+                        self.toast(format!("Balanced {n} frames as a roll"), false);
+                    }
                     self.editor.invalidate();
                     self.flush_waiting_exports();
                 }
@@ -1175,9 +1192,10 @@ impl eframe::App for NlpApp {
             }
         }
         self.poll_jobs();
+        self.auto_tick();
         self.render_thumbs(ctx);
         self.autosave();
-        if self.jobs.busy() > 0 {
+        if self.jobs.busy() > 0 || self.auto.queued_since.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
     }
@@ -1254,6 +1272,7 @@ mod tests {
             dirty_since: None,
             exporting: false,
             source_auto: false,
+            auto_convert: false,
         };
 
         let dummy_src = SourceImage {
@@ -1290,7 +1309,8 @@ mod ui_tests {
                     .frames
                     .iter()
                     .any(|f| f.thumb_dirty && f.thumb_src.is_some())
-                || h.state().editor.loading;
+                || h.state().editor.loading
+                || h.state().auto.busy();
             if (!busy && t0.elapsed().as_secs_f32() > 0.5) || t0.elapsed().as_secs_f32() > secs {
                 break;
             }
@@ -1540,6 +1560,39 @@ mod ui_tests {
         h.key_press(egui::Key::Space);
         h.run_steps(3);
         assert!(h.state().view == View::Folder && !h.state().frames.is_empty());
+    }
+
+    /// A new folder converts itself: each frame as it loads, then the roll.
+    #[test]
+    #[ignore]
+    fn folder_converts_itself() {
+        let src = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
+        let dir = std::env::temp_dir().join(format!("nlp_auto_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut raws: Vec<PathBuf> = std::fs::read_dir(&src)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| decode::is_raw(p))
+            .collect();
+        raws.sort();
+        for p in raws.iter().take(3) {
+            std::fs::copy(p, dir.join(p.file_name().unwrap())).unwrap();
+        }
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
+        settle(&mut h, 120.0);
+        let app = h.state();
+        assert_eq!(app.frames.len(), 3);
+        for f in &app.frames {
+            assert!(f.sc.is_converted(), "{} converted", f.name);
+            assert!(f.sc.roll.is_some(), "{} balanced as a roll", f.name);
+            assert!(f.auto_convert);
+        }
+        assert_eq!(app.auto.roll_pass, auto::RollPass::Done);
+        assert!(app.convert_dialog.is_none() && app.exposure_prompt.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -59,6 +59,12 @@ pub struct SourceInfo {
     /// match exposure across a roll (NLPRolls `L19_1`).
     #[serde(default)]
     pub exposure: Option<[f64; 3]>,
+    /// A demosaiced (LinearRaw) DNG, as scanner software writes them.
+    #[serde(default)]
+    pub linear_raw: bool,
+    /// The TIFF/DNG Software tag (e.g. "VueScan 9.8", "SilverFast 9").
+    #[serde(default)]
+    pub software: String,
 }
 
 /// Linear source pixels (camera RGB for RAW, linear RGB for bitmaps).
@@ -128,11 +134,48 @@ fn load_bitmap(path: &Path) -> Result<SourceImage> {
             full_width: w,
             full_height: h,
             exposure: None,
+            linear_raw: false,
+            software: tiff_software(path).unwrap_or_default(),
         },
     })
 }
 
 /// Shutter, aperture and ISO from the raw file's EXIF, when all three exist.
+/// The Software tag (305) of a TIFF-based file's first IFD.
+fn tiff_software(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 8];
+    f.read_exact(&mut head).ok()?;
+    let le = match &head[..4] {
+        b"II*\0" => true,
+        b"MM\0*" => false,
+        _ => return None,
+    };
+    let u16_at = |b: &[u8]| if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) };
+    let u32_at = |b: &[u8]| {
+        let a = [b[0], b[1], b[2], b[3]];
+        if le { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) }
+    };
+    f.seek(SeekFrom::Start(u32_at(&head[4..]) as u64)).ok()?;
+    let mut n = [0u8; 2];
+    f.read_exact(&mut n).ok()?;
+    let mut entries = vec![0u8; u16_at(&n) as usize * 12];
+    f.read_exact(&mut entries).ok()?;
+    let e = entries.chunks_exact(12).find(|e| u16_at(e) == 305 && u16_at(&e[2..]) == 2)?;
+    let count = u32_at(&e[4..]) as usize;
+    let mut s = if count <= 4 {
+        e[8..8 + count].to_vec()
+    } else {
+        f.seek(SeekFrom::Start(u32_at(&e[8..]) as u64)).ok()?;
+        let mut s = vec![0u8; count.min(256)];
+        f.read_exact(&mut s).ok()?;
+        s
+    };
+    s.retain(|&c| c != 0);
+    Some(String::from_utf8_lossy(&s).trim().to_string())
+}
+
 fn raw_exposure(path: &Path) -> Option<[f64; 3]> {
     let src = rawler::rawsource::RawSource::new(path).ok()?;
     let dec = rawler::get_decoder(&src).ok()?;
@@ -197,6 +240,8 @@ fn load_raw(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
         full_width: raw.width,
         full_height: raw.height,
         exposure: raw_exposure(path),
+        linear_raw: matches!(raw.photometric, RawPhotometricInterpretation::LinearRaw),
+        software: tiff_software(path).unwrap_or_default(),
     };
 
     let fast = matches!(&raw.photometric, RawPhotometricInterpretation::Cfa(c) if c.cfa.is_rgb())

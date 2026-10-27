@@ -19,6 +19,103 @@ pub fn source_instructions(s: Source) -> &'static str {
     }
 }
 
+/// Short name for the scan source chip.
+fn source_short(s: Source) -> &'static str {
+    match s {
+        Source::DigitalCamera => "Camera scan",
+        Source::VueScanRaw => "VueScan / SilverFast",
+        Source::TifScan => "TIF scan",
+        Source::LinearScan => "Linear scan",
+    }
+}
+
+impl NlpApp {
+    /// The roll's scan source, detected from the files: shows what was
+    /// found and sets the source of every frame.
+    pub fn source_chip(&mut self, ui: &mut egui::Ui) {
+        let mut counts: Vec<(Source, usize)> = Source::ALL
+            .iter()
+            .map(|&s| (s, self.frames.iter().filter(|f| f.sc.settings.source == s).count()))
+            .filter(|c| c.1 > 0)
+            .collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        let Some(&(main, _)) = counts.first() else {
+            return;
+        };
+        let text = match counts.len() {
+            1 => source_short(main).to_string(),
+            n => format!("{} +{}", source_short(main), n - 1),
+        };
+        let r = ui
+            .add(
+                egui::Button::new(RichText::new(text).small().color(theme::MUTED))
+                    .corner_radius(10.0)
+                    .min_size(vec2(0.0, 20.0)),
+            )
+            .on_hover_text("Scan source, detected from the files. Click to change it for the roll.");
+        egui::Popup::menu(&r).show(|ui| {
+            ui.set_width(270.0);
+            ui.label(RichText::new("Scan source").small().color(theme::MUTED));
+            for &(s, n) in &counts {
+                ui.label(format!("{n} × {}", s.label()));
+            }
+            ui.separator();
+            ui.label(RichText::new("Set for the whole roll").small().color(theme::MUTED));
+            for &s in Source::ALL {
+                let only = counts.len() == 1 && main == s;
+                if ui.selectable_label(only, s.label()).clicked() && !only {
+                    self.set_roll_source(s);
+                }
+            }
+            ui.add_space(4.0);
+            ui.label(RichText::new(source_instructions(main)).small().color(theme::FAINT));
+        });
+    }
+}
+
+impl NlpApp {
+    /// Slim notices under the top bar, each dismissible.
+    fn banners_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(spread) = self.auto.exposure_note else {
+            return;
+        };
+        egui::Panel::top("folder_banner")
+            .exact_size(32.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    widgets::paint_icon(
+                        ui.painter(),
+                        egui::Rect::from_center_size(ui.cursor().min + vec2(7.0, 0.0), vec2(14.0, 14.0)),
+                        Icon::Warn,
+                        theme::WARN,
+                    );
+                    ui.add_space(18.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "Exposures vary by {spread:.1} EV, so the roll was balanced by the images instead"
+                        ))
+                        .small()
+                        .color(theme::MUTED),
+                    );
+                    if ui.small_button("Use exposure data").clicked() {
+                        self.auto.exposure_note = None;
+                        self.convert((0..self.frames.len()).collect(), true);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_button(ui, Icon::Close, "Dismiss", false, true).clicked() {
+                            self.auto.exposure_note = None;
+                        }
+                    });
+                });
+            });
+    }
+}
+
 /// The flat-field input: a frame of the bare light source or clear film
 /// leader, shot like the negatives. Shows the file name with Choose / Clear.
 pub fn flat_field_ui(
@@ -222,6 +319,8 @@ impl NlpApp {
                             self.open_roll_dialog(&f, false);
                         }
                     }
+                    ui.add_space(4.0);
+                    self.source_chip(ui);
                     ui.add_space(2.0);
                     let r = icon_button(ui, Icon::More, "More", false, true);
                     egui::Popup::menu(&r).show(|ui| {
@@ -331,6 +430,7 @@ impl NlpApp {
                     });
                 });
             });
+        self.banners_ui(ui);
 
         egui::Panel::bottom("folder_status")
             .exact_size(28.0)
@@ -606,7 +706,23 @@ impl NlpApp {
                             p.galley(chip.center() - g.size() / 2.0, g, theme::MUTED);
                             x = chip.left() - 6.0;
                         }
-                        if f.sc.is_converted() {
+                        let converting = self.auto.in_flight.contains(&f.path)
+                            || self.auto.queue.contains(&f.path);
+                        if converting {
+                            // Pulsing while its conversion runs.
+                            let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
+                            p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::MUTED.gamma_multiply(a));
+                            x -= 12.0;
+                            ui.ctx().request_repaint();
+                        } else if !f.sc.is_converted() {
+                            p.circle_stroke(
+                                pos2(x - 3.0, row_y),
+                                2.5,
+                                egui::Stroke::new(1.0, theme::FAINT),
+                            );
+                            x -= 12.0;
+                        }
+                        if f.sc.is_converted() && !converting {
                             p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::OK);
                             x -= 12.0;
                             if let Some(r) = lab::readout(&f.sc.settings) {
