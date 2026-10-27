@@ -19,14 +19,14 @@ cargo run --release -- scan-prep FILES              # level + gamma 2.2 encode l
 cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorChecker negative (ev = stops over)
 ```
 
-`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Pro Lab, Basic Lab or Darkroom Paper. `--auto-crop` crops and straightens each frame to its detected frame before analysis. `--name` takes the export file name template (see Export below).
+`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Lab (density per frame, default) or Darkroom (one exposure for the roll). `--auto-crop` crops and straightens each frame to its detected frame before analysis. `--name` takes the export file name template (see Export below).
 
 ## GUI
 
 **Folder View**
 - Browse a folder of RAW and TIFF files as a thumbnail grid. Select with click, ⌘/Ctrl-click, Shift-click or ⌘A; double-click (or Enter) opens the editor.
 - The top bar acts on the selection:
-  - **Convert** / **Convert as roll** (2+ frames) open a dialog with the conversion inputs: source, colour model, film base, pre-saturation, border buffer, white balance, *Auto-crop frames* and, for rolls, the roll process (Pro Lab, Basic Lab or Darkroom Paper).
+  - **Convert** / **Convert as roll** (2+ frames) open a dialog with the conversion inputs: source, colour model, film base, pre-saturation, border buffer, white balance, *Auto-crop frames* and, for rolls, the roll process (Lab: density per frame, or Darkroom: one exposure).
   - **Export**: positive copies as TIF (8/16-bit, ZIP) or JPG, in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile and EXIF.
     - Presets: *Lab JPEG M/L* (3000/6000 px) and *Archive TIFF*, plus your own (*Save as…*).
     - Size: full or a long edge of 2000–6000 px.
@@ -64,7 +64,7 @@ The engine started as a port of the Lightroom plugin and now models the film its
 2. **Levels.** `pipeline::analyze` trims film rebate, holder and light past the film off the edges (found by density), then measures each channel's density range (exact 0.05 % / 99.99 % quantiles and the median) on the 600 px, border-cropped, blurred analysis buffer. Red and blue are placed on the image's neutral axis. Normalising every channel to its own range matches the layers' different H&D slopes, so neutrals stay neutral from shadows to highlights.
 3. **Print.** `curve.rs` shapes the normalised density (brightness, contrast, lights/darks, whites/blacks, toning), turns it into paper log exposure plus printing filtration (white balance and the C·M·Y keys, in CC) and print time (EV), and prints it on a logistic paper curve with a toe and shoulder. The result is baked into density-indexed LUTs.
 4. **Auto colour.** Auto-Neutral is the filtration that prints the near-neutral pixels grey.
-5. **Rolls.** The roll's levels are the median of its frames, with frames of an outlying colour balance left out. EXIF exposure differences are exact density offsets (`log10 2` per stop). Pro Lab keeps the roll's colour balance on each frame's own density range.
+5. **Rolls.** A roll is printed with one colour balance: the film's channel slopes (the median of the frames' neutral-axis slopes; one frame's fit also follows its light) and the roll's filtration (the median axis offset, leaving out frames with an outlying balance). *Lab* sets each frame's density from the frame; *Darkroom* prints the whole roll at one exposure. EXIF exposure differences are exact density offsets (`log10 2` per stop).
 
 `testchart.rs` models a ColorChecker shot on C-41 film; `chart_quality` measures colour error, neutrality and roll consistency against it.
 

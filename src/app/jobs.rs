@@ -284,6 +284,7 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
             common_ev: agg.common_ev,
             id: format!("roll-{stamp}"),
             levels: agg.levels,
+            balance: agg.balance,
             base: roll_base.unwrap(),
             frames: ok.len(),
             excluded: excluded

@@ -120,15 +120,13 @@ choice_enum!(
 );
 
 choice_enum!(
-    /// "Roll Process" (`rollMode`, NLPRolls `getOriginsOfPhotoForRoll`).
-    /// Pro Lab fits the roll's colour balance to the frame's own density
-    /// range; Basic Lab additionally pulls the clipping towards the roll's;
-    /// Darkroom Paper uses the roll's origins unchanged.
+    /// How a roll's frames are printed. Both use the roll's colour balance;
+    /// Lab sets each frame's density from the frame, Darkroom prints the
+    /// whole roll at one exposure.
     RollMode {
-        ProLab => "Pro Lab",
-        BasicLab => "Basic Lab",
-        DarkroomPaper => "Darkroom Paper",
-    } default ProLab
+        Lab => "Lab (density per frame)",
+        Darkroom => "Darkroom (one exposure)",
+    } default Lab
 );
 
 choice_enum!(
@@ -154,7 +152,7 @@ choice_enum!(
 );
 
 /// Version of the conversion engine; part of [`AnalysisKey`].
-pub const ENGINE_VERSION: u32 = 2;
+pub const ENGINE_VERSION: u32 = 3;
 
 /// Every parameter that influences how a frame is rendered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -289,7 +287,7 @@ impl Default for Settings {
             post_saturation: 5,
             sharpening: Sharpening::LeaveAsSet,
             use_roll: false,
-            roll_mode: RollMode::ProLab,
+            roll_mode: RollMode::Lab,
         }
     }
 }

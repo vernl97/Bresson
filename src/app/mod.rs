@@ -1154,6 +1154,7 @@ mod tests {
                     base: [0.85, 0.60, 0.40],
                     key: Settings::default().analysis_key(),
                     ev: None,
+                    axis: None,
                 }),
                 roll: None,
                 metadata: Default::default(),

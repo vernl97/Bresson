@@ -19,8 +19,8 @@ USAGE:
 
 CONVERT OPTIONS:
   --roll               Analyse all files as one roll
-  --roll-process NAME  Pro Lab (default) | Basic Lab | Darkroom Paper
-  --tone NAME          Tone profile: Standard | Soft | Hard | Rich | Flat (for grading) | Linear
+  --roll-process NAME  Lab (default: density per frame) | Darkroom (one exposure)
+  --tone NAME          Tone profile: Standard | Soft | Hard | Rich | Flat | Linear
   --wb NAME            White balance (Auto-Neutral, Kodak, Fuji, ...)
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
   --border PCT         Border buffer percent (default 5)
@@ -33,11 +33,16 @@ CONVERT OPTIONS:
   --out DIR            Output folder (default: <source>/Positives)
 ";
 
+/// The choice whose label is `name`, or starts with `name` and a space
+/// ("Flat" for "Flat (for grading)").
 fn find<T: Copy>(all: &[T], label: impl Fn(T) -> &'static str, name: &str) -> Result<T> {
     let n = name.to_ascii_lowercase();
     all.iter()
         .copied()
-        .find(|v| label(*v).to_ascii_lowercase() == n)
+        .find(|v| {
+            let l = label(*v).to_ascii_lowercase();
+            l == n || l.starts_with(&format!("{n} "))
+        })
         .with_context(|| format!("unknown value '{name}'"))
 }
 
@@ -156,6 +161,7 @@ fn convert(args: Vec<String>) -> Result<()> {
         RollData {
             id: format!("roll-{}", std::process::id()),
             levels: agg.levels,
+            balance: agg.balance,
             base: roll_base.unwrap_or_else(|| analyses[0].base),
             frames: files.len(),
             auto_wb: Some(agg.auto_wb),

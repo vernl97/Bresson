@@ -7,14 +7,16 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::curve::Levels;
-use super::pipeline::{Analysis, AutoWb};
+use super::pipeline::{Analysis, AutoWb, RollBalance};
 use super::settings::{ExportPreset, ExportSettings, FilmMetadata, Settings};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RollData {
     pub id: String,
-    /// The roll's density range (median of its frames).
+    /// The roll's levels at one exposure for the whole roll.
     pub levels: Levels,
+    /// The roll's colour balance (film slopes and filtration).
+    pub balance: RollBalance,
     pub base: [f32; 3],
     pub frames: usize,
     pub excluded: Vec<String>,
@@ -26,10 +28,10 @@ pub struct RollData {
     pub common_ev: Option<f64>,
 }
 
-/// Sidecar format version. Version 2 holds density analyses; analyses and
-/// rolls of older files are dropped when loading (the frame needs a new
-/// Convert), their settings and metadata are kept.
-pub const VERSION: u32 = 2;
+/// Sidecar format version. Version 3 holds density analyses and roll
+/// balances; analyses and rolls of older files are dropped when loading
+/// (the frame needs a new Convert), their settings and metadata are kept.
+pub const VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

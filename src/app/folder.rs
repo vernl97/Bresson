@@ -872,7 +872,7 @@ impl NlpApp {
                             &mut d.settings.roll_mode,
                             RollMode::ALL,
                             RollMode::label,
-                            "Pro Lab: fits the roll balance to each frame · Basic Lab: closer to a lab scanner's first pass · Darkroom Paper: the roll's values unchanged",
+                            "Both print the roll with one colour balance. Lab: each frame's density from the frame · Darkroom: the whole roll at one exposure",
                         );
                     }
                 }

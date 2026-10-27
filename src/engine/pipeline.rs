@@ -65,6 +65,9 @@ pub struct Analysis {
     /// Exposure value of the capture, when the EXIF has it.
     #[serde(default)]
     pub ev: Option<f64>,
+    /// The neutral axis the levels were fitted to, when the frame had one.
+    #[serde(default)]
+    pub axis: Option<NeutralAxis>,
 }
 
 // ---- film base -------------------------------------------------------------------
@@ -385,7 +388,7 @@ fn channel_quantiles(buf: &Negative, t: ImageType) -> Levels {
 }
 
 /// The image's neutral axis: per channel `D_c = a + b · D_green`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct NeutralAxis {
     pub fit: [(f64, f64); 3],
     /// Mean density of the tonal steps (a point on the axis).
@@ -555,13 +558,13 @@ pub fn edit_only_levels() -> Levels {
 
 /// Full conversion analysis of a prepared negative. Edit Only frames skip it.
 pub fn analyze(neg: &Negative, s: &Settings, base: [f32; 3], ev: Option<f64>) -> Analysis {
-    let (levels, auto_wb) = if s.image_type == ImageType::EditOnly {
-        (edit_only_levels(), AutoWb::default())
+    let (levels, auto_wb, axis) = if s.image_type == ImageType::EditOnly {
+        (edit_only_levels(), AutoWb::default(), None)
     } else {
         let buf = analysis_buffer(neg, s);
         let (levels, axis) = levels_from_buffer(&buf, s.image_type);
         let wb = auto_wb(&buf, &levels, axis.as_ref(), s.image_type);
-        (levels, wb)
+        (levels, wb, axis)
     };
     Analysis {
         levels,
@@ -569,6 +572,7 @@ pub fn analyze(neg: &Negative, s: &Settings, base: [f32; 3], ev: Option<f64>) ->
         base,
         key: s.analysis_key(),
         ev,
+        axis,
     }
 }
 
@@ -589,11 +593,43 @@ pub fn wb_for_mode(mode: WbMode, a: &AutoWb) -> Option<(f32, f32)> {
 
 // ---- roll ---------------------------------------------------------------------------
 
+/// A roll's colour balance: every channel's density on the roll's neutral
+/// axis, `D_c = offset_c + slope_c · D_green`. The slopes are the film's
+/// (its layers' H&D gamma ratios), the offsets the roll's filtration.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RollBalance {
+    pub slope: [f64; 3],
+    pub offset: [f64; 3],
+}
+
+impl RollBalance {
+    /// Levels for green levels `g`, red and blue on the roll's axis.
+    fn levels(&self, g: ChannelLevels) -> Levels {
+        std::array::from_fn(|c| {
+            let at = |d: f64| self.offset[c] + self.slope[c] * d;
+            ChannelLevels {
+                lo: at(g.lo),
+                hi: at(g.hi).max(at(g.lo) + 0.05),
+                mid: at(g.mid),
+            }
+        })
+    }
+
+    /// The same balance for a scan `d` denser in every channel.
+    fn shifted(&self, d: f64) -> Self {
+        Self {
+            slope: self.slope,
+            offset: std::array::from_fn(|c| self.offset[c] + d * (1.0 - self.slope[c])),
+        }
+    }
+}
+
 /// A roll built by "Convert as roll".
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RollAggregate {
-    /// Median density range of the frames.
+    /// The roll's levels at one exposure for the whole roll.
     pub levels: Levels,
+    pub balance: RollBalance,
     pub auto_wb: AutoWb,
     /// The roll's most common exposure; `None` without exposure data.
     pub common_ev: Option<f64>,
@@ -682,10 +718,30 @@ fn outliers(v: &[f64], floor: f64) -> Vec<usize> {
     (0..v.len()).filter(|&i| (v[i] - m).abs() > limit).collect()
 }
 
-/// Roll aggregation. With a `common_ev`, each frame is first moved onto that
-/// exposure. Frames whose colour balance (green and blue range relative to
-/// red) is far from the rest of the roll (robust outlier test, at least
-/// 0.05 D off) are left out; the roll's range is the median of the rest.
+/// A frame's neutral axis: the fitted one, or the line through its
+/// channel ranges when it had too little near-neutral content.
+fn frame_axis(a: &Analysis) -> ([f64; 3], [f64; 3]) {
+    match &a.axis {
+        Some(x) => (x.fit.map(|f| f.1), x.centre),
+        None => {
+            let l = &a.levels;
+            let span_g = (l[1].hi - l[1].lo).max(1e-3);
+            (
+                std::array::from_fn(|c| (l[c].hi - l[c].lo) / span_g),
+                std::array::from_fn(|c| l[c].mid),
+            )
+        }
+    }
+}
+
+/// Roll aggregation, the way a lab prints a roll: one colour balance for
+/// all frames. The channel slopes belong to the film, so the roll takes the
+/// median of the frames' fitted slopes; a single frame's fit also follows
+/// its light (open shade turns its shadows blue). The roll's filtration is
+/// the median of the frames' axis offsets under those slopes, leaving out
+/// frames whose balance is far from the rest (robust outlier test, at
+/// least 0.05 D off). The roll's one-exposure levels take the median green
+/// range. With a `common_ev`, frames are first moved onto that exposure.
 /// Returns the roll and the excluded frame indices.
 pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggregate, Vec<usize>) {
     let t = frames[0].key.image_type;
@@ -693,25 +749,22 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
         (Some(c), Some(e)) => -ev_density(e - c),
         _ => 0.0,
     };
-    let adj: Vec<Levels> = frames
+    let axes: Vec<([f64; 3], [f64; 3])> = frames
         .iter()
-        .map(|a| shift_levels(&a.levels, shift(a)))
-        .collect();
-    let features: Vec<[f64; 4]> = adj
-        .iter()
-        .map(|l| {
-            [
-                l[1].lo - l[0].lo,
-                l[2].lo - l[0].lo,
-                l[1].hi - l[0].hi,
-                l[2].hi - l[0].hi,
-            ]
+        .map(|a| {
+            let (slope, centre) = frame_axis(a);
+            (slope, centre.map(|v| v + shift(a)))
         })
+        .collect();
+    let slope: [f64; 3] = std::array::from_fn(|c| median(axes.iter().map(|a| a.0[c]).collect()));
+    let offsets: Vec<[f64; 3]> = axes
+        .iter()
+        .map(|(_, centre)| std::array::from_fn(|c| centre[c] - slope[c] * centre[1]))
         .collect();
     let mut excluded: Vec<usize> = Vec::new();
     if frames.len() >= 3 {
-        for k in 0..4 {
-            let v: Vec<f64> = features.iter().map(|f| f[k]).collect();
+        for c in [0, 2] {
+            let v: Vec<f64> = offsets.iter().map(|o| o[c]).collect();
             excluded.extend(outliers(&v, 0.05));
         }
         excluded.sort_unstable();
@@ -720,29 +773,38 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
     let kept: Vec<usize> = (0..frames.len())
         .filter(|i| !excluded.contains(i))
         .collect();
-    let levels: Levels = std::array::from_fn(|c| ChannelLevels {
-        lo: median(kept.iter().map(|&i| adj[i][c].lo).collect()),
-        hi: median(kept.iter().map(|&i| adj[i][c].hi).collect()),
-        mid: median(kept.iter().map(|&i| adj[i][c].mid).collect()),
-    });
-    let avg = |f: &dyn Fn(&AutoWb) -> [f64; 3]| -> [f64; 3] {
-        let mut m = [0.0; 3];
-        for &i in &kept {
-            let v = f(&frames[i].auto_wb);
-            for c in 0..3 {
-                m[c] += (v[c] + shift(&frames[i])) / kept.len() as f64;
-            }
-        }
-        m
+    let balance = RollBalance {
+        slope,
+        offset: std::array::from_fn(|c| median(kept.iter().map(|&i| offsets[i][c]).collect())),
     };
+    let green = |f: fn(&ChannelLevels) -> f64| {
+        median(
+            kept.iter()
+                .map(|&i| f(&frames[i].levels[1]) + shift(&frames[i]))
+                .collect(),
+        )
+    };
+    let levels = balance.levels(ChannelLevels {
+        lo: green(|c| c.lo),
+        hi: green(|c| c.hi),
+        mid: green(|c| c.mid),
+    });
+    let mean: [f64; 3] = std::array::from_fn(|c| {
+        kept.iter()
+            .map(|&i| frames[i].auto_wb.mean[c] + shift(&frames[i]))
+            .sum::<f64>()
+            / kept.len() as f64
+    });
+    let grey = balance.levels(levels[1]).map(|c| c.mid);
     let confidence = kept
         .iter()
         .map(|&i| frames[i].auto_wb.confidence)
         .fold(0.0, f32::max);
-    let auto_wb = auto_wb_from(&levels, t, avg(&|w| w.grey), avg(&|w| w.mean), confidence);
+    let auto_wb = auto_wb_from(&levels, t, grey, mean, confidence);
     (
         RollAggregate {
             levels,
+            balance,
             auto_wb,
             common_ev,
         },
@@ -751,12 +813,9 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
 }
 
 /// Pick the levels a frame renders with: its own analysis, or the roll's
-/// according to the Roll Process. Pro Lab keeps the roll's colour balance
-/// but places it on the frame's own overall density range; Darkroom Paper
-/// prints every frame with the roll's levels; Basic Lab is halfway between
-/// the two. A film exposure change moves each channel's density in
-/// proportion to its H&D slope, i.e. its density span, so Pro Lab moves the
-/// roll's ends by the same fraction of each channel's span.
+/// balance. In Lab mode each frame keeps its own density range in green
+/// (auto exposure per frame) with red and blue on the roll's axis; Darkroom
+/// mode prints every frame with the roll's one exposure.
 pub fn levels_for(
     s: &Settings,
     frame: Option<&Analysis>,
@@ -765,31 +824,17 @@ pub fn levels_for(
     let Some(roll) = roll.filter(|_| s.use_roll) else {
         return frame.map(|a| a.levels);
     };
-    // Move the roll onto this frame's exposure.
-    let roll_levels = match (roll.common_ev, frame.and_then(|a| a.ev)) {
-        (Some(c), Some(e)) => shift_levels(&roll.levels, ev_density(e - c)),
-        _ => roll.levels,
+    // Move the roll onto this frame's scan exposure.
+    let d = match (roll.common_ev, frame.and_then(|a| a.ev)) {
+        (Some(c), Some(e)) => ev_density(e - c),
+        _ => 0.0,
     };
-    let Some(frame) = frame.filter(|_| s.roll_mode != RollMode::DarkroomPaper) else {
-        return Some(roll_levels);
+    let balance = roll.balance.shifted(d);
+    let green = match (s.roll_mode, frame) {
+        (RollMode::Lab, Some(f)) => f.levels[1],
+        _ => shift_levels(&roll.levels, d)[1],
     };
-    let span = |c: usize| (roll_levels[c].hi - roll_levels[c].lo).max(1e-3);
-    let mean = |f: &dyn Fn(usize) -> f64| (f(0) + f(1) + f(2)) / 3.0;
-    let k = if s.roll_mode == RollMode::BasicLab {
-        0.5
-    } else {
-        1.0
-    };
-    let dlo = k * mean(&|c| (frame.levels[c].lo - roll_levels[c].lo) / span(c));
-    let dhi = k * mean(&|c| (frame.levels[c].hi - roll_levels[c].hi) / span(c));
-    Some(std::array::from_fn(|c| {
-        let r = roll_levels[c];
-        ChannelLevels {
-            lo: r.lo + dlo * span(c),
-            hi: r.hi + dhi * span(c),
-            mid: r.mid + (dlo + dhi) / 2.0 * span(c),
-        }
-    }))
+    Some(balance.levels(green))
 }
 
 // ---- rendering --------------------------------------------------------------------
@@ -952,6 +997,7 @@ mod tests {
             base: [1.0; 3],
             key: Settings::default().analysis_key(),
             ev: None,
+            axis: None,
         }
     }
 
@@ -959,6 +1005,7 @@ mod tests {
         RollData {
             id: "r".into(),
             levels: agg.levels,
+            balance: agg.balance,
             base: [1.0; 3],
             frames,
             excluded: vec![],
@@ -968,19 +1015,34 @@ mod tests {
     }
 
     #[test]
-    fn roll_takes_the_median_and_drops_outliers() {
+    fn roll_takes_the_film_slopes_and_drops_outliers() {
+        // Six frames of one film at different exposures, and one whose
+        // blue is far off (different light, or a different film).
+        // Red = 0.9 · green − 0.035, blue = 1.1 · green + 0.035.
+        let on_axis = |lo_g: f64, hi_g: f64, blue: f64| {
+            frame(
+                [0.9 * lo_g - 0.035, lo_g, 1.1 * lo_g + blue],
+                [0.9 * hi_g - 0.035, hi_g, 1.1 * hi_g + blue],
+            )
+        };
         let mut frames: Vec<Analysis> = (0..6)
             .map(|i| {
-                let k = i as f64 * 0.01;
-                frame([0.10 + k, 0.15 + k, 0.20 + k], [1.0 + k, 1.1 + k, 1.2 + k])
+                let k = i as f64 * 0.05;
+                on_axis(0.15 + k, 1.1 + k, 0.035)
             })
             .collect();
-        // A frame with a very different colour balance.
-        frames.push(frame([0.10, 0.45, 0.20], [1.0, 1.4, 1.2]));
+        frames.push(on_axis(0.15, 1.1, 0.285));
         let (r, excluded) = aggregate_roll(&frames, None);
         assert_eq!(excluded, vec![6]);
-        assert!((r.levels[0].lo - 0.125).abs() < 0.006, "{:?}", r.levels);
-        assert!((r.levels[1].hi - 1.125).abs() < 0.006, "{:?}", r.levels);
+        // Slopes: red 0.9, blue 1.1 of green's span; the median ignores the
+        // outlier.
+        assert!((r.balance.slope[0] - 0.9).abs() < 1e-6, "{:?}", r.balance);
+        assert!((r.balance.slope[2] - 1.1).abs() < 1e-6, "{:?}", r.balance);
+        // The roll's axis passes through every regular frame's levels.
+        let l = r.balance.levels(frames[3].levels[1]);
+        for c in 0..3 {
+            assert!((l[c].lo - frames[3].levels[c].lo).abs() < 1e-6, "{l:?}");
+        }
     }
 
     #[test]
@@ -996,21 +1058,14 @@ mod tests {
             ..Settings::default()
         };
         let get = |s: &Settings| levels_for(s, Some(&frames[1]), Some(&roll)).unwrap();
-        s.roll_mode = RollMode::DarkroomPaper;
+        s.roll_mode = RollMode::Darkroom;
         assert_eq!(get(&s), agg.levels);
-        s.roll_mode = RollMode::ProLab;
-        let pro = get(&s);
-        // Every channel moves by the same fraction of its span: the roll's
-        // colour balance on the frame's overall range.
-        let frac = |c: usize, f: fn(&ChannelLevels) -> f64| {
-            (f(&pro[c]) - f(&agg.levels[c])) / (agg.levels[c].hi - agg.levels[c].lo)
-        };
-        assert!((frac(0, |c| c.lo) - frac(2, |c| c.lo)).abs() < 1e-9);
-        assert!((frac(1, |c| c.hi) - frac(2, |c| c.hi)).abs() < 1e-9);
-        assert!(frac(0, |c| c.lo) > 0.0, "the frame is denser than the roll");
-        s.roll_mode = RollMode::BasicLab;
-        let basic = get(&s);
-        assert!((basic[0].lo - (agg.levels[0].lo + pro[0].lo) / 2.0).abs() < 1e-9);
+        s.roll_mode = RollMode::Lab;
+        let lab = get(&s);
+        // Green is the frame's own range, red and blue on the roll's axis.
+        assert_eq!(lab[1].lo, frames[1].levels[1].lo);
+        assert_eq!(lab[1].hi, frames[1].levels[1].hi);
+        assert_eq!(lab, agg.balance.levels(frames[1].levels[1]));
         s.use_roll = false;
         assert_eq!(get(&s), frames[1].levels);
     }
@@ -1042,17 +1097,20 @@ mod tests {
         assert!(ev_spread(&frames, c) < 1.0);
         // The +1/3 EV scan reads denser; moved onto the common exposure it
         // matches the others exactly.
-        let (agg, _) = aggregate_roll(&frames, Some(c));
+        let (agg, excluded) = aggregate_roll(&frames, Some(c));
+        assert!(excluded.is_empty());
         assert!((agg.levels[0].lo - 0.2).abs() < 1e-6, "{:?}", agg.levels);
         let roll = roll_of(&agg, 3);
         let s = Settings {
             use_roll: true,
-            roll_mode: RollMode::DarkroomPaper,
+            roll_mode: RollMode::Darkroom,
             ..Settings::default()
         };
         // Rendering that frame moves the roll back onto its own exposure.
         let l = levels_for(&s, Some(&frames[2]), Some(&roll)).unwrap();
-        assert!((l[0].hi - frames[2].levels[0].hi).abs() < 1e-6);
+        for c in 0..3 {
+            assert!((l[c].hi - frames[2].levels[c].hi).abs() < 1e-6, "{l:?}");
+        }
         // More than 1 EV apart asks before matching.
         frames[2].ev = Some(13.5);
         assert!(ev_spread(&frames, common_ev(&frames).unwrap()) > 1.0);
@@ -1521,8 +1579,8 @@ mod tests {
             m.neutral_cast_max
         );
         assert!(frame_spread < 0.7, "frame spread {frame_spread}");
-        assert!(roll_spread < 1.6, "roll spread {roll_spread}");
-        assert!(roll_cast < 0.8, "roll neutral C* {roll_cast}");
+        assert!(roll_spread < 0.8, "roll spread {roll_spread}");
+        assert!(roll_cast < 0.7, "roll neutral C* {roll_cast}");
     }
 
     #[test]
