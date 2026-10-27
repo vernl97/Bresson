@@ -82,20 +82,58 @@ fn reflectance(lab: [f64; 3]) -> [f64; 3] {
     color::mat_vec(&to_rgb, color::lab_to_xyz(lab, D50)).map(|v| v.max(1e-4))
 }
 
+/// Layer response of a film: per layer the toe softness (log exposure)
+/// and the dye density from which the layer rolls off into a shoulder.
+#[derive(Clone, Copy)]
+pub struct Film {
+    pub toe: [f64; 3],
+    pub shoulder: [f64; 3],
+}
+
+/// The chart's film: the same toe in every layer and no shoulder.
+pub const C41: Film = Film {
+    toe: [TOE_SOFTNESS; 3],
+    shoulder: [f64::INFINITY; 3],
+};
+
+/// A film whose layers cross over: the blue layer has a long soft toe and
+/// the red layer shoulders early, so a grey drifts blue-yellow from
+/// shadows to highlights and red-cyan in the highlights.
+pub const CROSSOVER: Film = Film {
+    toe: [0.2, 0.25, 0.45],
+    shoulder: [1.0, f64::INFINITY, f64::INFINITY],
+};
+
 /// Dye amount formed by one layer at relative log exposure `h`.
-fn layer_density(c: usize, h: f64) -> f64 {
-    let x = (h - FILM_TOE - FILM_SPEED[c]) / TOE_SOFTNESS;
+fn layer_density(film: &Film, c: usize, h: f64) -> f64 {
+    let t = film.toe[c];
+    let x = (h - FILM_TOE - FILM_SPEED[c]) / t;
     // Softplus: a toe that becomes a straight line of slope gamma.
     let soft = if x > 30.0 { x } else { x.exp().ln_1p() };
-    FILM_GAMMA[c] * TOE_SOFTNESS * soft
+    let d = FILM_GAMMA[c] * t * soft;
+    // Shoulder: half the slope a long way past the knee.
+    let k = film.shoulder[c];
+    if d > k {
+        k + (d - k) / (1.0 + (d - k)).sqrt()
+    } else {
+        d
+    }
 }
 
 /// Camera RGB of the film where the scene had `refl`, exposed `ev` stops
 /// over normal (mid grey at log exposure 0). `None` is unexposed rebate.
 pub fn scan(refl: Option<[f64; 3]>, ev: f64) -> [f64; 3] {
+    scan_on(&C41, refl, ev)
+}
+
+fn scan_on(film: &Film, refl: Option<[f64; 3]>, ev: f64) -> [f64; 3] {
     let dye = match refl {
         Some(r) => std::array::from_fn(|c| {
-            layer_density(c, (r[c] / 0.18).log10() + ev * std::f64::consts::LOG10_2)
+            layer_density(
+                film,
+                c,
+                (r[c] / 0.18).log10() + ev * std::f64::consts::LOG10_2,
+            )
         }),
         None => [0.0; 3],
     };
@@ -106,6 +144,11 @@ pub fn scan(refl: Option<[f64; 3]>, ev: f64) -> [f64; 3] {
 
 /// The chart shot `ev` stops over normal exposure.
 pub fn negative(ev: f64) -> Chart {
+    negative_on(&C41, ev)
+}
+
+/// The chart shot on `film`.
+pub fn negative_on(film: &Film, ev: f64) -> Chart {
     let ramp: Vec<f64> = (0..12)
         .map(|i| 0.02 * (0.9f64 / 0.02).powf(i as f64 / 11.0))
         .collect();
@@ -176,7 +219,7 @@ pub fn negative(ev: f64) -> Chart {
                     None => Some(surround),
                 }
             };
-            data[i] = scan(r, ev).map(|v| v as f32);
+            data[i] = scan_on(film, r, ev).map(|v| v as f32);
         }
     }
     let src = SourceImage {
@@ -200,6 +243,13 @@ pub fn negative(ev: f64) -> Chart {
 /// filling the rest (about 60 % of the frame). Auto colour balance must keep
 /// the greys neutral without being pulled towards the field.
 pub fn dominated(ev: f64, field: [f64; 3]) -> Chart {
+    dominated_shaded(ev, field, 0.0)
+}
+
+/// [`dominated`] with the field shaded from `spread` L* darker on the left
+/// to `spread` lighter on the right, like a lit surface (skin, sand, wood)
+/// that spans many tones and so reaches every tonal step of the analysis.
+pub fn dominated_shaded(ev: f64, field: [f64; 3], spread: f64) -> Chart {
     let ramp: Vec<f64> = (0..12)
         .map(|i| 0.02 * (0.9f64 / 0.02).powf(i as f64 / 11.0))
         .collect();
@@ -220,8 +270,13 @@ pub fn dominated(ev: f64, field: [f64; 3]) -> Chart {
         .map(|&y| [y; 3])
         .chain(COLORCHECKER[18..].iter().map(|l| reflectance(*l)))
         .collect();
-    let field = reflectance(field);
     let (x0, x1) = (REBATE, WIDTH - REBATE);
+    let shades: Vec<[f64; 3]> = (x0..x1)
+        .map(|x| {
+            let t = (x - x0) as f64 / (x1 - x0 - 1) as f64 * 2.0 - 1.0;
+            reflectance([field[0] + spread * t, field[1], field[2]])
+        })
+        .collect();
     let (y0, y1) = (REBATE, HEIGHT - REBATE);
     let ramp_bottom = y0 + 56;
     let row_top = y1 - 56;
@@ -254,7 +309,75 @@ pub fn dominated(ev: f64, field: [f64; 3]) -> Chart {
                 }
                 Some(refl[p])
             } else {
-                Some(field)
+                Some(shades[x - x0])
+            };
+            data[i] = scan(r, ev).map(|v| v as f32);
+        }
+    }
+    let src = SourceImage {
+        width: WIDTH,
+        height: HEIGHT,
+        data,
+        to_melissa: color::to_f32(&color::mat_inv(&CAMERA_MIX)),
+        as_shot_wb: [1.0; 3],
+        is_raw: false,
+        info: super::decode::SourceInfo {
+            full_width: WIDTH,
+            full_height: HEIGHT,
+            ..Default::default()
+        },
+    };
+    Chart { src, patches }
+}
+
+/// A portrait: a face (an ellipse of `face`, CIELAB D50, shaded 6 L*
+/// across) in front of a `background` filling the frame, with the grey
+/// ramp along the top. Patch 0 is the centre of the face, then the ramp.
+pub fn portrait(ev: f64, background: [f64; 3], face: [f64; 3]) -> Chart {
+    let ramp: Vec<f64> = (0..12)
+        .map(|i| 0.02 * (0.9f64 / 0.02).powf(i as f64 / 11.0))
+        .collect();
+    let mut patches: Vec<Patch> = std::iter::once(Patch {
+        lab: face,
+        neutral: false,
+        pixels: Vec::new(),
+    })
+    .chain(ramp.iter().map(|&y| Patch {
+        lab: color::xyz_to_lab(color::mat_vec(&color::rgb_to_xyz(&PROPHOTO), [y; 3]), D50),
+        neutral: true,
+        pixels: Vec::new(),
+    }))
+    .collect();
+    let (x0, x1) = (REBATE, WIDTH - REBATE);
+    let (y0, y1) = (REBATE, HEIGHT - REBATE);
+    let ramp_bottom = y0 + 56;
+    let back = reflectance(background);
+    let (cx, cy) = ((x0 + x1) as f64 / 2.0, (ramp_bottom + y1) as f64 / 2.0);
+    let (rx, ry) = (0.11 * WIDTH as f64, 0.17 * HEIGHT as f64);
+    let mut data = vec![[0.0f32; 3]; WIDTH * HEIGHT];
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let i = y * WIDTH + x;
+            let inside = (x0..x1).contains(&x) && (y0..y1).contains(&y);
+            let (u, v) = ((x as f64 - cx) / rx, (y as f64 - cy) / ry);
+            let r = if !inside {
+                None
+            } else if y < ramp_bottom {
+                let w = (x1 - x0) as f64 / 12.0;
+                let k = (((x - x0) as f64 / w) as usize).min(11);
+                let fx = (x - x0) as f64 / w - k as f64;
+                let fy = (y - y0) as f64 / (ramp_bottom - y0) as f64;
+                if (0.2..0.8).contains(&fx) && (0.2..0.8).contains(&fy) {
+                    patches[1 + k].pixels.push(i);
+                }
+                Some([ramp[k]; 3])
+            } else if u * u + v * v <= 1.0 {
+                if u * u + v * v <= 0.25 {
+                    patches[0].pixels.push(i);
+                }
+                Some(reflectance([face[0] + 3.0 * u, face[1], face[2]]))
+            } else {
+                Some(back)
             };
             data[i] = scan(r, ev).map(|v| v as f32);
         }

@@ -160,7 +160,7 @@ choice_enum!(
 );
 
 /// Version of the conversion engine; part of [`AnalysisKey`].
-pub const ENGINE_VERSION: u32 = 3;
+pub const ENGINE_VERSION: u32 = 4;
 
 /// Every parameter that influences how a frame is rendered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -208,6 +208,10 @@ pub struct Settings {
     pub glow: f32,
     /// "Lab Fade"
     pub fade: f32,
+    /// Hyper Tone: compression (0..100) of the large-area tones above and
+    /// below the frame's key, i.e. automatic burning and dodging.
+    pub hyper_tone_highlights: f32,
+    pub hyper_tone_shadows: f32,
     /// Moves the white end into the density range (− recovers highlights).
     pub white_clip: f32,
     /// Moves the black end into the density range (− recovers shadows).
@@ -273,6 +277,8 @@ impl Default for Settings {
             blacks: 0.0,
             glow: 0.0,
             fade: 0.0,
+            hyper_tone_highlights: 0.0,
+            hyper_tone_shadows: 0.0,
             white_clip: 0.0,
             black_clip: 0.0,
             wb_mode: WbMode::AutoNeutral,

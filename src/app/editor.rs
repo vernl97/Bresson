@@ -1181,6 +1181,23 @@ impl NlpApp {
                 &mut s.blacks,
                 "Black point: up = matte, down = deeper",
             );
+            if widgets::fold_with(ui, "Hyper Tone", false) {
+                let amount = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
+                    fl_slider(ui, l, v, 0.0..=100.0, 0.0, 0, tip, None)
+                };
+                amount(
+                    ui,
+                    "Burn highlights",
+                    &mut s.hyper_tone_highlights,
+                    "Holds back large bright areas (sky, window light) while keeping their detail",
+                );
+                amount(
+                    ui,
+                    "Dodge shadows",
+                    &mut s.hyper_tone_shadows,
+                    "Opens large dark areas (backlit subjects, shade) while keeping their detail",
+                );
+            }
             if widgets::fold_with(ui, "Glow, fade & clipping", false) {
                 tone(ui, "Lab glow", &mut s.glow, "Silky compressed highlights");
                 tone(ui, "Lab fade", &mut s.fade, "Open, compressed deep shadows");

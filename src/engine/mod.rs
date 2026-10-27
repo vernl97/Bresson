@@ -5,6 +5,7 @@ pub mod color;
 pub mod curve;
 pub mod decode;
 pub mod demosaic;
+pub mod dodge;
 pub mod export;
 pub mod flat;
 pub mod frame;
@@ -13,5 +14,6 @@ pub mod pipeline;
 pub mod presets;
 pub mod settings;
 pub mod sidecar;
+pub mod skin;
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod testchart;

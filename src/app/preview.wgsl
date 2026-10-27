@@ -15,6 +15,10 @@ struct Params {
     lut: vec4<f32>,
     // Negative width, height.
     size: vec4<f32>,
+    // Dodge: key density, light and dark compression (0 = off), knee².
+    dodge: vec4<f32>,
+    // Dodge gain per channel.
+    gain: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -42,16 +46,17 @@ fn vs(@builtin(vertex_index) i: u32) -> VOut {
     return o;
 }
 
-fn density(uv: vec2<f32>) -> vec3<f32> {
+// Densities and (alpha) the low-pass density.
+fn density(uv: vec2<f32>) -> vec4<f32> {
     let dims = p.size.xy;
     let xy = uv * dims - 0.5;
     let f = fract(xy);
     let i0 = vec2<i32>(floor(xy));
     let mx = vec2<i32>(dims) - vec2<i32>(1, 1);
-    let a = textureLoad(neg, clamp(i0, vec2<i32>(0, 0), mx), 0).rgb;
-    let b = textureLoad(neg, clamp(i0 + vec2<i32>(1, 0), vec2<i32>(0, 0), mx), 0).rgb;
-    let c = textureLoad(neg, clamp(i0 + vec2<i32>(0, 1), vec2<i32>(0, 0), mx), 0).rgb;
-    let d = textureLoad(neg, clamp(i0 + vec2<i32>(1, 1), vec2<i32>(0, 0), mx), 0).rgb;
+    let a = textureLoad(neg, clamp(i0, vec2<i32>(0, 0), mx), 0);
+    let b = textureLoad(neg, clamp(i0 + vec2<i32>(1, 0), vec2<i32>(0, 0), mx), 0);
+    let c = textureLoad(neg, clamp(i0 + vec2<i32>(0, 1), vec2<i32>(0, 0), mx), 0);
+    let d = textureLoad(neg, clamp(i0 + vec2<i32>(1, 1), vec2<i32>(0, 0), mx), 0);
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
@@ -129,6 +134,15 @@ fn grey(v: f32) -> vec3<f32> {
     return mix(tables[base + i].xyz, tables[base + i + 1u].xyz, n.y);
 }
 
+// Saturation scale eased back to 1 on skin tones (engine::look::skin_kept).
+fn skin_kept(h: f32, s: f32, sat: f32) -> f32 {
+    let dh = abs(rem(h - 25.0 + 180.0, 360.0) - 180.0);
+    let hue = clamp(1.0 - dh / 20.0, 0.0, 1.0);
+    let chroma = clamp((0.75 - s) / 0.25, 0.0, 1.0);
+    let skin = hue * hue * (3.0 - 2.0 * hue) * chroma;
+    return sat + (1.0 - sat) * skin;
+}
+
 fn look(c: vec3<f32>) -> vec3<f32> {
     if (p.look.w > 0.5) {
         return c;
@@ -138,8 +152,9 @@ fn look(c: vec3<f32>) -> vec3<f32> {
     let s = hsv.y;
     let v = hsv.z;
     let k = p.look.x;
+    let sat = skin_kept(h, s, p.look.y);
     if (p.look.z < 0.5 || k <= 0.0) {
-        return hsv_to_rgb(h, min(s * p.look.y, 1.0), v);
+        return hsv_to_rgb(h, min(s * sat, 1.0), v);
     }
     let hp = rem(h, 360.0) / 360.0 * f32(HUES);
     let hi = u32(hp) % HUES;
@@ -161,7 +176,7 @@ fn look(c: vec3<f32>) -> vec3<f32> {
     let g = grey(v);
     let gv = (g.r + g.g + g.b) / 3.0;
     let v2 = v + (gv + acc.z - v) * k;
-    let s2 = clamp(s * (1.0 + (acc.y - 1.0) * k) * p.look.y, 0.0, 1.0);
+    let s2 = clamp(s * (1.0 + (acc.y - 1.0) * k) * sat, 0.0, 1.0);
     let o = hsv_to_rgb(h + acc.x * k, s2, clamp(v2, 0.0, 1.0));
     return o + (g - vec3<f32>(gv)) * (1.0 - s) * k;
 }
@@ -183,7 +198,16 @@ fn srgb_encode(v: f32) -> f32 {
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let uv = mix(p.uv.xy, p.uv.zw, in.uv);
-    let d = density(uv);
+    let n = density(uv);
+    // Dodge (see engine::dodge): offset from the low-pass density's
+    // departure from the key, nothing near it.
+    let u = n.a - p.dodge.x;
+    var g = p.dodge.z;
+    if (u > 0.0) {
+        g = p.dodge.y;
+    }
+    let off = -g * u * u * u / (u * u + p.dodge.w + 1e-9);
+    let d = n.rgb + off * p.gain.xyz;
     let pos = look(vec3<f32>(curve(0u, d.r), curve(1u, d.g), curve(2u, d.b)));
     let c = clamp(pos, vec3<f32>(0.0), vec3<f32>(1.0));
     let lin = vec3<f32>(srgb_decode(c.r), srgb_decode(c.g), srgb_decode(c.b));

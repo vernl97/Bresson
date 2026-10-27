@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use super::color;
 use super::curve::{self, ChannelLevels, CurveLut, Levels};
 use super::decode::{self, SourceImage};
+use super::dodge::{self, Dodge};
 use super::look::{self, Look};
 use super::presets;
 use super::settings::{AnalysisKey, FilmBase, ImageType, OutputSpace, RollMode, Settings, WbMode};
 use super::sidecar::RollData;
+use super::skin::{self, SkinTone};
 
 /// Long edge of the analysis rendition.
 pub const ANALYSIS_SIZE: usize = 600;
@@ -73,6 +75,9 @@ pub struct Analysis {
     /// The neutral axis the levels were fitted to, when the frame had one.
     #[serde(default)]
     pub axis: Option<NeutralAxis>,
+    /// The skin the midtone key was moved towards, when the frame had any.
+    #[serde(default)]
+    pub skin: Option<SkinTone>,
 }
 
 // ---- film base -------------------------------------------------------------------
@@ -376,25 +381,65 @@ fn channel_quantiles(buf: &Negative, t: ImageType) -> Levels {
         let lo = quantile(&mut v, lo_q);
         let hi = quantile(&mut v, hi_q).max(lo + 0.05);
         let mid = quantile(&mut v, 0.5);
-        ChannelLevels { lo, hi, mid }
+        ChannelLevels {
+            lo,
+            hi,
+            mid,
+            bow: 0.0,
+        }
     })
 }
 
-/// The image's neutral axis: per channel `D_c = a + b · D_green`.
+/// Smallest green density range skin is looked for in: a frame mostly at
+/// its black end (a flash at night) has its white end capped close to the
+/// black, with a flashed face far beyond it.
+const SKIN_RANGE: f64 = 0.8;
+
+/// The image's neutral axis: per channel `D_c = a + b · D_green`, plus
+/// `bend_c · p(D_green)` where the film's layers cross over (their toes and
+/// shoulders differ, so a grey's balance drifts from shadows to highlights).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct NeutralAxis {
     pub fit: [(f64, f64); 3],
-    /// Mean density of the tonal steps (a point on the axis).
+    /// Mean density of the tonal steps (a point on the line).
     pub centre: [f64; 3],
     /// Tonal steps (of 10) with enough near-neutral pixels.
     pub steps: usize,
+    /// Curvature of each channel's neutral curve (density per D² of green).
+    #[serde(default)]
+    pub bend: [f64; 3],
+    /// `[m, u, v]` of the quadratic `p(g) = (g − m)² − u·(g − m) − v`,
+    /// orthogonal to the line over the tonal steps, so the bend leaves the
+    /// fitted line as it is.
+    #[serde(default)]
+    pub basis: [f64; 3],
 }
 
 impl NeutralAxis {
+    fn p(&self, g: f64) -> f64 {
+        let [m, u, v] = self.basis;
+        let x = g - m;
+        x * x - u * x - v
+    }
+
     /// The grey of the axis at green density `g`.
     fn at(&self, g: f64) -> [f64; 3] {
-        self.fit.map(|(a, b)| a + b * g)
+        std::array::from_fn(|c| self.fit[c].0 + self.fit[c].1 * g + self.bend[c] * self.p(g))
     }
+}
+
+/// Fewest tonal steps from which a frame's neutral axis may bend.
+const BEND_STEPS: usize = 6;
+/// Largest departure (D) of a neutral curve from its straight line.
+const MAX_BEND_D: f64 = 0.05;
+
+/// The [`ChannelLevels::bow`] of a neutral curve with curvature `bend`
+/// (density per D² of green) over green span `span_g` and channel span
+/// `span_c`, bounded so the curve stays within [`MAX_BEND_D`] of the line.
+fn bow_for(bend: f64, span_g: f64, span_c: f64) -> f64 {
+    let span_c = span_c.max(1e-3);
+    let limit = curve::MAX_BOW.min(4.0 * MAX_BEND_D / span_c);
+    (-bend * span_g * span_g / span_c).clamp(-limit, limit)
 }
 
 /// Analysed levels: green's own density range, with red and blue placed on
@@ -427,11 +472,13 @@ pub fn levels_from_buffer(buf: &Negative, t: ImageType) -> (Levels, Option<Neutr
             // Keep the slope within reach of the channel's own range.
             let own_b = (own[c].hi - own[c].lo) / (own[1].hi - own[1].lo).max(1e-3);
             let b = b.clamp(own_b * 0.8, own_b * 1.25);
-            let at = |g: f64| fit.centre[c] + b * (g - fit.centre[1]);
+            let at = |g: f64| fit.centre[c] + b * (g - fit.centre[1]) + fit.bend[c] * fit.p(g);
+            let (lo, hi) = (at(l[1].lo), at(l[1].hi).max(at(l[1].lo) + 0.05));
             l[c] = ChannelLevels {
-                lo: at(l[1].lo),
-                hi: at(l[1].hi).max(at(l[1].lo) + 0.05),
+                lo,
+                hi,
                 mid: own[c].mid,
+                bow: bow_for(fit.bend[c], l[1].hi - l[1].lo, hi - lo),
             };
         }
         axis = Some(fit);
@@ -442,49 +489,150 @@ pub fn levels_from_buffer(buf: &Negative, t: ImageType) -> (Levels, Option<Neutr
 /// The neutral axis of an image: near-neutral pixels (normalised channels
 /// within 0.1 of each other under the current levels `l`), binned by green
 /// density into ten tonal steps, and a line `D_c = a + b · D_green` through
-/// the steps' median densities for each channel. Every step weighs the same,
-/// so a large area of one colour and tone can bias at most one step. `None`
-/// without near-neutral pixels in at least four steps.
+/// each step's grey (see [`neutral_cluster`]) for each channel. Every step weighs the same,
+/// so a large area of one colour and tone can bias at most one step. With
+/// [`BEND_STEPS`] steps or more the line also bends: a quadratic term fitted
+/// through the steps, like the gradation-balance curves a lab scanner keeps
+/// per film (Fuji US 6,160,634, EP 0 612 183). `None` without near-neutral
+/// pixels in at least four steps.
 fn neutral_axis(buf: &Negative, l: &Levels, t: ImageType) -> Option<NeutralAxis> {
     const BINS: usize = 10;
-    let mut bins: Vec<Vec<[f32; 3]>> = vec![Vec::new(); BINS];
+    // Near-neutral pixels per tonal step, with their colour offset from the
+    // current axis (red and blue against green, normalised).
+    let mut bins: Vec<Vec<([f32; 3], [f64; 2])>> = vec![Vec::new(); BINS];
     for p in &buf.data {
         let x: [f64; 3] = std::array::from_fn(|c| normalised(l, t, c, p[c] as f64));
         let (lo, hi) = x
             .iter()
             .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
         if hi - lo < 0.1 && (0.03..0.97).contains(&x[1]) {
-            bins[((x[1] * BINS as f64) as usize).min(BINS - 1)].push(*p);
+            bins[((x[1] * BINS as f64) as usize).min(BINS - 1)]
+                .push((*p, [x[0] - x[1], x[2] - x[1]]));
         }
     }
     let min_count = (buf.data.len() / 500).max(8);
     let steps: Vec<[f64; 3]> = bins
         .into_iter()
         .filter(|b| b.len() >= min_count)
-        .map(|b| std::array::from_fn(|c| median(b.iter().map(|p| p[c] as f64).collect())))
+        .map(|b| {
+            neutral_cluster(&b, min_count).unwrap_or_else(|| {
+                std::array::from_fn(|c| median(b.iter().map(|p| p.0[c] as f64).collect()))
+            })
+        })
         .collect();
+    let mut steps = steps;
     if steps.len() < 4 {
         return None;
     }
+    // A step whose near-neutral pixels are mostly one coloured object sits
+    // off the axis: drop the worst step while it is further off than the
+    // rest justify (EP 0 612 183's band around the axis).
+    let mut fit = line_fit(&steps);
+    while steps.len() > 4 {
+        let off: Vec<f64> = steps
+            .iter()
+            .map(|s| [0, 2].map(|c| (s[c] - fit[c].0 - fit[c].1 * s[1]).abs()))
+            .map(|[r, b]| r.max(b))
+            .collect();
+        let (worst, &max) = off
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap();
+        if max <= (3.0 * 1.4826 * median(off.clone())).max(0.02) {
+            break;
+        }
+        steps.remove(worst);
+        fit = line_fit(&steps);
+    }
     let n = steps.len() as f64;
-    let fit = std::array::from_fn(|c| {
+    let mut axis = NeutralAxis {
+        fit,
+        centre: std::array::from_fn(|c| steps.iter().map(|s| s[c]).sum::<f64>() / n),
+        steps: steps.len(),
+        bend: [0.0; 3],
+        basis: [0.0; 3],
+    };
+    if steps.len() >= BEND_STEPS {
+        let m = axis.centre[1];
+        let x: Vec<f64> = steps.iter().map(|s| s[1] - m).collect();
+        let x2: f64 = x.iter().map(|v| v * v).sum();
+        let x3: f64 = x.iter().map(|v| v * v * v).sum();
+        if x2 > 1e-6 {
+            axis.basis = [m, x3 / x2, x2 / n];
+            let p: Vec<f64> = steps.iter().map(|s| axis.p(s[1])).collect();
+            let pp: f64 = p.iter().map(|v| v * v).sum();
+            // Bend only as far as the steps reach across green's range: a
+            // curve fitted to part of the range must not be extrapolated.
+            let (g0, g1) = steps
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(a, b), s| (a.min(s[1]), b.max(s[1])));
+            let reach = (g1 - g0) / (l[1].hi - l[1].lo).max(1e-3);
+            let trust = ((reach - 0.5) / 0.3).clamp(0.0, 1.0);
+            if pp > 1e-12 {
+                for c in [0, 2] {
+                    axis.bend[c] =
+                        trust * steps.iter().zip(&p).map(|(s, p)| s[c] * p).sum::<f64>() / pp;
+                }
+            }
+        }
+    }
+    Some(axis)
+}
+
+/// The grey of one tonal step: the cluster of near-neutral pixels around
+/// the current axis, found by shifting a shrinking window from the axis to
+/// the densest colour nearby. A coloured surface that is lit across many
+/// tones (skin, sand, wood) can outnumber the greys in every step and pull
+/// a plain median onto itself; the window stays on the greys as long as
+/// they form a cluster of their own. Median densities of the cluster, or
+/// `None` when no cluster of `min_count / 2` pixels sits on the axis or at
+/// the step's median colour (the step then takes its plain median).
+fn neutral_cluster(px: &[([f32; 3], [f64; 2])], min_count: usize) -> Option<[f64; 3]> {
+    let inside = |centre: [f64; 2], h: f64| {
+        px.iter()
+            .filter(move |(_, o)| (o[0] - centre[0]).abs() < h && (o[1] - centre[1]).abs() < h)
+    };
+    let shift = |mut centre: [f64; 2], hs: &[f64]| {
+        for &h in hs {
+            let (sum, n) = inside(centre, h).fold(([0.0; 2], 0usize), |(s, n), (_, o)| {
+                ([s[0] + o[0], s[1] + o[1]], n + 1)
+            });
+            if n == 0 {
+                break;
+            }
+            centre = sum.map(|v| v / n as f64);
+        }
+        centre
+    };
+    let enough = |n: usize| n >= (min_count / 2).max(8);
+    // From the axis; when no greys sit near it, from the step's median.
+    let mut centre = shift([0.0; 2], &[0.03, 0.03, 0.02, 0.02]);
+    if !enough(inside(centre, 0.02).count()) {
+        let m = [0, 1].map(|k| median(px.iter().map(|(_, o)| o[k]).collect()));
+        centre = shift(m, &[0.05, 0.03, 0.02, 0.02]);
+    }
+    let cluster: Vec<[f32; 3]> = inside(centre, 0.02).map(|(p, _)| *p).collect();
+    enough(cluster.len())
+        .then(|| std::array::from_fn(|c| median(cluster.iter().map(|p| p[c] as f64).collect())))
+}
+
+/// Least-squares lines `D_c = a + b · D_green` through tonal steps.
+fn line_fit(steps: &[[f64; 3]]) -> [(f64, f64); 3] {
+    let n = steps.len() as f64;
+    std::array::from_fn(|c| {
         let mx = steps.iter().map(|s| s[1]).sum::<f64>() / n;
         let my = steps.iter().map(|s| s[c]).sum::<f64>() / n;
         let sxx: f64 = steps.iter().map(|s| (s[1] - mx).powi(2)).sum();
         let sxy: f64 = steps.iter().map(|s| (s[1] - mx) * (s[c] - my)).sum();
         let b = if sxx > 1e-9 { sxy / sxx } else { 1.0 };
         (my - b * mx, b)
-    });
-    Some(NeutralAxis {
-        fit,
-        centre: std::array::from_fn(|c| steps.iter().map(|s| s[c]).sum::<f64>() / n),
-        steps: steps.len(),
     })
 }
 
 /// Normalised density (0 prints black … 1 prints white).
 fn normalised(l: &Levels, t: ImageType, c: usize, d: f64) -> f64 {
-    let x = (d - l[c].lo) / (l[c].hi - l[c].lo).max(1e-6);
+    let x = l[c].normalise(d);
     if t == ImageType::Positive { 1.0 - x } else { x }
 }
 
@@ -559,19 +707,48 @@ pub fn edit_only_levels() -> Levels {
         lo: 0.0,
         hi: 1.0,
         mid: 0.5,
+        bow: 0.0,
     }; 3]
 }
 
 /// Full conversion analysis of a prepared negative. Edit Only frames skip it.
 pub fn analyze(neg: &Negative, s: &Settings, base: [f32; 3], ev: Option<f64>) -> Analysis {
-    let (levels, auto_wb, axis) = if s.image_type == ImageType::EditOnly {
-        (edit_only_levels(), AutoWb::default(), None)
+    analyze_skin(neg, s, base, ev, true)
+}
+
+/// [`analyze`], optionally without keying the midtone on skin.
+fn analyze_skin(
+    neg: &Negative,
+    s: &Settings,
+    base: [f32; 3],
+    ev: Option<f64>,
+    use_skin: bool,
+) -> Analysis {
+    let (mut levels, auto_wb, axis, skin) = if s.image_type == ImageType::EditOnly {
+        (edit_only_levels(), AutoWb::default(), None, None)
     } else {
         let buf = analysis_buffer(neg, s);
         let (levels, axis) = levels_from_buffer(&buf, s.image_type);
         let wb = auto_wb(&buf, &levels, axis.as_ref(), s.image_type);
-        (levels, wb, axis)
+        let skin = (use_skin && s.image_type == ImageType::Negative)
+            .then(|| {
+                let f = (SKIN_RANGE / (levels[1].hi - levels[1].lo).max(1e-3)).max(1.0);
+                let wide = levels.map(|c| ChannelLevels {
+                    hi: c.lo + (c.hi - c.lo) * f,
+                    ..c
+                });
+                // Back to the frame's own levels.
+                skin::find(&buf, &wide).map(|sk| SkinTone {
+                    tone: levels[1].normalise(wide[1].density(sk.tone)),
+                    ..sk
+                })
+            })
+            .flatten();
+        (levels, wb, axis, skin)
     };
+    if let Some(sk) = &skin {
+        levels = skin::keyed(&levels, sk);
+    }
     Analysis {
         levels,
         auto_wb,
@@ -579,6 +756,7 @@ pub fn analyze(neg: &Negative, s: &Settings, base: [f32; 3], ev: Option<f64>) ->
         key: s.analysis_key(),
         ev,
         axis,
+        skin,
     }
 }
 
@@ -600,23 +778,53 @@ pub fn wb_for_mode(mode: WbMode, a: &AutoWb) -> Option<(f32, f32)> {
 // ---- roll ---------------------------------------------------------------------------
 
 /// A roll's colour balance: every channel's density on the roll's neutral
-/// axis, `D_c = offset_c + slope_c · D_green`. The slopes are the film's
-/// (its layers' H&D gamma ratios), the offsets the roll's filtration.
+/// axis, `D_c = offset_c + slope_c · D_green + bend_c · (D_green − pivot)²`.
+/// The slopes and bends are the film's (its layers' H&D gamma ratios and
+/// crossover), the offsets the roll's filtration.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RollBalance {
     pub slope: [f64; 3],
     pub offset: [f64; 3],
+    #[serde(default)]
+    pub bend: [f64; 3],
+    /// Green density the bends are centred on.
+    #[serde(default)]
+    pub pivot: f64,
+    /// How far from the pivot (D of green) the bends were measured; they
+    /// level off beyond. `None` follows them everywhere.
+    #[serde(default)]
+    pub reach: Option<f64>,
 }
 
 impl RollBalance {
+    /// The bend's departure at green `g`; it levels off beyond its reach
+    /// rather than growing without the frames to show it.
+    fn bent(&self, c: usize, g: f64) -> f64 {
+        let r = self.reach.unwrap_or(f64::INFINITY);
+        self.bend[c] * (g - self.pivot).clamp(-r, r).powi(2)
+    }
+
+    fn at(&self, c: usize, g: f64) -> f64 {
+        self.offset[c] + self.slope[c] * g + self.bent(c, g)
+    }
+
+    /// Offsets that put the axis through the grey `point`.
+    fn through(&self, point: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|c| point[c] - self.slope[c] * point[1] - self.bent(c, point[1]))
+    }
+
     /// Levels for green levels `g`, red and blue on the roll's axis.
     fn levels(&self, g: ChannelLevels) -> Levels {
         std::array::from_fn(|c| {
-            let at = |d: f64| self.offset[c] + self.slope[c] * d;
+            let (lo, hi) = (
+                self.at(c, g.lo),
+                self.at(c, g.hi).max(self.at(c, g.lo) + 0.05),
+            );
             ChannelLevels {
-                lo: at(g.lo),
-                hi: at(g.hi).max(at(g.lo) + 0.05),
-                mid: at(g.mid),
+                lo,
+                hi,
+                mid: self.at(c, g.mid),
+                bow: bow_for(self.bend[c], g.hi - g.lo, hi - lo),
             }
         })
     }
@@ -624,8 +832,9 @@ impl RollBalance {
     /// The same balance for a scan `d` denser in every channel.
     fn shifted(&self, d: f64) -> Self {
         Self {
-            slope: self.slope,
             offset: std::array::from_fn(|c| self.offset[c] + d * (1.0 - self.slope[c])),
+            pivot: self.pivot + d,
+            ..*self
         }
     }
 }
@@ -699,6 +908,7 @@ fn shift_levels(l: &Levels, d: f64) -> Levels {
         lo: c.lo + d,
         hi: c.hi + d,
         mid: c.mid + d,
+        ..c
     })
 }
 
@@ -724,26 +934,34 @@ fn outliers(v: &[f64], floor: f64) -> Vec<usize> {
     (0..v.len()).filter(|&i| (v[i] - m).abs() > limit).collect()
 }
 
-/// A frame's neutral axis: the fitted one, or the line through its
-/// channel ranges when it had too little near-neutral content.
-fn frame_axis(a: &Analysis) -> ([f64; 3], [f64; 3]) {
+/// A frame's neutral axis as (slopes at a grey on it, that grey, bends):
+/// the fitted one, or the line through its channel ranges when it had too
+/// little near-neutral content. Bends only from enough tonal steps.
+fn frame_axis(a: &Analysis) -> ([f64; 3], [f64; 3], Option<[f64; 3]>) {
     match &a.axis {
-        Some(x) => (x.fit.map(|f| f.1), x.centre),
+        Some(x) => {
+            let bend = (x.steps >= BEND_STEPS).then_some(x.bend);
+            let k = bend.unwrap_or([0.0; 3]);
+            // p'(m) = −u at the steps' mean green.
+            let slope = std::array::from_fn(|c| x.fit[c].1 - k[c] * x.basis[1]);
+            (slope, x.at(x.centre[1]), bend)
+        }
         None => {
             let l = &a.levels;
             let span_g = (l[1].hi - l[1].lo).max(1e-3);
             (
                 std::array::from_fn(|c| (l[c].hi - l[c].lo) / span_g),
                 std::array::from_fn(|c| l[c].mid),
+                None,
             )
         }
     }
 }
 
 /// Roll aggregation, the way a lab prints a roll: one colour balance for
-/// all frames. The channel slopes belong to the film, so the roll takes the
-/// median of the frames' fitted slopes; a single frame's fit also follows
-/// its light (open shade turns its shadows blue). The roll's filtration is
+/// all frames. The channel slopes and crossover belong to the film, so the
+/// roll takes the median of the frames' fitted slopes and bends; a single
+/// frame's fit also follows its light (open shade turns its shadows blue). The roll's filtration is
 /// the median of the frames' axis offsets under those slopes, leaving out
 /// frames whose balance is far from the rest (robust outlier test, at
 /// least 0.05 D off). The roll's one-exposure levels take the median green
@@ -755,18 +973,40 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
         (Some(c), Some(e)) => -ev_density(e - c),
         _ => 0.0,
     };
-    let axes: Vec<([f64; 3], [f64; 3])> = frames
+    let axes: Vec<_> = frames
         .iter()
         .map(|a| {
-            let (slope, centre) = frame_axis(a);
-            (slope, centre.map(|v| v + shift(a)))
+            let (slope, grey, bend) = frame_axis(a);
+            (slope, grey.map(|v| v + shift(a)), bend)
         })
         .collect();
-    let slope: [f64; 3] = std::array::from_fn(|c| median(axes.iter().map(|a| a.0[c]).collect()));
-    let offsets: Vec<[f64; 3]> = axes
-        .iter()
-        .map(|(_, centre)| std::array::from_fn(|c| centre[c] - slope[c] * centre[1]))
-        .collect();
+    let bends: Vec<[f64; 3]> = axes.iter().filter_map(|a| a.2).collect();
+    let bend: [f64; 3] = std::array::from_fn(|c| median(bends.iter().map(|b| b[c]).collect()));
+    let pivot = median(frames.iter().map(|a| a.levels[1].mid + shift(a)).collect());
+    // The bends were measured over the frames' green ranges: half the
+    // typical range either side of the pivot.
+    let reach = median(
+        frames
+            .iter()
+            .map(|a| (a.levels[1].hi - a.levels[1].lo) / 2.0)
+            .collect(),
+    );
+    // Each frame's slope at its own grey, carried along the roll's bend to
+    // the pivot.
+    let shape = RollBalance {
+        slope: std::array::from_fn(|c| {
+            median(
+                axes.iter()
+                    .map(|(s, g, _)| s[c] - 2.0 * bend[c] * (g[1] - pivot))
+                    .collect(),
+            )
+        }),
+        offset: [0.0; 3],
+        bend,
+        pivot,
+        reach: Some(reach),
+    };
+    let offsets: Vec<[f64; 3]> = axes.iter().map(|a| shape.through(a.1)).collect();
     let mut excluded: Vec<usize> = Vec::new();
     if frames.len() >= 3 {
         for c in [0, 2] {
@@ -780,8 +1020,8 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
         .filter(|i| !excluded.contains(i))
         .collect();
     let balance = RollBalance {
-        slope,
         offset: std::array::from_fn(|c| median(kept.iter().map(|&i| offsets[i][c]).collect())),
+        ..shape
     };
     let green = |f: fn(&ChannelLevels) -> f64| {
         median(
@@ -794,6 +1034,7 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
         lo: green(|c| c.lo),
         hi: green(|c| c.hi),
         mid: green(|c| c.mid),
+        bow: 0.0,
     });
     let mean: [f64; 3] = std::array::from_fn(|c| {
         kept.iter()
@@ -819,8 +1060,10 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
 }
 
 /// Below this auto WB confidence a frame's own colour balance is not
-/// trusted.
+/// trusted; from [`HIGH_CONFIDENCE`] it is trusted fully, and in between
+/// the frame's balance is blended with the roll's.
 pub const LOW_CONFIDENCE: f32 = 0.4;
+const HIGH_CONFIDENCE: f32 = 0.6;
 
 /// Pick the levels a frame renders with: its own analysis, or the roll's.
 /// A roll always prints with the film's slopes from the roll. In Lab mode
@@ -846,11 +1089,29 @@ pub fn levels_for(
     let Some(f) = frame.filter(|_| s.roll_mode == RollMode::Lab) else {
         return Some(balance.levels(shift_levels(&roll.levels, d)[1]));
     };
-    let balance = if f.auto_wb.confidence >= LOW_CONFIDENCE {
-        let (_, centre) = frame_axis(f);
+    let trust = ((f.auto_wb.confidence - LOW_CONFIDENCE) / (HIGH_CONFIDENCE - LOW_CONFIDENCE))
+        .clamp(0.0, 1.0) as f64;
+    let balance = if trust > 0.0 {
+        let (_, grey, bend) = frame_axis(f);
+        // The film's slopes, carried to this frame's grey; the bend from
+        // where the frame sits on the film's curve (toe or shoulder), when
+        // the frame had the tones to show it.
+        let r = balance.reach.unwrap_or(f64::INFINITY);
+        let u = (grey[1] - balance.pivot).clamp(-r, r);
+        let local = RollBalance {
+            slope: std::array::from_fn(|c| balance.slope[c] + 2.0 * balance.bend[c] * u),
+            offset: [0.0; 3],
+            bend: bend.unwrap_or([0.0; 3]),
+            pivot: grey[1],
+            reach: None,
+        };
+        // Partly trusted: the frame's grey moves only part of the way from
+        // the roll's grey at the same green density.
+        let roll_grey: [f64; 3] = std::array::from_fn(|c| balance.at(c, grey[1]));
+        let grey = std::array::from_fn(|c| roll_grey[c] + trust * (grey[c] - roll_grey[c]));
         RollBalance {
-            slope: balance.slope,
-            offset: std::array::from_fn(|c| centre[c] - balance.slope[c] * centre[1]),
+            offset: local.through(grey),
+            ..local
         }
     } else {
         balance
@@ -868,6 +1129,7 @@ pub struct Renderer {
     out_m: [[f32; 3]; 3],
     out_enc: color::EncodeLut,
     sharpen: Option<presets::SharpenDef>,
+    dodge: Option<Dodge>,
 }
 
 impl Renderer {
@@ -884,6 +1146,7 @@ impl Renderer {
             out_m,
             out_enc: color::EncodeLut::new(f),
             sharpen: presets::sharpening(s.sharpening),
+            dodge: levels.and_then(|l| Dodge::new(s, l)),
         }
     }
 
@@ -908,6 +1171,11 @@ impl Renderer {
     /// linear MelissaRGB → sRGB matrix of a display preview.
     pub fn gpu_parts(&self) -> (&CurveLut, Option<&Look>, [[f32; 3]; 3]) {
         (&self.lut, self.converted.then_some(&self.look), self.out_m)
+    }
+
+    /// The dodge applied before the curves (see [`dodge`]), if any.
+    pub fn dodge(&self) -> Option<&Dodge> {
+        self.dodge.as_ref()
     }
 
     /// Encoded MelissaRGB positive (before output conversion).
@@ -944,11 +1212,23 @@ impl Renderer {
     /// Render a whole buffer to encoded output pixels. `sharpen_scale` is the
     /// ratio of this buffer to full resolution (0 disables sharpening).
     pub fn render(&self, neg: &Negative, sharpen_scale: f32) -> Vec<[f32; 3]> {
-        let mut out: Vec<[f32; 3]> = neg
-            .data
-            .par_iter()
-            .map(|p| self.output(self.positive(*p)))
-            .collect();
+        let mut out: Vec<[f32; 3]> = match &self.dodge {
+            Some(dg) => neg
+                .data
+                .par_iter()
+                .zip(dodge::low_pass(neg))
+                .map(|(p, low)| {
+                    let o = dg.offset(low);
+                    let d = std::array::from_fn(|c| p[c] + o * dg.gain[c]);
+                    self.output(self.positive(d))
+                })
+                .collect(),
+            None => neg
+                .data
+                .par_iter()
+                .map(|p| self.output(self.positive(*p)))
+                .collect(),
+        };
         if let (Some(sd), true) = (self.sharpen, sharpen_scale > 0.0 && self.converted) {
             look::sharpen(&mut out, neg.width, neg.height, sd, sharpen_scale);
         }
@@ -987,12 +1267,14 @@ mod tests {
                 lo: lo[c],
                 hi: hi[c],
                 mid: (lo[c] + hi[c]) / 2.0,
+                bow: 0.0,
             }),
             auto_wb: AutoWb::default(),
             base: [1.0; 3],
             key: Settings::default().analysis_key(),
             ev: None,
             axis: None,
+            skin: None,
         }
     }
 
@@ -1202,6 +1484,7 @@ mod tests {
             lo: 0.1,
             hi: 1.2,
             mid: 0.6,
+            bow: 0.0,
         }; 3];
         let n = 65536;
         let neg = Negative {
@@ -1483,16 +1766,18 @@ mod tests {
             m0.neutral_cast_max,
             m1.neutral_cast_max
         );
-        // Even light: neutral C* 0.36.
+        // Even light: neutral C* 0.31 (max 0.94).
         assert!(
-            m0.neutral_cast > 0.8,
+            m0.neutral_cast_max > 1.5,
             "the falloff shows without correction"
         );
-        assert!(m1.neutral_cast < 0.45, "neutral C* {}", m1.neutral_cast);
+        assert!(m1.neutral_cast < 0.4, "neutral C* {}", m1.neutral_cast);
     }
 
     /// Auto-Neutral on scenes dominated by one colour (foliage, sunset sky,
-    /// skin-toned interior): the grey ramp and neutral patches must stay grey.
+    /// skin-toned interior), also when the colour is lit across many tones
+    /// and so reaches every tonal step (skin, sand, wood, a red rug, grass):
+    /// the grey ramp and neutral patches must stay grey.
     #[test]
     fn dominated_scenes_stay_neutral() {
         use crate::engine::testchart::{dominated, neutral_cast};
@@ -1519,13 +1804,197 @@ mod tests {
             worst = worst.max(mean);
         }
         eprintln!("dominated worst neutral C* {worst:.2}");
+        let mut shaded = 0.0f64;
+        for (name, field) in [
+            ("skin", [62.0, 13.0, 17.0]),
+            ("sand", [70.0, 3.0, 18.0]),
+            ("wood", [48.0, 10.0, 24.0]),
+            ("rug", [40.0, 45.0, 25.0]),
+            ("grass", [50.0, -20.0, 25.0]),
+        ] {
+            let chart = crate::engine::testchart::dominated_shaded(0.0, field, 30.0);
+            let a = analyse_chart(&chart, &s);
+            let (mean, max) = neutral_cast(&chart, &convert_chart(&chart, &s, &a, None));
+            eprintln!("shaded {name}: neutral C* {mean:.2} (max {max:.2})");
+            shaded = shaded.max(mean);
+        }
+        eprintln!("shaded worst neutral C* {shaded:.2}");
+        // Median per tonal step: skin 7.70, sand 8.21, wood 3.21, rug 0.58,
+        // grass 3.68.
+        assert!(shaded < 0.6, "shaded scene neutral C* {shaded}");
         // Plugin-port engine: foliage 1.01, sunset 1.67, interior 8.78,
         // sky 15.40.
-        assert!(worst < 0.8, "dominated scene neutral C* {worst}");
+        assert!(worst < 0.5, "dominated scene neutral C* {worst}");
     }
 
     /// Conversion quality on the physically modelled chart: colour accuracy,
     /// neutrality, and consistency of a roll shot at −1, 0 and +1 EV.
+    /// On a film whose layers cross over (soft blue toe, early red
+    /// shoulder) a straight neutral axis leaves the shadows and highlights
+    /// tinted; the bent one keeps the whole grey scale neutral, in a single
+    /// frame and across a roll.
+    #[test]
+    fn crossover_film_stays_neutral() {
+        use crate::engine::testchart::{CROSSOVER, measure, negative_on};
+        let s = chart_settings();
+        let straight = |a: &Analysis| Analysis {
+            levels: a.levels.map(|c| ChannelLevels { bow: 0.0, ..c }),
+            ..a.clone()
+        };
+        let charts: Vec<_> = [-1.0, 0.0, 1.0]
+            .into_iter()
+            .map(|ev| negative_on(&CROSSOVER, ev))
+            .collect();
+        let analyses: Vec<_> = charts.iter().map(|c| analyse_chart(c, &s)).collect();
+        let cast = |c, a: &Analysis, roll| measure(c, &convert_chart(c, &s, a, roll)).neutral_cast;
+        let bent = charts.iter().zip(&analyses).map(|(c, a)| cast(c, a, None));
+        let flat = charts
+            .iter()
+            .zip(&analyses)
+            .map(|(c, a)| cast(c, &straight(a), None));
+        let (bent, flat) = (bent.fold(0.0, f64::max), flat.fold(0.0, f64::max));
+        let (agg, _) = aggregate_roll(&analyses, None);
+        let roll = RollData {
+            base: analyses[1].base,
+            ..roll_of(&agg, 3)
+        };
+        let rolled = charts
+            .iter()
+            .zip(&analyses)
+            .map(|(c, a)| cast(c, a, Some(&roll)))
+            .fold(0.0, f64::max);
+        eprintln!("crossover: neutral C* straight {flat:.2}, bent {bent:.2}, roll {rolled:.2}");
+        assert!(bent < 0.3 * flat, "bent {bent} vs straight {flat}");
+        assert!(rolled < 0.4 * flat, "roll {rolled} vs straight {flat}");
+    }
+
+    /// Backlit against a bright sky or flashed at night, a print exposed
+    /// for the frame's median gets the face wrong; keyed on the skin it
+    /// lands near where a plain background prints it.
+    #[test]
+    fn faces_print_at_their_density() {
+        use crate::engine::testchart::{patch_lab, portrait};
+        let s = chart_settings();
+        let face = [62.0, 14.0, 17.0];
+        let face_l = |back: [f64; 3], skin: bool| {
+            let chart = portrait(0.0, back, face);
+            let base = resolve_base(&chart.src, &s, None);
+            let neg = prepare_negative(&chart.src, &s, base);
+            let a = analyze_skin(&neg, &s, base, None, skin);
+            (
+                patch_lab(&chart, &convert_chart(&chart, &s, &a, None))[0][0],
+                a.skin,
+            )
+        };
+        let (reference, _) = face_l([50.0, 0.0, 0.0], false);
+        let (keyed_ref, found) = face_l([50.0, 0.0, 0.0], true);
+        eprintln!("face L* on grey {reference:.1}, keyed {keyed_ref:.1}, skin {found:?}");
+        assert!(found.is_some(), "the face is found");
+        assert!(
+            (keyed_ref - reference).abs() < 4.0,
+            "plain background moves"
+        );
+        for (name, back) in [
+            ("backlit", [92.0, -2.0, -10.0]),
+            ("night", [10.0, 0.0, 0.0]),
+        ] {
+            let (median, _) = face_l(back, false);
+            let (keyed, skin) = face_l(back, true);
+            eprintln!("{name}: face L* median {median:.1}, keyed {keyed:.1}, skin {skin:?}");
+            assert!(
+                (keyed - reference).abs() < 0.6 * (median - reference).abs(),
+                "{name}: keyed {keyed} median {median} reference {reference}"
+            );
+        }
+    }
+
+    /// Hyper Tone lifts a dark subject against a bright sky and keeps the
+    /// shading inside it; a scene whose large areas sit near its key is
+    /// left as it was.
+    #[test]
+    fn hyper_tone_dodges_large_areas_only() {
+        use crate::engine::testchart::{patch_lab, portrait};
+        let s = chart_settings();
+        let dodged = Settings {
+            hyper_tone_highlights: 100.0,
+            hyper_tone_shadows: 100.0,
+            ..chart_settings()
+        };
+        let render = |chart: &crate::engine::testchart::Chart, s: &Settings| {
+            let base = resolve_base(&chart.src, s, None);
+            let neg = prepare_negative(&chart.src, s, base);
+            let a = analyze_skin(&neg, s, base, None, false);
+            convert_chart(chart, s, &a, None)
+        };
+        // L* across the face (shaded 6 L*): right edge minus left edge.
+        let shading = |chart: &crate::engine::testchart::Chart, px: &[[f32; 3]]| {
+            let w = crate::engine::testchart::WIDTH;
+            let face = &chart.patches[0].pixels;
+            let (x0, x1) = face
+                .iter()
+                .fold((usize::MAX, 0), |(a, b), &i| (a.min(i % w), b.max(i % w)));
+            let side = |x: usize| {
+                let v: Vec<[f32; 3]> = face
+                    .iter()
+                    .filter(|&&i| (i % w).abs_diff(x) < 3)
+                    .map(|&i| px[i])
+                    .collect();
+                let n = v.len() as f32;
+                let m: [f32; 3] = std::array::from_fn(|c| v.iter().map(|p| p[c]).sum::<f32>() / n);
+                color::xyz_to_lab(
+                    color::mat_vec(
+                        &color::rgb_to_xyz(&color::SRGB),
+                        m.map(|v| color::srgb_decode(v) as f64),
+                    ),
+                    color::D65,
+                )[0]
+            };
+            side(x1) - side(x0)
+        };
+        let face_l =
+            |chart: &crate::engine::testchart::Chart, px: &[[f32; 3]]| patch_lab(chart, px)[0][0];
+        let chart = portrait(0.0, [92.0, -2.0, -10.0], [40.0, 12.0, 15.0]);
+        let (before, after) = (render(&chart, &s), render(&chart, &dodged));
+        let (l0, l1) = (face_l(&chart, &before), face_l(&chart, &after));
+        // The face printed undodged with the exposure that makes it as light.
+        let (mut lo, mut hi) = (0.0f32, 5.0f32);
+        for _ in 0..20 {
+            let e = (lo + hi) / 2.0;
+            let lit = Settings {
+                print_exposure: e,
+                ..chart_settings()
+            };
+            if face_l(&chart, &render(&chart, &lit)) < l1 {
+                lo = e
+            } else {
+                hi = e
+            }
+        }
+        let lit = render(
+            &chart,
+            &Settings {
+                print_exposure: lo,
+                ..chart_settings()
+            },
+        );
+        let (k0, k1) = (shading(&chart, &lit), shading(&chart, &after));
+        eprintln!(
+            "hyper tone: dark face L* {l0:.1} -> {l1:.1}; shading {k1:.2} L*, printed lighter {k0:.2} L*"
+        );
+        assert!(l1 > l0 + 4.0, "the face is dodged");
+        assert!(k1 > 0.8 * k0, "the face keeps its shading");
+        let chart = portrait(0.0, [50.0, 0.0, 0.0], [55.0, 12.0, 15.0]);
+        let (l0, l1) = (
+            patch_lab(&chart, &render(&chart, &s))[0][0],
+            patch_lab(&chart, &render(&chart, &dodged))[0][0],
+        );
+        eprintln!("hyper tone: face on grey L* {l0:.1} -> {l1:.1}");
+        assert!(
+            (l1 - l0).abs() < 1.5,
+            "a scene near its key moves {l0} -> {l1}"
+        );
+    }
+
     #[test]
     fn chart_quality() {
         use crate::engine::testchart::{measure, negative};
@@ -1598,15 +2067,15 @@ mod tests {
             "tone-matched dE00 {}",
             m.tone_matched_de
         );
-        assert!(m.neutral_cast < 0.45, "neutral C* {}", m.neutral_cast);
+        assert!(m.neutral_cast < 0.4, "neutral C* {}", m.neutral_cast);
         assert!(
             m.neutral_cast_max < 1.0,
             "neutral C* max {}",
             m.neutral_cast_max
         );
-        assert!(frame_spread < 0.75, "frame spread {frame_spread}");
-        assert!(roll_spread < 0.9, "roll spread {roll_spread}");
-        assert!(roll_cast < 0.85, "roll neutral C* {roll_cast}");
+        assert!(frame_spread < 0.65, "frame spread {frame_spread}");
+        assert!(roll_spread < 0.65, "roll spread {roll_spread}");
+        assert!(roll_cast < 0.6, "roll neutral C* {roll_cast}");
     }
 
     #[test]

@@ -27,6 +27,49 @@ pub struct ChannelLevels {
     pub hi: f64,
     /// Median image density (sets the auto midtone placement).
     pub mid: f64,
+    /// Bow of the channel's neutral curve against green (crossover): a grey
+    /// at normalised green `x` has this channel's density at
+    /// `lo + (hi − lo) · ((1 + bow) · x − bow · x²)`. 0 is a straight axis.
+    #[serde(default)]
+    pub bow: f64,
+}
+
+/// Largest bow: keeps the neutral curve monotone with slope ≥ ½ of the
+/// straight line's at either end.
+pub const MAX_BOW: f64 = 0.5;
+
+impl ChannelLevels {
+    /// Normalised density of a negative (0 = `lo` … 1 = `hi`) along the
+    /// channel's neutral curve, so a grey has the same value in every
+    /// channel. Straight beyond the ends, with the curve's end slopes.
+    pub fn normalise(&self, d: f64) -> f64 {
+        let y = (d - self.lo) / (self.hi - self.lo).max(1e-6);
+        let q = self.bow.clamp(-MAX_BOW, MAX_BOW);
+        if q.abs() < 1e-9 {
+            y
+        } else if y <= 0.0 {
+            y / (1.0 + q)
+        } else if y >= 1.0 {
+            1.0 + (y - 1.0) / (1.0 - q)
+        } else {
+            // Root of q·x² − (1 + q)·x + y = 0 in 0..1.
+            let b = 1.0 + q;
+            2.0 * y / (b + (b * b - 4.0 * q * y).max(0.0).sqrt())
+        }
+    }
+
+    /// Density at normalised `x` (the inverse of [`Self::normalise`]).
+    pub fn density(&self, x: f64) -> f64 {
+        let q = self.bow.clamp(-MAX_BOW, MAX_BOW);
+        let y = if x <= 0.0 {
+            x * (1.0 + q)
+        } else if x >= 1.0 {
+            1.0 + (x - 1.0) * (1.0 - q)
+        } else {
+            (1.0 + q) * x - q * x * x
+        };
+        self.lo + (self.hi - self.lo) * y
+    }
 }
 
 pub type Levels = [ChannelLevels; 3];
@@ -245,10 +288,7 @@ fn shadow_bump(x: f64, range: f64) -> f64 {
 /// 0.5. Bright (high-key) frames may come down further than dark ones go
 /// up, like a lab printer exposing for the frame's average density.
 pub fn auto_gamma(l: &Levels) -> f64 {
-    let m: f64 = (0..3)
-        .map(|c| (l[c].mid - l[c].lo) / (l[c].hi - l[c].lo).max(1e-6))
-        .sum::<f64>()
-        / 3.0;
+    let m: f64 = (0..3).map(|c| l[c].normalise(l[c].mid)).sum::<f64>() / 3.0;
     if !(m > 0.0 && m < 1.0) {
         return 1.0;
     }
@@ -259,9 +299,10 @@ pub fn auto_gamma(l: &Levels) -> f64 {
 #[derive(Debug, Clone, Copy)]
 struct ChannelCurve {
     kind: ImageType,
-    /// Density printing black (negatives) / white (positives), after clipping.
-    lo: f64,
-    hi: f64,
+    /// The analysed density range and neutral curve.
+    levels: ChannelLevels,
+    /// Black and white clip, as fractions of the range.
+    clip: (f64, f64),
     knots: [f64; KNOTS],
     gamma: f64,
     /// Mid-tone colour gamma of this channel.
@@ -284,13 +325,8 @@ impl ChannelCurve {
     fn new(l: &Levels, s: &Settings, c: usize) -> Self {
         let (auto_tone, knots) = profile(s.tone_profile);
         let kind = s.image_type;
-        let span = (l[c].hi - l[c].lo).max(1e-3);
         // Clip moves the black / white end into the range (− recovers).
-        let (wc, bc) = (s.white_clip as f64 * 0.006, s.black_clip as f64 * 0.006);
-        let (lo, hi) = match kind {
-            ImageType::Positive => (l[c].lo + wc * span, l[c].hi - bc * span),
-            _ => (l[c].lo + bc * span, l[c].hi - wc * span),
-        };
+        let clip = (s.black_clip as f64 * 0.006, s.white_clip as f64 * 0.006);
         let auto = if auto_tone && kind == ImageType::Negative {
             auto_gamma(l)
         } else {
@@ -309,8 +345,8 @@ impl ChannelCurve {
         let filtration = f(s.filtration[c]) + wb;
         Self {
             kind,
-            lo,
-            hi,
+            levels: l[c],
+            clip,
             knots,
             gamma: auto * brightness,
             mid_gamma: 2f64.powf(f(mid) / 75.0 * 0.5),
@@ -329,12 +365,14 @@ impl ChannelCurve {
 
     /// Normalised density: 0 prints black, 1 prints white.
     fn normalised(&self, d: f64) -> f64 {
-        match self.kind {
-            ImageType::Negative => (d - self.lo) / (self.hi - self.lo).max(1e-6),
-            ImageType::Positive => (self.hi - d) / (self.hi - self.lo).max(1e-6),
+        let x = match self.kind {
+            ImageType::Negative => self.levels.normalise(d),
+            ImageType::Positive => 1.0 - self.levels.normalise(d),
             // Already positive: d is −log10 of the linear value.
-            ImageType::EditOnly => color::srgb_encode(10f64.powf(-d) as f32) as f64,
-        }
+            ImageType::EditOnly => return color::srgb_encode(10f64.powf(-d) as f32) as f64,
+        };
+        let (b, w) = self.clip;
+        (x - b) / (1.0 - b - w).max(1e-3)
     }
 
     /// Shaped tone before the paper (1 = white).
@@ -493,22 +531,52 @@ mod tests {
                 lo: 0.10,
                 hi: 1.00,
                 mid: 0.50,
+                bow: 0.0,
             },
             ChannelLevels {
                 lo: 0.12,
                 hi: 1.10,
                 mid: 0.58,
+                bow: 0.0,
             },
             ChannelLevels {
                 lo: 0.15,
                 hi: 1.25,
                 mid: 0.66,
+                bow: 0.0,
             },
         ]
     }
 
     fn mid_grey(l: &Levels, c: usize) -> f32 {
         (l[c].lo + (l[c].hi - l[c].lo) * 0.5) as f32
+    }
+
+    /// A bowed channel still maps its ends to 0 and 1, stays monotone
+    /// beyond them, and reads a grey on its curve as the green value.
+    #[test]
+    fn bowed_levels_follow_the_neutral_curve() {
+        for q in [-0.4, 0.3] {
+            let l = ChannelLevels {
+                lo: 0.2,
+                hi: 1.4,
+                mid: 0.8,
+                bow: q,
+            };
+            assert!(l.normalise(0.2).abs() < 1e-9 && (l.normalise(1.4) - 1.0).abs() < 1e-9);
+            let mut prev = f64::MIN;
+            for i in -20..=140 {
+                let x = l.normalise(i as f64 * 0.01);
+                assert!(x > prev, "bow {q}: not monotone at {i}");
+                prev = x;
+            }
+            for x in [-0.2, 0.1, 0.5, 0.9, 1.3] {
+                let d = l.density(x);
+                assert!((l.normalise(d) - x).abs() < 1e-9, "bow {q} at {x}");
+            }
+            let d = l.lo + (l.hi - l.lo) * ((1.0 + q) * 0.3 - q * 0.09);
+            assert!((l.normalise(d) - 0.3).abs() < 1e-9, "bow {q}");
+        }
     }
 
     #[test]

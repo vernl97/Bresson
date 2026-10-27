@@ -12,6 +12,7 @@ use eframe::egui;
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor, wgpu};
 
 use crate::engine::curve::{LUT_DMAX, LUT_DMIN, LUT_SIZE};
+use crate::engine::dodge;
 use crate::engine::look::LOOK_GRID;
 use crate::engine::pipeline::{Negative, Renderer};
 
@@ -25,7 +26,8 @@ fn next_id() -> u64 {
 const GREY_KNOTS: usize = 11;
 const TABLE_LEN: usize = LUT_SIZE + LOOK_GRID[0] * LOOK_GRID[1] * LOOK_GRID[2] + GREY_KNOTS;
 
-/// A negative uploaded as an RGBA32F density texture.
+/// A negative uploaded as an RGBA32F density texture: the channels'
+/// densities and, fourth, the low-pass density the dodge works from.
 pub struct NegData {
     id: u64,
     width: u32,
@@ -39,7 +41,12 @@ impl NegData {
             id: next_id(),
             width: neg.width as u32,
             height: neg.height as u32,
-            texels: neg.data.iter().map(|d| [d[0], d[1], d[2], 0.0]).collect(),
+            texels: neg
+                .data
+                .iter()
+                .zip(dodge::low_pass(neg))
+                .map(|(d, low)| [d[0], d[1], d[2], low])
+                .collect(),
         })
     }
 }
@@ -51,6 +58,9 @@ pub struct ViewData {
     /// Look strength, saturation, has tables, identity.
     look: [f32; 4],
     out: [[f32; 3]; 3],
+    /// Dodge key, light and dark compression, knee²; channel gains.
+    dodge: [f32; 4],
+    gain: [f32; 4],
 }
 
 impl ViewData {
@@ -78,11 +88,20 @@ impl ViewData {
             None => tables.resize(TABLE_LEN, [0.0; 4]),
         }
         debug_assert_eq!(tables.len(), TABLE_LEN);
+        let (dodge, gain) = match r.dodge() {
+            Some(d) => (
+                [d.key, d.light, d.dark, dodge::KNEE * dodge::KNEE],
+                [d.gain[0], d.gain[1], d.gain[2], 0.0],
+            ),
+            None => ([0.0; 4], [0.0; 4]),
+        };
         Arc::new(Self {
             id: next_id(),
             tables,
             look: look_params,
             out,
+            dodge,
+            gain,
         })
     }
 }
@@ -97,6 +116,8 @@ struct Params {
     look: [f32; 4],
     lut: [f32; 4],
     size: [f32; 4],
+    dodge: [f32; 4],
+    gain: [f32; 4],
 }
 
 /// One drawable image (main view, or the "before" side of the split).
@@ -277,6 +298,8 @@ impl GpuPreview {
                 if self.linear_target { 1.0 } else { 0.0 },
             ],
             size: [neg.width as f32, neg.height as f32, 0.0, 0.0],
+            dodge: view.dodge,
+            gain: view.gain,
         };
         queue.write_buffer(&s.params, 0, bytemuck::bytes_of(&params));
         if s.neg != neg.id || s.bind_group.is_none() {
@@ -482,10 +505,17 @@ mod tests {
     #[test]
     fn gpu_preview_matches_the_cpu_renderer() {
         let chart = crate::engine::testchart::negative(0.0);
-        for lut in [Lut::None, Lut::Frontier, Lut::Pakon] {
+        for (lut, dodge) in [
+            (Lut::None, 0.0),
+            (Lut::Frontier, 0.0),
+            (Lut::Pakon, 0.0),
+            (Lut::Frontier, 80.0),
+        ] {
             let s = Settings {
                 lut,
                 post_saturation: 7,
+                hyper_tone_highlights: dodge,
+                hyper_tone_shadows: dodge,
                 ..Settings::default()
             };
             let base = crate::engine::pipeline::resolve_base(&chart.src, &s, None);
