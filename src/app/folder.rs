@@ -712,49 +712,6 @@ impl NlpApp {
     }
 }
 
-pub fn lut_folder_ui(app: &mut NlpApp, ui: &mut egui::Ui) {
-    use crate::engine::lut::LutLibrary;
-    let dir = LutLibrary::global()
-        .read()
-        .ok()
-        .and_then(|l| l.dir().map(|d| d.to_path_buf()));
-    match &dir {
-        Some(d) => {
-            widgets::status_line(ui, Icon::Check, theme::OK, "Using the plugin's 3D LUTs")
-                .on_hover_text(d.display().to_string());
-        }
-        None => {
-            widgets::status_line(
-                ui,
-                Icon::Warn,
-                theme::WARN,
-                "Plugin LUT folder not found, so built-in approximations are used.",
-            );
-        }
-    }
-    ui.add_space(4.0);
-    if ui
-        .add(widgets::ghost("Choose LUT folder…"))
-        .on_hover_text("The plugin's LR Files/CameraRaw/Settings/NLP Enhanced Settings folder")
-        .clicked()
-    {
-        if let Some(p) = super::picker::pick_folder(None, Some("Choose")) {
-            let r = LutLibrary::global().write().map(|mut l| l.set_dir(p));
-            match r {
-                Ok(Ok(())) => {
-                    app.toast("LUT folder set", false);
-                    for f in app.frames.iter_mut() {
-                        f.thumb_dirty = true;
-                    }
-                    app.editor.invalidate();
-                }
-                Ok(Err(e)) => app.toast(format!("{e:#}"), true),
-                Err(_) => {}
-            }
-        }
-    }
-}
-
 /// State of the Convert dialog shown before a folder-view conversion.
 pub struct ConvertDialog {
     pub targets: Vec<usize>,

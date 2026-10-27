@@ -55,10 +55,6 @@ pub struct SourceInfo {
     pub model: String,
     pub full_width: usize,
     pub full_height: usize,
-    /// Camera identification strings (DNG UniqueCameraModel, make + model …)
-    /// used to find the matching camera profile.
-    #[serde(default)]
-    pub camera_ids: Vec<String>,
     /// EXIF exposure of the capture: shutter (s), f-number, ISO. Used to
     /// match exposure across a roll (NLPRolls `L19_1`).
     #[serde(default)]
@@ -131,7 +127,6 @@ fn load_bitmap(path: &Path) -> Result<SourceImage> {
             model: String::new(),
             full_width: w,
             full_height: h,
-            camera_ids: Vec::new(),
             exposure: None,
         },
     })
@@ -196,16 +191,11 @@ fn load_raw(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
         let g = raw.wb_coeffs[1];
         [raw.wb_coeffs[0] / g, 1.0, raw.wb_coeffs[2] / g]
     };
-    let mut camera_ids = super::dcp::tiff_camera_ids(path);
-    camera_ids.push(format!("{} {}", raw.camera.make, raw.camera.model));
-    camera_ids.push(format!("{} {}", raw.make, raw.model));
-    camera_ids.push(raw.model.clone());
     let info = SourceInfo {
         make: raw.clean_make.clone(),
         model: raw.clean_model.clone(),
         full_width: raw.width,
         full_height: raw.height,
-        camera_ids,
         exposure: raw_exposure(path),
     };
 

@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use super::color;
 use super::curve::{self, ChannelLevels, CurveLut, Levels};
-use super::dcp;
 use super::decode::{self, SourceImage};
 use super::look::{self, Look};
 use super::presets;
@@ -204,40 +203,14 @@ fn density_matrix(s: &Settings) -> [[f32; 3]; 3] {
     }
 }
 
-/// The plugin's Negative Lab camera profile for this source, if one matches.
-/// Only used to recognise scanner DNGs.
-pub fn camera_profile(src: &SourceImage) -> Option<std::sync::Arc<dcp::DcpProfile>> {
-    if src.is_raw {
-        dcp::profile_for(&src.info)
-    } else {
-        None
-    }
-}
-
-/// The scan source implied by a file: VueScan / SilverFast DNGs (scanner
-/// profile or scanner software), otherwise digital camera; bitmaps are TIF scans.
+/// The scan source implied by a file: bitmaps are TIF scans, raw files
+/// digital camera captures. VueScan / SilverFast DNGs are set by hand.
 pub fn detect_source(src: &SourceImage) -> super::settings::Source {
     use super::settings::Source;
-    if !src.is_raw {
-        return Source::TifScan;
-    }
-    let scanner_id = |s: &str| {
-        let l = s.to_lowercase();
-        l.contains("vuescan") || l.contains("silverfast")
-    };
-    let by_profile = camera_profile(src).map(|p| {
-        scanner_id(&p.camera)
-            || p.path.components().any(|c| {
-                c.as_os_str()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case("Vuescan Profiles")
-            })
-    });
-    match by_profile {
-        Some(true) => Source::VueScanRaw,
-        Some(false) => Source::DigitalCamera,
-        None if src.info.camera_ids.iter().any(|s| scanner_id(s)) => Source::VueScanRaw,
-        None => Source::DigitalCamera,
+    if src.is_raw {
+        Source::DigitalCamera
+    } else {
+        Source::TifScan
     }
 }
 
@@ -930,10 +903,6 @@ impl Renderer {
         self.converted.then_some(&self.lut)
     }
 
-    pub fn uses_lut_table(&self) -> bool {
-        self.look.uses_table()
-    }
-
     /// Encoded MelissaRGB positive (before output conversion).
     #[inline]
     pub fn positive(&self, d: [f32; 3]) -> [f32; 3] {
@@ -1003,35 +972,6 @@ mod tests {
             "{l:?}"
         );
         assert!((l[2].mid - 1.0).abs() < 0.01, "{l:?}");
-    }
-
-    #[test]
-    fn vuescan_dng_is_detected_as_scanner() {
-        let p = std::path::Path::new("../testphoto.dng");
-        if !p.exists() {
-            return;
-        }
-        let src = decode::load(p, Some(400)).unwrap();
-        assert_eq!(
-            detect_source(&src),
-            crate::engine::settings::Source::VueScanRaw
-        );
-        let mut cam = src.clone();
-        cam.info.camera_ids = vec!["Nikon D750".into()];
-        cam.info.make = "Nikon".into();
-        cam.info.model = "D750".into();
-        assert_eq!(
-            detect_source(&cam),
-            crate::engine::settings::Source::DigitalCamera
-        );
-        let mut unknown = src.clone();
-        unknown.info.camera_ids = vec!["Mystery Cam 1".into()];
-        unknown.info.make = "Mystery".into();
-        unknown.info.model = "Cam 1".into();
-        assert_eq!(
-            detect_source(&unknown),
-            crate::engine::settings::Source::DigitalCamera
-        );
     }
 
     fn frame(lo: [f64; 3], hi: [f64; 3]) -> Analysis {

@@ -48,10 +48,10 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
   - **Tone**: tone profile, Exposure, Brightness, Contrast, Lights, Darks, Whites, Blacks; *Glow, fade & clipping* holds Lab Glow/Fade and White/Black clip.
   - **White balance**: presets, a neutral eyedropper and Temp/Tint (yellow and magenta filtration in CC).
   - **Colour toning**: mids, highs and shadows.
-  - **Look**: LUT with amount and saturation, sharpening.
+  - **Look**: Natural, Frontier, Crystal or Pakon with amount and saturation, sharpening.
   - **Film** (collapsed): film stock, ISO, developer and camera details for the EXIF and the file name tokens; *Apply to roll/folder* copies them.
   - **Analysis** (collapsed): the print curves and each channel's analysed densities. Roll frames get *Use roll analysis* and the roll process.
-  - The ⋯ menu beside Re-convert: save/apply default, reset edits, unconvert and the LUT folder.
+  - The ⋯ menu beside Re-convert: save/apply default, reset edits and unconvert.
 - Film-base eyedropper for sampling the unexposed border.
 
 Settings are saved inside the `NLP/` subfolder as `<file>.nlp.json`.
@@ -73,7 +73,7 @@ The engine started as a port of the Lightroom plugin and now models the film its
 | `curve.rs` | Print engine: normalisation, tone and colour shaping, paper curve, LUTs, eyedropper |
 | `pipeline.rs` | Film base, density, crosstalk, analysis, auto colour, roll aggregation, renderer |
 | `presets.rs` | Colour models, pre-saturation, film WB presets, sharpening |
-| `lut.rs` | Reads the plugin's 3D looks from `LR Files/CameraRaw/Settings/NLP Enhanced Settings/*.xmp` (Adobe base85 + zlib RGB tables, 32³) |
+| `look.rs` | Native looks (`assets/looks.json`, measured from the plugin's looks), sharpening |
 | `color.rs` | Working and output spaces, CIELAB / CIEDE2000, generated ICC profiles |
 | `flat.rs` | Flat-field gain maps |
 | `testchart.rs` | Physically modelled test negative and quality metrics |
@@ -81,11 +81,11 @@ The engine started as a port of the Lightroom plugin and now models the film its
 
 ### Notes
 - **Raw processing.** `rawler` decodes the raw files and supplies the camera matrix.
-- **Camera profiles.** The plugin's *Negative Lab* DCPs only identify VueScan/SilverFast DNGs. Their tone curves and look tables are made for scenes, so the conversion doesn't apply them.
+- **No plugin assets.** The conversion uses no camera profiles (DCP) or look files (XMP). VueScan / SilverFast DNGs are set as the scan source by hand.
 - **Film base.** *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper. In density a wrong base is a constant per-channel offset that the levels absorb, so the conversion barely depends on it (tested on a chart cropped tight with no rebate).
 - **Flat field.** A frame of the bare light source or clear film leader, shot with the same camera, lens and light (Convert dialog, the editor's Source section, or `--flat FILE`). Uneven light varies across the frame, which the levels can't absorb.
 - **Sidecars** from before the density engine keep their settings and metadata but need a new Convert.
-- **LUT folder.** The app finds the LUTs automatically in `../NLP Lightroom Plugin/...` or in Lightroom's CameraRaw settings folder. If they are missing, it uses built-in approximations of each look.
+- **Looks.** Natural, Frontier, Crystal and Pakon are native data measured from the plugin's looks: grey curves plus a hue/saturation/value map (24 × 5 × 8). They reproduce the plugin's looks to a mean of 2–4.5 out of 255. Saturation levels 1–10 rise smoothly (the plugin's level 5 was more saturated than 6–8).
 - **Not ported:** licensing and the Lightroom catalog/DNG-profile plumbing, which a standalone app doesn't need.
 
 ## Tests

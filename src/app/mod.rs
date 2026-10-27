@@ -379,7 +379,7 @@ impl NlpApp {
     }
 
     /// Set the scan source of a frame without saved settings from its file
-    /// (scanner profile → VueScan / SilverFast DNG, else digital camera).
+    /// (raw → digital camera, bitmap → TIF scan).
     fn auto_source(&mut self, i: usize, src: &SourceImage) {
         use crate::engine::settings::{FilmBase, Source};
         let f = &mut self.frames[i];

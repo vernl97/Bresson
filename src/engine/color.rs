@@ -195,12 +195,6 @@ impl EncodeLut {
     }
 }
 
-pub fn srgb_encode_lut() -> &'static EncodeLut {
-    use std::sync::OnceLock;
-    static L: OnceLock<EncodeLut> = OnceLock::new();
-    L.get_or_init(|| EncodeLut::new(srgb_encode))
-}
-
 pub fn srgb_decode_lut() -> &'static EncodeLut {
     use std::sync::OnceLock;
     static L: OnceLock<EncodeLut> = OnceLock::new();

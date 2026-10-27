@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, pos2, vec2};
 
-use super::folder::{lut_folder_ui, source_instructions};
+use super::folder::source_instructions;
 use super::widgets::{
     self, Icon, fl_combo, fl_slider, fl_slider_u8, grad, icon_button, pill, segmented, theme,
 };
@@ -94,7 +94,6 @@ pub struct Editor {
     committed: Option<Settings>,
     hist: [[u32; 256]; 3],
     curves: Vec<[f32; 4]>,
-    uses_table: bool,
     /// Display scale (screen points per preview pixel); `None` = fit.
     zoom: Option<f32>,
     pan: egui::Vec2,
@@ -148,7 +147,6 @@ impl Default for Editor {
             committed: None,
             hist: [[0; 256]; 3],
             curves: Vec::new(),
-            uses_table: false,
             zoom: None,
             pan: egui::Vec2::ZERO,
             crop: None,
@@ -368,7 +366,6 @@ impl NlpApp {
         }
         self.editor.hist = hist;
         self.editor.curves = r.curve_lut().map(|l| l.sample(96)).unwrap_or_default();
-        self.editor.uses_table = r.uses_lut_table();
         let img = to_color_image(&px, neg.width, neg.height);
         set_texture(ctx, &mut self.editor.tex, "editor-preview", img);
         let cropping = self.editor.crop.is_some();
@@ -1396,16 +1393,8 @@ impl NlpApp {
                 &mut s.post_saturation,
                 1..=10,
                 5,
-                "LUT saturation variant (5 = default)",
+                "Look saturation (5 = default)",
             );
-            if s.lut != Lut::None && !self.editor.uses_table && !s.is_monochrome() {
-                widgets::status_line(
-                    ui,
-                    Icon::Warn,
-                    theme::WARN,
-                    "Plugin LUTs not found, so approximations are used (choose the folder in the ⋯ menu).",
-                );
-            }
             fl_combo(
                 ui,
                 "",
@@ -1482,8 +1471,6 @@ impl NlpApp {
             self.unconvert(&[i]);
             ui.close();
         }
-        ui.separator();
-        lut_folder_ui(self, ui);
     }
 
     /// The print curves and the analysed density levels, collapsed by default.

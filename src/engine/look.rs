@@ -1,230 +1,125 @@
-//! Post-inversion "look" stage: the plugin's enhanced-profile LUTs
-//! (Natural / Frontier / Crystal / Pakon) with amount and saturation
-//! variants, plus sharpening.
+//! Post-inversion "look" stage (Natural / Frontier / Crystal / Pakon) with
+//! amount and saturation, plus sharpening.
 //!
-//! The real 3D tables are read from the plugin's `NLP Enhanced Settings`
-//! XMPs (see [`super::lut`]). When they cannot be found, a parametric
-//! approximation of each look's documented character is used instead.
+//! The looks are native data (`assets/looks.json`, built into the binary),
+//! measured from the Negative Lab Pro v2.3 enhanced looks the plugin
+//! applied: per channel a grey curve, and a hue / saturation / value map
+//! like a DNG profile's look table (hue shift, saturation scale and value
+//! shift at 24 hues × 5 saturations × 8 values). On colours sampled across
+//! the gamut, including hues left out of the fit, they reproduce the
+//! plugin's looks to a mean of 2–4.5 and a 95th percentile of 6–14 (RGB
+//! distance out of 255), where leaving the look out is 15–26 / 47–70 off.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
-use super::color::{self, hsv_to_rgb, luma, rgb_to_hsv};
-use super::lut::{self, RgbTable, TableGamma, TablePrimaries};
+use serde::Deserialize;
+
+use super::color::{hsv_to_rgb, luma, rgb_to_hsv};
 use super::presets::SharpenDef;
 use super::settings::{Lut, Settings};
 
-/// Hue anchors (degrees) used by the hue-dependent tables.
-const ANCHORS: [f32; 8] = [0.0, 30.0, 60.0, 120.0, 180.0, 210.0, 240.0, 300.0];
+const HUES: usize = 24;
+const SATS: usize = 5;
+const VALUES: usize = 8;
 
+#[derive(Deserialize)]
+struct LookData {
+    /// Largest amount (strength) the look supports.
+    max_amount: f32,
+    /// Encoded output of each channel for a grey of value 0, 0.1 … 1.
+    grey: [[f32; 11]; 3],
+    /// `[hue][saturation][value]` → [hue shift (degrees), saturation
+    /// scale, value shift].
+    grid: Vec<Vec<Vec<[f32; 3]>>>,
+    /// Chroma scale of saturation levels 1..=10 (level 5 = 1).
+    saturation: [f32; 10],
+}
+
+#[derive(Deserialize)]
+struct LooksFile {
+    looks: HashMap<String, LookData>,
+}
+
+fn looks() -> &'static HashMap<String, LookData> {
+    static L: OnceLock<HashMap<String, LookData>> = OnceLock::new();
+    L.get_or_init(|| {
+        let f: LooksFile = serde_json::from_str(include_str!("../../assets/looks.json"))
+            .expect("assets/looks.json");
+        for (name, l) in &f.looks {
+            assert!(
+                l.grid.len() == HUES
+                    && l.grid
+                        .iter()
+                        .all(|h| h.len() == SATS && h.iter().all(|s| s.len() == VALUES)),
+                "look {name}: grid must be {HUES}x{SATS}x{VALUES}"
+            );
+        }
+        f.looks
+    })
+}
+
+fn data(l: Lut) -> Option<&'static LookData> {
+    let name = match l {
+        Lut::None => return None,
+        Lut::Natural => "Natural",
+        Lut::Frontier => "Frontier",
+        Lut::Crystal => "Crystal",
+        Lut::Pakon => "Pakon",
+    };
+    looks().get(name)
+}
+
+/// Linear interpolation weights of `x` (clamped to 0..1) between `n` evenly
+/// spaced nodes.
+fn node_weights(x: f32, n: usize) -> [(usize, f32); 2] {
+    let p = x.clamp(0.0, 1.0) * (n - 1) as f32;
+    let i = (p as usize).min(n - 2);
+    let t = p - i as f32;
+    [(i, 1.0 - t), (i + 1, t)]
+}
+
+fn grey_curve(k: &[f32; 11], v: f32) -> f32 {
+    let [(i, a), (j, b)] = node_weights(v, 11);
+    k[i] * a + k[j] * b
+}
+
+/// A prepared look (strength and saturation folded in).
 #[derive(Clone, Copy)]
-struct LookDef {
-    /// Hue shift in degrees at each anchor.
-    hue: [f32; 8],
-    /// Saturation multiplier at each anchor.
-    sat: [f32; 8],
-    /// Global saturation multiplier.
-    global_sat: f32,
-    /// S-curve amount on value (0..1).
-    contrast: f32,
-    /// Exponent on value (< 1 brightens).
-    gamma: f32,
-    /// Highlight desaturation amount (0..1) above `hl_start`.
-    hl_desat: f32,
-    hl_start: f32,
-    /// Extra saturation in the shadows.
-    shadow_sat: f32,
-    /// RGB tint added to the deep shadows.
-    shadow_tint: [f32; 3],
-}
-
-const IDENT: LookDef = LookDef {
-    hue: [0.0; 8],
-    sat: [1.0; 8],
-    global_sat: 1.0,
-    contrast: 0.0,
-    gamma: 1.0,
-    hl_desat: 0.0,
-    hl_start: 0.9,
-    shadow_sat: 0.0,
-    shadow_tint: [0.0; 3],
-};
-
-fn def(l: Lut) -> LookDef {
-    match l {
-        Lut::None => IDENT,
-        // Colorimetric: true blues, natural greens, neutral skin.
-        Lut::Natural => LookDef {
-            sat: [1.0, 0.98, 1.02, 1.04, 1.0, 1.04, 1.03, 1.0],
-            global_sat: 1.02,
-            ..IDENT
-        },
-        // Peachy skin, golden yellows, teal-blue skies, suppressed cherry reds,
-        // purer neutral highlights.
-        Lut::Frontier => LookDef {
-            hue: [5.0, 4.0, -4.0, 10.0, 12.0, 2.0, -4.0, -2.0],
-            sat: [0.86, 1.06, 1.10, 1.08, 0.88, 1.06, 1.0, 0.94],
-            global_sat: 1.03,
-            contrast: 0.08,
-            gamma: 1.0,
-            hl_desat: 0.35,
-            hl_start: 0.82,
-            shadow_sat: 0.0,
-            shadow_tint: [0.0; 3],
-        },
-        // Fuji Crystal Archive paper: subtractive, deeper contrast, green-ish shadows.
-        Lut::Crystal => LookDef {
-            hue: [-2.0, 0.0, 0.0, 4.0, 2.0, 3.0, 3.0, 0.0],
-            sat: [1.04, 1.0, 1.02, 1.06, 1.02, 1.04, 1.06, 1.0],
-            global_sat: 1.04,
-            contrast: 0.18,
-            gamma: 1.04,
-            hl_desat: 0.1,
-            hl_start: 0.9,
-            shadow_sat: 0.12,
-            shadow_tint: [-0.006, 0.012, -0.002],
-        },
-        // Pakon F135: luminous, clean separation, bright whites.
-        Lut::Pakon => LookDef {
-            hue: [2.0, 1.0, 2.0, -3.0, 0.0, 0.0, 2.0, 0.0],
-            sat: [1.04, 1.02, 1.04, 1.02, 1.04, 1.06, 1.04, 1.02],
-            global_sat: 1.05,
-            contrast: 0.1,
-            gamma: 0.93,
-            hl_desat: 0.45,
-            hl_start: 0.8,
-            shadow_sat: 0.0,
-            shadow_tint: [0.0; 3],
-        },
-    }
-}
-
-fn interp(table: &[f32; 8], h: f32) -> f32 {
-    let h = h.rem_euclid(360.0);
-    for i in 0..8 {
-        let a = ANCHORS[i];
-        let b = if i == 7 { 360.0 } else { ANCHORS[i + 1] };
-        if h >= a && h < b {
-            let t = (h - a) / (b - a);
-            let vb = table[(i + 1) % 8];
-            return table[i] + (vb - table[i]) * t;
-        }
-    }
-    table[0]
-}
-
-/// A real Adobe RGB table plus the transforms into and out of its encoding.
-#[derive(Clone)]
-struct TableLook {
-    table: Arc<RgbTable>,
-    to_table: [[f32; 3]; 3],
-    from_table: [[f32; 3]; 3],
-}
-
-impl TableLook {
-    fn new(table: Arc<RgbTable>) -> Self {
-        let p = match table.primaries {
-            TablePrimaries::Srgb => color::SRGB,
-            TablePrimaries::AdobeRgb => color::ADOBE_RGB,
-            TablePrimaries::ProPhoto => color::PROPHOTO,
-            TablePrimaries::P3 => color::Primaries {
-                r: [0.68, 0.32],
-                g: [0.265, 0.69],
-                b: [0.15, 0.06],
-                white: color::D65,
-            },
-            TablePrimaries::Rec2020 => color::Primaries {
-                r: [0.708, 0.292],
-                g: [0.170, 0.797],
-                b: [0.131, 0.046],
-                white: color::D65,
-            },
-        };
-        let to_table = color::to_f32(&color::rgb_to_rgb(&color::MELISSA, &p));
-        let from_table = color::to_f32(&color::rgb_to_rgb(&p, &color::MELISSA));
-        Self {
-            table,
-            to_table,
-            from_table,
-        }
-    }
-
-    fn encode(&self, v: f32) -> f32 {
-        let v = v.max(0.0);
-        match self.table.gamma {
-            TableGamma::Linear => v,
-            TableGamma::Srgb => color::srgb_encode(v),
-            TableGamma::G18 => v.powf(1.0 / 1.8),
-            TableGamma::G22 => v.powf(1.0 / 2.2),
-        }
-    }
-
-    fn decode(&self, v: f32) -> f32 {
-        let v = v.max(0.0);
-        match self.table.gamma {
-            TableGamma::Linear => v,
-            TableGamma::Srgb => color::srgb_decode(v),
-            TableGamma::G18 => v.powf(1.8),
-            TableGamma::G22 => v.powf(2.2),
-        }
-    }
-
-    /// `c` is encoded MelissaRGB; `k` the amount (0..=max_amount).
-    #[inline]
-    fn apply(&self, c: [f32; 3], k: f32) -> [f32; 3] {
-        let dec = color::srgb_decode_lut();
-        let lin = [dec.get(c[0]), dec.get(c[1]), dec.get(c[2])];
-        let t = color::mul3(&self.to_table, lin);
-        let e = [
-            self.encode(t[0].min(1.0)),
-            self.encode(t[1].min(1.0)),
-            self.encode(t[2].min(1.0)),
-        ];
-        let l = self.table.lookup(e);
-        let k = k.min(self.table.max_amount);
-        let o = [0, 1, 2].map(|i| self.decode(e[i] + (l[i] - e[i]) * k));
-        let m = color::mul3(&self.from_table, o);
-        let enc = color::srgb_encode_lut();
-        [enc.get(m[0]), enc.get(m[1]), enc.get(m[2])]
-    }
-}
-
-/// A prepared look (strength folded in).
-#[derive(Clone)]
 pub struct Look {
-    d: LookDef,
-    table: Option<TableLook>,
+    data: Option<&'static LookData>,
     k: f32,
-    post_sat: f32,
+    saturation: f32,
     identity: bool,
 }
 
 impl Look {
     pub fn new(s: &Settings) -> Self {
         let mono = s.is_monochrome();
-        let lut = if mono { Lut::None } else { s.lut };
-        let k = (s.lut_strength / 100.0).clamp(0.0, 2.0);
-        // Saturation 1..=10 selects the table's "Sat" variant; only the
-        // parametric fallback needs an explicit saturation factor.
-        let table = lut::table_for(lut, s.post_saturation).map(TableLook::new);
-        // Saturation only exists as LUT variants: no LUT, no effect.
-        let post_sat = if mono || table.is_some() || lut == Lut::None {
+        let data = if mono { None } else { data(s.lut) };
+        let k = data
+            .map(|d| (s.lut_strength / 100.0).clamp(0.0, d.max_amount))
+            .unwrap_or(0.0);
+        // Without a look, saturation follows the looks' average levels.
+        let level = s.post_saturation.clamp(1, 10) as usize - 1;
+        let saturation = if mono {
             1.0
         } else {
-            1.0 + (s.post_saturation as f32 - 5.0) * 0.06
+            match data {
+                Some(d) => d.saturation[level],
+                None => {
+                    let all = looks();
+                    all.values().map(|d| d.saturation[level]).sum::<f32>() / all.len() as f32
+                }
+            }
         };
-        let identity = (lut == Lut::None || k == 0.0) && (post_sat - 1.0).abs() < 1e-6;
+        let identity = k == 0.0 && (saturation - 1.0).abs() < 1e-6;
         Self {
-            d: def(lut),
-            table,
+            data,
             k,
-            post_sat,
+            saturation,
             identity,
         }
-    }
-
-    /// Whether the plugin's real LUT data is in use.
-    pub fn uses_table(&self) -> bool {
-        self.table.is_some()
     }
 
     /// Apply to an encoded positive MelissaRGB pixel.
@@ -233,42 +128,104 @@ impl Look {
         if self.identity {
             return c;
         }
-        if let Some(t) = &self.table {
-            return t.apply(c, self.k);
-        }
-        let d = &self.d;
-        let k = self.k;
         let (h, s, v) = rgb_to_hsv([
             c[0].clamp(0.0, 1.0),
             c[1].clamp(0.0, 1.0),
             c[2].clamp(0.0, 1.0),
         ]);
-        let h2 = h + interp(&d.hue, h) * k * s.min(1.0).sqrt();
-        let mut s2 = s * (1.0 + (interp(&d.sat, h) * d.global_sat - 1.0) * k);
-        let mut v2 = v;
-        if d.contrast != 0.0 {
-            let sc = v * v * (3.0 - 2.0 * v);
-            v2 += (sc - v) * d.contrast * k;
-        }
-        if d.gamma != 1.0 {
-            v2 = v2.max(0.0).powf(1.0 + (d.gamma - 1.0) * k);
-        }
-        if d.hl_desat > 0.0 && v2 > d.hl_start {
-            let t = ((v2 - d.hl_start) / (1.0 - d.hl_start)).min(1.0);
-            s2 *= 1.0 - d.hl_desat * k * t * t;
-        }
-        if d.shadow_sat > 0.0 {
-            s2 *= 1.0 + d.shadow_sat * k * (1.0 - v2).powi(2);
-        }
-        s2 = (s2 * self.post_sat).clamp(0.0, 1.0);
-        let mut o = hsv_to_rgb(h2, s2, v2.clamp(0.0, 1.0));
-        if d.shadow_tint != [0.0; 3] {
-            let w = (1.0 - v2).powi(3) * k;
-            for i in 0..3 {
-                o[i] += d.shadow_tint[i] * w;
+        let Some(d) = self.data.filter(|_| self.k > 0.0) else {
+            return hsv_to_rgb(h, (s * self.saturation).min(1.0), v);
+        };
+        let k = self.k;
+        // Hue / saturation / value map.
+        let hp = h.rem_euclid(360.0) / 360.0 * HUES as f32;
+        let hi = (hp as usize) % HUES;
+        let ht = hp - hp.floor();
+        let (mut dh, mut ds, mut dv) = (0.0f32, 0.0f32, 0.0f32);
+        for (hn, hw) in [(hi, 1.0 - ht), ((hi + 1) % HUES, ht)] {
+            for (sn, sw) in node_weights(s, SATS) {
+                for (vn, vw) in node_weights(v, VALUES) {
+                    let w = hw * sw * vw;
+                    let g = d.grid[hn][sn][vn];
+                    dh += w * g[0];
+                    ds += w * g[1];
+                    dv += w * g[2];
+                }
             }
         }
+        // Grey curves: their mean sets the tone, their spread the tint.
+        let grey: [f32; 3] = std::array::from_fn(|c| grey_curve(&d.grey[c], v));
+        let gv = (grey[0] + grey[1] + grey[2]) / 3.0;
+        let v2 = v + (gv + dv - v) * k;
+        let s2 = (s * (1.0 + (ds - 1.0) * k) * self.saturation).clamp(0.0, 1.0);
+        let mut o = hsv_to_rgb(h + dh * k, s2, v2.clamp(0.0, 1.0));
+        for c in 0..3 {
+            o[c] += (grey[c] - gv) * (1.0 - s) * k;
+        }
         o
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn look(lut: Lut, sat: u8, strength: f32) -> Look {
+        Look::new(&Settings {
+            lut,
+            post_saturation: sat,
+            lut_strength: strength,
+            ..Settings::default()
+        })
+    }
+
+    #[test]
+    fn every_look_loads() {
+        for l in [Lut::Natural, Lut::Frontier, Lut::Crystal, Lut::Pakon] {
+            assert!(data(l).is_some(), "{l:?}");
+        }
+    }
+
+    #[test]
+    fn none_at_default_saturation_is_identity() {
+        let c = [0.3, 0.5, 0.7];
+        assert_eq!(look(Lut::None, 5, 100.0).apply(c), c);
+        assert_eq!(look(Lut::Frontier, 5, 0.0).apply(c), c);
+    }
+
+    #[test]
+    fn greys_stay_nearly_grey() {
+        for l in [Lut::Natural, Lut::Frontier, Lut::Pakon] {
+            for v in [0.1f32, 0.4, 0.8] {
+                let o = look(l, 5, 100.0).apply([v; 3]);
+                let spread = o.iter().fold(f32::MIN, |a, &b| a.max(b))
+                    - o.iter().fold(f32::MAX, |a, &b| a.min(b));
+                assert!(spread < 0.01, "{l:?} {v}: {o:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn saturation_levels_rise_monotonically() {
+        let c = [0.7, 0.45, 0.3];
+        let chroma = |o: [f32; 3]| {
+            o.iter().fold(f32::MIN, |a, &b| a.max(b)) - o.iter().fold(f32::MAX, |a, &b| a.min(b))
+        };
+        for l in [Lut::None, Lut::Frontier, Lut::Pakon] {
+            let v: Vec<f32> = (1..=10)
+                .map(|s| chroma(look(l, s, 100.0).apply(c)))
+                .collect();
+            assert!(v.windows(2).all(|w| w[1] > w[0]), "{l:?}: {v:?}");
+        }
+    }
+
+    #[test]
+    fn strength_scales_the_change() {
+        let c = [0.62, 0.48, 0.35];
+        let d = |a: [f32; 3]| (0..3).map(|i| (a[i] - c[i]).abs()).sum::<f32>();
+        let half = d(look(Lut::Frontier, 5, 50.0).apply(c));
+        let full = d(look(Lut::Frontier, 5, 100.0).apply(c));
+        assert!(half > 0.0 && half < full, "{half} {full}");
     }
 }
 

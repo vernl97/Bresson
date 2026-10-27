@@ -360,7 +360,6 @@ pub enum Icon {
     Export,
     Eyedropper,
     Folder,
-    Check,
     Warn,
     More,
 }
@@ -490,10 +489,6 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 Stroke::new(3.0 * s.max(0.6), color),
             ));
             p.circle_filled(q(5.0, -5.0), 2.5 * s, color);
-        }
-        Icon::Check => {
-            p.circle_stroke(c, 8.0 * s, st);
-            p.add(line(vec![q(-3.5, 0.2), q(-1.0, 3.0), q(4.0, -2.8)]));
         }
         Icon::Warn => {
             p.add(Shape::closed_line(
