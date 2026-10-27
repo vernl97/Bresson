@@ -1084,6 +1084,13 @@ impl NlpApp {
                 "Sample the unexposed film border",
                 true,
             );
+            ui.add_space(8.0);
+            let start = self
+                .editor
+                .path
+                .as_ref()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+            super::folder::flat_field_ui(ui, &mut s.flat_field, start.as_deref());
         }
         self.editor.border_preview = false;
         if widgets::fold_with(ui, "Analysis", false) {

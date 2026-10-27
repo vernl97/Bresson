@@ -291,6 +291,51 @@ pub fn neutral_cast(chart: &Chart, srgb: &[[f32; 3]]) -> (f64, f64) {
     )
 }
 
+/// Uneven illumination (lens falloff plus a light source that is warmer at
+/// the edges): camera RGB gain at normalised position `(u, v)`.
+pub fn falloff(u: f64, v: f64, strength: f64) -> [f64; 3] {
+    let r2 = ((u - 0.5).powi(2) + (v - 0.5).powi(2)) * 2.0;
+    [0.80, 0.90, 1.0].map(|k| 1.0 - strength * k * r2)
+}
+
+/// Scan the chart through uneven illumination.
+pub fn vignette(chart: &mut Chart, strength: f64) {
+    let (w, h) = (chart.src.width, chart.src.height);
+    for (i, p) in chart.src.data.iter_mut().enumerate() {
+        let g = falloff(
+            (i % w) as f64 / w as f64,
+            (i / w) as f64 / h as f64,
+            strength,
+        );
+        *p = std::array::from_fn(|c| p[c] * g[c] as f32);
+    }
+}
+
+/// A flat-field frame: the bare light source shot through the same uneven
+/// illumination, linear camera RGB.
+pub fn flat_frame(strength: f64) -> SourceImage {
+    let light = color::mat_vec(&CAMERA_MIX, [LIGHT * 0.7; 3]);
+    let data = (0..WIDTH * HEIGHT)
+        .map(|i| {
+            let g = falloff(
+                (i % WIDTH) as f64 / WIDTH as f64,
+                (i / WIDTH) as f64 / HEIGHT as f64,
+                strength,
+            );
+            std::array::from_fn(|c| (light[c] * g[c]) as f32)
+        })
+        .collect();
+    SourceImage {
+        width: WIDTH,
+        height: HEIGHT,
+        data,
+        to_melissa: color::to_f32(&color::mat_inv(&CAMERA_MIX)),
+        as_shot_wb: [1.0; 3],
+        is_raw: false,
+        info: Default::default(),
+    }
+}
+
 /// Quality of a converted chart.
 #[derive(Debug, Clone, Copy)]
 pub struct ChartMetrics {

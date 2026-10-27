@@ -232,11 +232,17 @@ pub fn detect_source(src: &SourceImage) -> super::settings::Source {
     }
 }
 
-/// Build the negative's density image from linear source pixels: camera
-/// matrix, film base neutralisation, `log10`, crosstalk and calibration.
+/// Build the negative's density image from linear source pixels: flat
+/// field, camera matrix, film base neutralisation, `log10`, crosstalk and
+/// calibration.
 pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Negative {
+    let flat = s
+        .flat_field
+        .as_deref()
+        .and_then(super::flat::get)
+        .map(|f| f.apply(&src.data, src.width, src.height));
     let (d, w, h) = decode::geometry(
-        &src.data,
+        flat.as_deref().unwrap_or(&src.data),
         src.width,
         src.height,
         s.rotation,
@@ -295,9 +301,16 @@ pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Nega
 
 // ---- analysis ------------------------------------------------------------------
 
-/// The 600px, border-cropped, blurred analysis buffer.
+/// The 600px, border-cropped, blurred analysis buffer. Film rebate, holder
+/// and light past the film are trimmed off the edges first (see
+/// [`frame_insets`]), then the border buffer.
 pub fn analysis_buffer(neg: &Negative, s: &Settings) -> Negative {
     let (d, w, h) = decode::downscale(&neg.data, neg.width, neg.height, ANALYSIS_SIZE);
+    let (d, w, h) = if s.image_type == ImageType::EditOnly {
+        (d, w, h)
+    } else {
+        decode::crop(&d, w, h, frame_insets(&d, w, h))
+    };
     let b = s.border_buffer.clamp(0.0, 40.0);
     let ins = [b, b, b, b];
     let (d, w, h) = decode::crop(&d, w, h, ins);
@@ -307,6 +320,40 @@ pub fn analysis_buffer(neg: &Negative, s: &Settings) -> Negative {
         height: h,
         data: d,
     }
+}
+
+/// Whether a density is not image: unexposed film (within 0.05 D of the
+/// base), light past the film (thinner than the base), or the holder
+/// (nearly opaque).
+fn not_image(p: [f32; 3]) -> bool {
+    p.iter().all(|d| d.abs() < 0.05) || p.iter().any(|&d| d < -0.15) || p.iter().all(|&d| d > 2.8)
+}
+
+/// Insets (percent: left, top, right, bottom) that trim the rows and columns
+/// along the edges that are mostly not image, up to 20 % per side, plus two
+/// lines for the soft edge between film border and image.
+fn frame_insets(d: &[[f32; 3]], w: usize, h: usize) -> [f32; 4] {
+    let line_is_border = |pixels: &mut dyn Iterator<Item = [f32; 3]>| {
+        let (mut n, mut border) = (0usize, 0usize);
+        for p in pixels {
+            n += 1;
+            border += not_image(p) as usize;
+        }
+        n > 0 && border * 2 >= n
+    };
+    let (mx, my) = (w / 10, h / 10);
+    let row = |y: usize| line_is_border(&mut (mx..w - mx).map(|x| d[y * w + x]));
+    let col = |x: usize| line_is_border(&mut (my..h - my).map(|y| d[y * w + x]));
+    let run = |n: usize, f: &dyn Fn(usize) -> bool| match (0..n / 5).take_while(|&i| f(i)).count() {
+        0 => 0,
+        k => k + 2,
+    };
+    let left = run(w, &|i| col(i));
+    let right = run(w, &|i| col(w - 1 - i));
+    let top = run(h, &|i| row(i));
+    let bottom = run(h, &|i| row(h - 1 - i));
+    let pct = |v: usize, n: usize| v as f32 * 100.0 / n as f32;
+    [pct(left, w), pct(top, h), pct(right, w), pct(bottom, h)]
 }
 
 /// Value at quantile `q` (0..1) of `v` (reordered in place).
@@ -341,6 +388,8 @@ fn channel_quantiles(buf: &Negative, t: ImageType) -> Levels {
 #[derive(Debug, Clone, Copy)]
 pub struct NeutralAxis {
     pub fit: [(f64, f64); 3],
+    /// Mean density of the tonal steps (a point on the axis).
+    pub centre: [f64; 3],
     /// Tonal steps (of 10) with enough near-neutral pixels.
     pub steps: usize,
 }
@@ -365,11 +414,11 @@ pub fn levels_from_buffer(buf: &Negative, t: ImageType) -> (Levels, Option<Neutr
             break;
         };
         for c in [0, 2] {
-            let (a, b) = fit.fit[c];
-            // Keep the fitted slope within reach of the channel's own range.
+            let b = fit.fit[c].1;
+            // Keep the slope within reach of the channel's own range.
             let own_b = (own[c].hi - own[c].lo) / (own[1].hi - own[1].lo).max(1e-3);
             let b = b.clamp(own_b * 0.8, own_b * 1.25);
-            let at = |g: f64| a + b * g;
+            let at = |g: f64| fit.centre[c] + b * (g - fit.centre[1]);
             l[c] = ChannelLevels {
                 lo: at(l[1].lo),
                 hi: at(l[1].hi).max(at(l[1].lo) + 0.05),
@@ -419,6 +468,7 @@ fn neutral_axis(buf: &Negative, l: &Levels, t: ImageType) -> Option<NeutralAxis>
     });
     Some(NeutralAxis {
         fit,
+        centre: std::array::from_fn(|c| steps.iter().map(|s| s[c]).sum::<f64>() / n),
         steps: steps.len(),
     })
 }
@@ -1280,6 +1330,83 @@ mod tests {
             sum += worst;
         }
         sum / 24.0
+    }
+
+    /// With no border buffer the analysis still finds the image inside the
+    /// film rebate instead of treating unexposed film as the shadows.
+    #[test]
+    fn rebate_is_kept_out_of_the_analysis() {
+        use crate::engine::testchart::{measure, negative};
+        let chart = negative(0.0);
+        let s = Settings {
+            border_buffer: 0.0,
+            ..chart_settings()
+        };
+        let a = analyse_chart(&chart, &s);
+        assert!(a.levels.iter().all(|c| c.lo > 0.15), "{:?}", a.levels);
+        let m = measure(&chart, &convert_chart(&chart, &s, &a, None));
+        // With the rebate in the analysis: neutral C* 3.21, full dE00 10.17.
+        assert!(m.neutral_cast < 0.5, "neutral C* {}", m.neutral_cast);
+    }
+
+    /// A flat-field frame divides out uneven illumination.
+    #[test]
+    fn flat_field_removes_uneven_light() {
+        use crate::engine::testchart::{flat_frame, measure, negative, vignette};
+        let dir = std::env::temp_dir().join(format!("nlp_flat_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let flat_path = dir.join("flat.tif");
+        let flat = flat_frame(0.35);
+        let px: Vec<[f32; 3]> = flat
+            .data
+            .iter()
+            .map(|p| p.map(color::srgb_encode))
+            .collect();
+        crate::engine::export::write_tiff(
+            &flat_path,
+            flat.width,
+            flat.height,
+            &px,
+            true,
+            false,
+            &color::icc_for(OutputSpace::Srgb),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        let mut chart = negative(0.0);
+        vignette(&mut chart, 0.35);
+        let without = chart_settings();
+        let with = Settings {
+            flat_field: Some(flat_path.clone()),
+            ..chart_settings()
+        };
+        let run = |s: &Settings| {
+            let a = analyse_chart(&chart, s);
+            measure(&chart, &convert_chart(&chart, s, &a, None))
+        };
+        let (m0, m1) = (run(&without), run(&with));
+        let _ = std::fs::remove_dir_all(&dir);
+        eprintln!(
+            "uneven light: tone-matched {:.2} -> {:.2}, neutral C* {:.2} -> {:.2} (max {:.2} -> {:.2})",
+            m0.tone_matched_de,
+            m1.tone_matched_de,
+            m0.neutral_cast,
+            m1.neutral_cast,
+            m0.neutral_cast_max,
+            m1.neutral_cast_max
+        );
+        // Even light: tone-matched 2.54.
+        assert!(
+            m0.tone_matched_de > 3.0,
+            "the falloff shows without correction"
+        );
+        assert!(
+            m1.tone_matched_de < 2.7,
+            "tone-matched dE00 {}",
+            m1.tone_matched_de
+        );
+        assert!(m1.neutral_cast < 0.5, "neutral C* {}", m1.neutral_cast);
     }
 
     /// Auto-Neutral on scenes dominated by one colour (foliage, sunset sky,

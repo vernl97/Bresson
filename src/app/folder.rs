@@ -19,6 +19,38 @@ pub fn source_instructions(s: Source) -> &'static str {
     }
 }
 
+/// The flat-field input: a frame of the bare light source or clear film
+/// leader, shot like the negatives. Shows the file name with Choose / Clear.
+pub fn flat_field_ui(
+    ui: &mut egui::Ui,
+    flat: &mut Option<std::path::PathBuf>,
+    start: Option<&std::path::Path>,
+) {
+    ui.label(RichText::new("Flat field").small().color(theme::MUTED))
+        .on_hover_text(
+            "A frame of the bare light source (or clear film leader) shot with the same camera, \
+         lens and light. Divides out uneven light and lens falloff.",
+        );
+    ui.horizontal(|ui| {
+        let name = flat
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "None".into());
+        ui.label(RichText::new(name).color(theme::TEXT));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if flat.is_some() && ui.add(widgets::ghost("Clear")).clicked() {
+                *flat = None;
+            }
+            if ui.add(widgets::ghost("Choose…")).clicked() {
+                if let Some(p) = super::picker::pick_files(start).into_iter().next() {
+                    *flat = Some(p);
+                }
+            }
+        });
+    });
+}
+
 #[derive(Clone, Copy)]
 enum CellAction {
     Open,
@@ -800,6 +832,12 @@ impl NlpApp {
                     FilmBase::label,
                     "Neutralises the orange mask before analysis. Sampled uses each frame's own border sample.",
                 );
+                let start = d
+                    .targets
+                    .first()
+                    .and_then(|&i| self.frames[i].path.parent().map(|p| p.to_path_buf()));
+                flat_field_ui(ui, &mut s.flat_field, start.as_deref());
+                ui.add_space(4.0);
                 widgets::fl_slider_u8(
                     ui,
                     "Pre-saturation",
@@ -860,6 +898,7 @@ impl NlpApp {
                 let (was_type, was_model) = (s.image_type, s.color_model);
                 (s.image_type, s.source, s.color_model, s.film_base) =
                     (o.image_type, o.source, o.color_model, o.film_base);
+                s.flat_field = o.flat_field.clone();
                 (
                     s.pre_saturation,
                     s.border_buffer,

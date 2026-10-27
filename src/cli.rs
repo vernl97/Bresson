@@ -25,6 +25,7 @@ CONVERT OPTIONS:
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
   --border PCT         Border buffer percent (default 5)
   --auto-crop          Crop and straighten each frame to its detected frame
+  --flat FILE          Flat-field frame (bare light or clear film leader, shot like the negatives)
   --jpg                Write JPEG instead of 16-bit TIFF
   --long-edge PX       Resize so the long edge is at most PX (default: full size)
   --name TEMPLATE      File name: {name} {suffix} {n} {n:03} {stock} {iso} {date}
@@ -89,6 +90,7 @@ fn convert(args: Vec<String>) -> Result<()> {
             "--lut" => s.lut = find(Lut::ALL, Lut::label, &val()?)?,
             "--border" => s.border_buffer = val()?.parse()?,
             "--auto-crop" => s.auto_crop = true,
+            "--flat" => s.flat_field = Some(PathBuf::from(val()?)),
             "--jpg" => ex.format = ExportFormat::Jpeg,
             "--long-edge" => ex.long_edge = val()?.parse()?,
             "--name" => ex.name_template = val()?,

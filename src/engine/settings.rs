@@ -173,6 +173,9 @@ pub struct Settings {
     pub film_base_sample: [f32; 3],
     /// Detect the frame (crop and straighten) when converting an uncropped frame.
     pub auto_crop: bool,
+    /// A frame of the bare light source (or clear film leader) shot like the
+    /// negatives; divides out uneven illumination and lens falloff.
+    pub flat_field: Option<PathBuf>,
 
     // ---- Geometry (Lightroom would provide these) ---------------------------
     /// Quarter turns clockwise.
@@ -249,6 +252,7 @@ impl Default for Settings {
             film_base: FilmBase::Auto,
             film_base_sample: [1.0, 1.0, 1.0],
             auto_crop: false,
+            flat_field: None,
             rotation: 0,
             flip_h: false,
             straighten: 0.0,
@@ -322,6 +326,7 @@ impl Settings {
             border_buffer: (self.border_buffer * 100.0).round() as i32,
             film_base: self.film_base,
             film_base_sample: self.film_base_sample.map(|v| (v * 10000.0).round() as i32),
+            flat_field: self.flat_field.clone(),
         }
     }
 
@@ -351,6 +356,7 @@ impl Settings {
         );
         (self.rotation, self.flip_h, self.straighten, self.crop) =
             (k.rotation, k.flip_h, k.straighten, k.crop);
+        self.flat_field = k.flat_field.clone();
     }
 
     /// Copy only the adjustment parameters (used by paste/sync). Like the
@@ -378,6 +384,8 @@ pub struct AnalysisKey {
     pub border_buffer: i32,
     pub film_base: FilmBase,
     pub film_base_sample: [i32; 3],
+    #[serde(default)]
+    pub flat_field: Option<PathBuf>,
 }
 
 /// Positive copy settings (Advanced tab).

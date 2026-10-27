@@ -60,8 +60,8 @@ Settings are saved inside the `NLP/` subfolder as `<file>.nlp.json`.
 
 The engine started as a port of the Lightroom plugin and now models the film itself: a scan becomes density, density is printed onto a paper curve.
 
-1. **Density.** `pipeline::prepare_negative` takes linear camera RGB through the camera matrix, divides out the film base and stores `log10(base / transmittance)` per channel, unclamped. A C-41 dye crosstalk correction (the dyes' unwanted absorptions) and the colour model's calibration are applied in density.
-2. **Levels.** `pipeline::analyze` measures each channel's density range (exact 0.05 % / 99.99 % quantiles and the median) on the 600 px, border-cropped, blurred analysis buffer. Normalising every channel to its own range matches the layers' different H&D slopes, so neutrals stay neutral from shadows to highlights.
+1. **Density.** `pipeline::prepare_negative` divides out uneven light with an optional flat-field frame (`flat.rs`), takes linear camera RGB through the camera matrix, divides out the film base and stores `log10(base / transmittance)` per channel, unclamped. A C-41 dye crosstalk correction (the dyes' unwanted absorptions) and the colour model's calibration are applied in density.
+2. **Levels.** `pipeline::analyze` trims film rebate, holder and light past the film off the edges (found by density), then measures each channel's density range (exact 0.05 % / 99.99 % quantiles and the median) on the 600 px, border-cropped, blurred analysis buffer. Red and blue are placed on the image's neutral axis. Normalising every channel to its own range matches the layers' different H&D slopes, so neutrals stay neutral from shadows to highlights.
 3. **Print.** `curve.rs` shapes the normalised density (brightness, contrast, lights/darks, whites/blacks, toning), turns it into paper log exposure plus printing filtration (white balance and the C·M·Y keys, in CC) and print time (EV), and prints it on a logistic paper curve with a toe and shoulder. The result is baked into density-indexed LUTs.
 4. **Auto colour.** Auto-Neutral is the filtration that prints the near-neutral pixels grey.
 5. **Rolls.** The roll's levels are the median of its frames, with frames of an outlying colour balance left out. EXIF exposure differences are exact density offsets (`log10 2` per stop). Pro Lab keeps the roll's colour balance on each frame's own density range.
@@ -75,13 +75,15 @@ The engine started as a port of the Lightroom plugin and now models the film its
 | `presets.rs` | Colour models, pre-saturation, film WB presets, sharpening |
 | `lut.rs` | Reads the plugin's 3D looks from `LR Files/CameraRaw/Settings/NLP Enhanced Settings/*.xmp` (Adobe base85 + zlib RGB tables, 32³) |
 | `color.rs` | Working and output spaces, CIELAB / CIEDE2000, generated ICC profiles |
+| `flat.rs` | Flat-field gain maps |
 | `testchart.rs` | Physically modelled test negative and quality metrics |
 | `export.rs` | Positive copies with ICC and EXIF, TIF scan prep |
 
 ### Notes
 - **Raw processing.** `rawler` decodes the raw files and supplies the camera matrix.
 - **Camera profiles.** The plugin's *Negative Lab* DCPs only identify VueScan/SilverFast DNGs. Their tone curves and look tables are made for scenes, so the conversion doesn't apply them.
-- **Film base.** *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper.
+- **Film base.** *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper. In density a wrong base is a constant per-channel offset that the levels absorb, so the conversion barely depends on it (tested on a chart cropped tight with no rebate).
+- **Flat field.** A frame of the bare light source or clear film leader, shot with the same camera, lens and light (Convert dialog, the editor's Source section, or `--flat FILE`). Uneven light varies across the frame, which the levels can't absorb.
 - **Sidecars** from before the density engine keep their settings and metadata but need a new Convert.
 - **LUT folder.** The app finds the LUTs automatically in `../NLP Lightroom Plugin/...` or in Lightroom's CameraRaw settings folder. If they are missing, it uses built-in approximations of each look.
 - **Not ported:** licensing and the Lightroom catalog/DNG-profile plumbing, which a standalone app doesn't need.
