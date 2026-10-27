@@ -1163,6 +1163,40 @@ mod tests {
     }
 
     #[test]
+    fn lab_keys_shift_towards_their_colour() {
+        use crate::engine::settings::lab::{self, Channel};
+        let (src, grey) = synthetic_negative();
+        let mut s = Settings::default();
+        s.lut = crate::engine::settings::Lut::None;
+        let base = resolve_base(&src, &s, None);
+        let neg = prepare_negative(&src, &s, base);
+        let a = analyze(&neg, &s, base, None);
+        let mean = |s: &Settings| {
+            let px = Renderer::new(s, Some(&a.origins.into()), OutputSpace::Srgb).render(&neg, 0.0);
+            let mut m = [0.0f32; 3];
+            for &i in &grey {
+                for c in 0..3 {
+                    m[c] += px[i][c] / grey.len() as f32;
+                }
+            }
+            m
+        };
+        let m0 = mean(&s);
+        // +C / +M / +Y take away red / green / blue; +D darkens.
+        for (ch, c) in [(Channel::C, 0), (Channel::M, 1), (Channel::Y, 2)] {
+            let mut t = s.clone();
+            lab::nudge(&mut t, ch, 5);
+            let m = mean(&t);
+            let rel = |m: [f32; 3]| m[c] - (m[0] + m[1] + m[2]) / 3.0;
+            assert!(rel(m) < rel(m0), "{ch:?}: {m0:?} -> {m:?}");
+        }
+        let mut t = s.clone();
+        lab::nudge(&mut t, Channel::D, 3);
+        let m = mean(&t);
+        assert!(m[1] < m0[1], "D+: {m0:?} -> {m:?}");
+    }
+
+    #[test]
     fn edit_only_skips_analysis() {
         let (src, _) = synthetic_negative();
         let mut s = Settings::default();

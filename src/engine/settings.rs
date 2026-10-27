@@ -565,6 +565,73 @@ pub struct FilmMetadata {
 
 impl FilmMetadata {}
 
+/// Lab-scanner corrections: the Frontier/Noritsu D·C·M·Y keys, in fixed
+/// steps on top of the existing print exposure and mid-tone colour sliders.
+pub mod lab {
+    use super::Settings;
+
+    /// One density click: 1/6 EV, about 0.05 D.
+    pub const D_STEP: f32 = 1.0 / 6.0;
+    /// One colour click, in mid-tone slider units.
+    pub const C_STEP: f32 = 2.0;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Channel {
+        /// Print density: + is darker.
+        D,
+        C,
+        M,
+        Y,
+    }
+
+    fn value(s: &mut Settings, ch: Channel) -> (&mut f32, f32, f32) {
+        match ch {
+            // Density runs against print exposure (+ EV = lighter).
+            Channel::D => (&mut s.print_exposure, -D_STEP, 5.0),
+            Channel::C => (&mut s.mid_cyan, C_STEP, 75.0),
+            Channel::M => (&mut s.mid_tint, C_STEP, 75.0),
+            Channel::Y => (&mut s.mid_temp, C_STEP, 75.0),
+        }
+    }
+
+    /// Move `ch` by `clicks` steps.
+    pub fn nudge(s: &mut Settings, ch: Channel, clicks: i32) {
+        let (v, step, max) = value(s, ch);
+        *v = (*v + step * clicks as f32).clamp(-max, max);
+    }
+
+    /// Current offsets in clicks: D, C, M, Y.
+    pub fn clicks(s: &Settings) -> [i32; 4] {
+        let mut s = s.clone();
+        [Channel::D, Channel::C, Channel::M, Channel::Y].map(|ch| {
+            let (v, step, _) = value(&mut s, ch);
+            (*v / step).round() as i32
+        })
+    }
+
+    /// Zero density and the mid-tone colour.
+    pub fn reset(s: &mut Settings) {
+        s.print_exposure = 0.0;
+        s.mid_cyan = 0.0;
+        s.mid_tint = 0.0;
+        s.mid_temp = 0.0;
+    }
+
+    /// "D+2 C−1 M0 Y+1", or `None` when every offset is zero.
+    pub fn readout(s: &Settings) -> Option<String> {
+        let c = clicks(s);
+        if c == [0; 4] {
+            return None;
+        }
+        let f = |v: i32| match v {
+            0 => "0".to_string(),
+            v if v > 0 => format!("+{v}"),
+            v => format!("−{}", -v),
+        };
+        Some(format!("D{} C{} M{} Y{}", f(c[0]), f(c[1]), f(c[2]), f(c[3])))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,6 +657,26 @@ mod tests {
         assert_eq!(dst.brightness, 12.0);
         assert_eq!(dst.analysis_key(), before);
         assert_eq!(dst.crop, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+        #[test]
+    fn lab_keys_step_and_read_out() {
+        let mut s = Settings::default();
+        assert_eq!(lab::readout(&s), None);
+        lab::nudge(&mut s, lab::Channel::D, 2);
+        lab::nudge(&mut s, lab::Channel::C, -1);
+        lab::nudge(&mut s, lab::Channel::Y, 3);
+        assert!(s.print_exposure < 0.0, "denser prints are darker");
+        assert_eq!(lab::clicks(&s), [2, -1, 0, 3]);
+        assert_eq!(lab::readout(&s).unwrap(), "D+2 C−1 M0 Y+3");
+        let key = s.analysis_key();
+        lab::reset(&mut s);
+        assert_eq!(lab::readout(&s), None);
+        assert_eq!(s.analysis_key(), key);
+        for _ in 0..100 {
+            lab::nudge(&mut s, lab::Channel::M, 1);
+        }
+        assert_eq!(s.mid_tint, 75.0);
     }
 
     #[test]

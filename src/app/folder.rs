@@ -308,6 +308,13 @@ impl NlpApp {
         if export {
             self.open_export_dialog(self.sel_vec());
         }
+        if let Some(key) = super::lab_key(ctx).filter(|_| self.export_targets.is_none()) {
+            let sel = self.sel_vec();
+            let n = sel.iter().filter(|&&i| self.apply_lab_key(i, key)).count();
+            if n < sel.len() {
+                self.toast("Only converted frames can be corrected", false);
+            }
+        }
     }
 
     pub fn copy_settings(&mut self) {
@@ -456,6 +463,16 @@ impl NlpApp {
                         if f.sc.is_converted() {
                             p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::OK);
                             x -= 12.0;
+                            if let Some(r) = lab::readout(&f.sc.settings) {
+                                let g = p.layout_no_wrap(
+                                    r,
+                                    egui::FontId::monospace(9.5),
+                                    theme::MUTED,
+                                );
+                                let sz = g.size();
+                                p.galley(pos2(x - sz.x, row_y - sz.y / 2.0), g, theme::MUTED);
+                                x -= sz.x + 6.0;
+                            }
                         }
                         let name_x = rect.left() + 6.0;
                         let mut job = egui::text::LayoutJob::simple_singleline(

@@ -521,6 +521,13 @@ impl NlpApp {
             self.editor.before = !self.editor.before;
             self.editor.dirty = true;
         }
+        if let Some(key) = super::lab_key(ctx).filter(|_| self.editor.crop.is_none()) {
+            if self.apply_lab_key(i, key) {
+                self.editor.dirty = true;
+            } else {
+                self.toast("Convert the frame before correcting it", false);
+            }
+        }
         if undo {
             self.history_step(i, true);
         }
@@ -591,9 +598,10 @@ impl NlpApp {
             "Before: negative".to_string()
         } else if f.sc.is_converted() {
             format!(
-                "{}{}",
+                "{}{}{}",
                 s.tone_profile.label(),
-                if f.is_roll() { " · roll" } else { "" }
+                if f.is_roll() { " · roll" } else { "" },
+                lab::readout(s).map(|r| format!(" · {r}")).unwrap_or_default()
             )
         } else {
             "Not converted".to_string()

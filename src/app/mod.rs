@@ -15,11 +15,45 @@ use eframe::egui;
 
 use crate::engine::decode::{self, SourceImage};
 use crate::engine::pipeline::{self, Renderer};
-use crate::engine::settings::{ExportFormat, ExportSettings, OutputSpace, Settings, WbMode};
+use crate::engine::settings::{ExportFormat, ExportSettings, OutputSpace, Settings, WbMode, lab};
 use crate::engine::sidecar::{self, Defaults, Sidecar};
 use jobs::{JobResult, Jobs};
 
 pub const THUMB_SIZE: usize = 360;
+
+/// A Frontier/Noritsu-style correction key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LabKey {
+    Nudge(lab::Channel, i32),
+    Reset,
+}
+
+/// The lab correction key pressed this frame, on the number row or numpad:
+/// 7 8 9 add C M Y, 1 2 3 take it away, 4 / 6 print darker / lighter
+/// (density + / −), 0 resets.
+pub fn lab_key(ctx: &egui::Context) -> Option<LabKey> {
+    use egui::Key;
+    use lab::Channel::*;
+    ctx.input(|i| {
+        if i.modifiers.command || i.modifiers.alt || i.modifiers.ctrl {
+            return None;
+        }
+        let keys = [
+            (Key::Num7, LabKey::Nudge(C, 1)),
+            (Key::Num8, LabKey::Nudge(M, 1)),
+            (Key::Num9, LabKey::Nudge(Y, 1)),
+            (Key::Num1, LabKey::Nudge(C, -1)),
+            (Key::Num2, LabKey::Nudge(M, -1)),
+            (Key::Num3, LabKey::Nudge(Y, -1)),
+            (Key::Num4, LabKey::Nudge(D, 1)),
+            (Key::Num6, LabKey::Nudge(D, -1)),
+            (Key::Num0, LabKey::Reset),
+        ];
+        keys.into_iter()
+            .find(|(k, _)| i.key_pressed(*k))
+            .map(|(_, l)| l)
+    })
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
@@ -334,6 +368,21 @@ impl NlpApp {
 
     pub fn index_of(&self, p: &Path) -> Option<usize> {
         self.frames.iter().position(|f| f.path == p)
+    }
+
+    /// Apply this frame's lab correction key (`lab_key`) to frame `i`.
+    /// Returns false when the frame isn't converted.
+    pub fn apply_lab_key(&mut self, i: usize, key: LabKey) -> bool {
+        if !self.frames[i].sc.is_converted() {
+            return false;
+        }
+        let s = &mut self.frames[i].sc.settings;
+        match key {
+            LabKey::Nudge(ch, n) => lab::nudge(s, ch, n),
+            LabKey::Reset => lab::reset(s),
+        }
+        self.mark_changed(i);
+        true
     }
 
     pub fn mark_changed(&mut self, i: usize) {
