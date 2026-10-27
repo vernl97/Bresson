@@ -149,3 +149,17 @@ fn rfd_pick_files(start: Option<&Path>) -> Vec<PathBuf> {
 pub fn pick_files_or_folder(start: Option<&Path>) -> Vec<PathBuf> {
     rfd_pick_folder(start, None).into_iter().collect()
 }
+
+/// Show `path` in the system file manager (Finder, Explorer), selected
+/// where the platform can.
+pub fn reveal(path: &Path) {
+    use std::process::Command;
+    let r = if cfg!(target_os = "macos") {
+        Command::new("open").arg("-R").arg(path).spawn()
+    } else if cfg!(target_os = "windows") {
+        Command::new("explorer").arg(format!("/select,{}", path.display())).spawn()
+    } else {
+        Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn()
+    };
+    let _ = r;
+}

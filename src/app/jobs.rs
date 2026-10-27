@@ -98,7 +98,7 @@ struct ProxyHeader {
     info: SourceInfo,
 }
 
-const MAGIC: &[u8; 8] = b"NLPPRX03";
+const MAGIC: &[u8; 8] = b"NLPPRX04";
 
 fn read_cache(p: &Path) -> Option<SourceImage> {
     let mut f = std::fs::File::open(p).ok()?;

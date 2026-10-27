@@ -1,9 +1,11 @@
 //! NLP Studio GUI: a Folder View for browsing / batch-editing a set of scans
 //! and an Editor View for fine-tuning a single frame.
 
+mod auto;
 mod editor;
 mod folder;
 mod gpu;
+mod history;
 mod jobs;
 mod picker;
 mod roll;
@@ -18,7 +20,7 @@ use eframe::egui;
 use crate::engine::decode::{self, SourceImage};
 use crate::engine::pipeline::{self, AutoWb, Renderer};
 use crate::engine::settings::{
-    ExportFormat, ExportPreset, ExportSettings, OutputSpace, Settings, WbMode, lab,
+    ExportFormat, ExportPreset, ExportSettings, OutputSpace, Placement, Settings, WbMode, lab,
 };
 use crate::engine::sidecar::{self, Defaults, Sidecar};
 use jobs::{JobResult, Jobs};
@@ -90,6 +92,9 @@ pub struct Frame {
     pub exporting: bool,
     /// No saved settings yet: the scan source is set from the file.
     pub source_auto: bool,
+    /// Not converted when the folder opened: cropped and converted by
+    /// itself (see `auto.rs`) until the user converts it by hand.
+    pub auto_convert: bool,
 }
 
 impl Frame {
@@ -159,6 +164,8 @@ pub struct Toast {
     pub text: String,
     pub until: f64,
     pub error: bool,
+    /// A file the toast offers to show in Finder / Explorer.
+    pub reveal: Option<PathBuf>,
 }
 
 pub struct NlpApp {
@@ -182,8 +189,6 @@ pub struct NlpApp {
     pub export_targets: Option<Vec<usize>>,
     /// Open "Convert" dialog: the conversion options before analysis runs.
     pub convert_dialog: Option<folder::ConvertDialog>,
-    /// Crop -> settings -> convert guide shown when an unconverted frame opens.
-    pub wizard: folder::WizardState,
     /// A roll conversion paused because its frames' exposures differ by
     /// more than 1 EV: the frames and the spread.
     pub exposure_prompt: Option<(Vec<jobs::ConvertItem>, f64)>,
@@ -193,6 +198,10 @@ pub struct NlpApp {
     pub roll: roll::RollState,
     /// The editor preview is drawn on the GPU (wgpu available).
     pub gpu: bool,
+    /// Conversions and exports the app runs by itself.
+    pub auto: auto::AutoState,
+    /// Undo / redo of settings edits, editor and grid alike.
+    pub history: history::History,
 }
 
 impl NlpApp {
@@ -223,7 +232,8 @@ impl NlpApp {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
-            wizard: Default::default(),
+            auto: Default::default(),
+            history: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -248,7 +258,30 @@ impl NlpApp {
             text: text.into(),
             until,
             error,
+            reveal: None,
         });
+    }
+
+    /// Report a file that couldn't be read. Failures arriving together
+    /// share one toast instead of one each.
+    fn read_failed(&mut self, name: String) {
+        let until = self.time + 8.0;
+        self.auto.read_failures.push(name);
+        let names = &self.auto.read_failures;
+        let text = match names.len() {
+            1 => format!("Couldn't read {}", names[0]),
+            n => format!("Couldn't read {n} files: {}", names.join(", ")),
+        };
+        let live = self.toasts.iter_mut().find(|t| t.error && t.text.starts_with("Couldn't read"));
+        match live {
+            Some(t) => (t.text, t.until) = (text, until),
+            None => self.toasts.push(Toast {
+                text,
+                until,
+                error: true,
+                reveal: None,
+            }),
+        }
     }
 
     // ---- library --------------------------------------------------------------
@@ -273,7 +306,7 @@ impl NlpApp {
         let _ = sidecar::save_defaults(&self.defaults);
         self.roll.projects_open = false;
         if self.roll.info.is_none() {
-            self.open_roll_dialog(dir, true);
+            self.offer_new_roll(dir);
         }
     }
 
@@ -326,6 +359,7 @@ impl NlpApp {
         self.save_all();
         let _ = std::fs::create_dir_all(dir.join("NLP"));
         self.roll.info = sidecar::load_roll_info(dir);
+        self.roll.banner = None;
         let roll_meta = self.roll.info.as_ref().map(|r| r.metadata.clone());
         self.frames = files
             .into_iter()
@@ -342,6 +376,7 @@ impl NlpApp {
                     sc.settings.film_base = crate::engine::settings::FilmBase::Off;
                     sc.settings.source = crate::engine::settings::Source::TifScan;
                 }
+                let auto_convert = !sc.is_converted();
                 Frame {
                     name: path
                         .file_name()
@@ -356,6 +391,7 @@ impl NlpApp {
                     dirty_since: None,
                     exporting: false,
                     source_auto,
+                    auto_convert,
                 }
             })
             .collect();
@@ -365,6 +401,8 @@ impl NlpApp {
         self.anchor = None;
         self.view = View::Folder;
         self.editor = editor::Editor::default();
+        self.auto = Default::default();
+        self.history = Default::default();
         for i in 0..self.frames.len() {
             self.request_proxy(i);
         }
@@ -467,6 +505,7 @@ impl NlpApp {
         if idx.is_empty() {
             return;
         }
+        self.auto_release(&idx);
         let items = idx
             .iter()
             .map(|&i| jobs::ConvertItem {
@@ -475,10 +514,12 @@ impl NlpApp {
                 settings: self.frames[i].sc.settings.clone(),
             })
             .collect();
+        self.convert_started(idx.len());
         self.jobs.spawn(move || jobs::convert(items, as_roll, true));
     }
 
     pub fn unconvert(&mut self, idx: &[usize]) {
+        self.auto_release(idx);
         for &i in idx {
             let f = &mut self.frames[i];
             f.sc.analysis = None;
@@ -553,6 +594,8 @@ impl NlpApp {
         self.export_targets = Some(targets);
     }
 
+    /// Export frames `idx`. Unconverted frames are converted first and
+    /// exported when their analysis arrives.
     pub fn export_with_settings(&mut self, idx: Vec<usize>, ex: ExportSettings) {
         let items: Vec<_> = idx
             .iter()
@@ -560,6 +603,7 @@ impl NlpApp {
             .collect();
         let targets = crate::engine::export::batch_paths(&items, &ex);
         let mut n = 0;
+        let mut unconverted = Vec::new();
         for (i, target) in idx.into_iter().zip(targets) {
             let f = &mut self.frames[i];
             if f.exporting {
@@ -567,28 +611,14 @@ impl NlpApp {
             }
             f.exporting = true;
             n += 1;
-            let (path, s, a, roll, meta, ex) = (
-                f.path.clone(),
-                f.sc.settings.clone(),
-                f.sc.analysis.clone(),
-                f.sc.roll.clone(),
-                f.sc.metadata.clone(),
-                ex.clone(),
-            );
-            self.jobs.spawn(move || {
-                let result = crate::engine::export::export_frame(
-                    &path,
-                    &s,
-                    a.as_ref(),
-                    roll.as_ref(),
-                    &meta,
-                    &ex,
-                    &target,
-                )
-                .map_err(|e| format!("{e:#}"));
-                JobResult::Exported { path, result }
-            });
+            if f.sc.is_converted() {
+                self.spawn_export(i, target, ex.clone());
+            } else {
+                unconverted.push(i);
+                self.auto.export_waiting.push((f.path.clone(), target, ex.clone()));
+            }
         }
+        self.convert(unconverted, false);
         if n > 0 {
             if self.export_done >= self.export_total {
                 self.export_total = 0;
@@ -596,6 +626,30 @@ impl NlpApp {
             }
             self.export_total += n;
         }
+    }
+
+    pub fn spawn_export(&mut self, i: usize, target: PathBuf, ex: ExportSettings) {
+        let f = &self.frames[i];
+        let (path, s, a, roll, meta) = (
+            f.path.clone(),
+            f.sc.settings.clone(),
+            f.sc.analysis.clone(),
+            f.sc.roll.clone(),
+            f.sc.metadata.clone(),
+        );
+        self.jobs.spawn(move || {
+            let result = crate::engine::export::export_frame(
+                &path,
+                &s,
+                a.as_ref(),
+                roll.as_ref(),
+                &meta,
+                &ex,
+                &target,
+            )
+            .map_err(|e| format!("{e:#}"));
+            JobResult::Exported { path, result }
+        });
     }
 
     pub fn export_dialog(&mut self, ctx: &egui::Context) {
@@ -614,18 +668,18 @@ impl NlpApp {
             return;
         }
 
-        let default_dir = targets
+        let scan_dir = targets
             .first()
             .and_then(|&idx| self.frames.get(idx))
             .and_then(|f| f.path.parent())
             .map(Path::to_path_buf)
             .or_else(|| self.folder.clone())
             .unwrap_or_else(|| PathBuf::from("."));
-
-        let display_dir = match &self.defaults.export.output_dir {
-            Some(d) if !d.as_os_str().is_empty() && d.exists() => d.clone(),
-            _ => default_dir.clone(),
-        };
+        // A custom folder: the roll's own, else the last one chosen.
+        let custom_dir = self
+            .roll_export_dir()
+            .or_else(|| self.defaults.export.output_dir.clone())
+            .filter(|d| !d.as_os_str().is_empty() && d.exists());
 
         let mut go = false;
         let mut should_close = false;
@@ -704,16 +758,54 @@ impl NlpApp {
                         .small()
                         .color(theme::MUTED),
                 );
-                let display_str = display_dir.to_string_lossy().to_string();
-                let field = egui::Button::new(egui::RichText::new(&display_str).color(theme::TEXT))
-                    .truncate()
-                    .right_text(egui::RichText::new("Change…").color(theme::ACCENT))
-                    .min_size(egui::vec2(ui.available_width(), 30.0));
-                if ui.add(field).on_hover_text(&display_str).clicked() {
-                    if let Some(picked) = picker::pick_folder(Some(&display_dir), Some("Choose")) {
-                        picked_dir = Some(picked);
+                let dest_name = |custom: bool, p: Placement| match (custom, p) {
+                    (true, _) => "Custom folder",
+                    (false, Placement::Subfolder) => "Subfolder next to the scans",
+                    (false, Placement::SameFolder) => "Next to the scans",
+                };
+                let custom = custom_dir.is_some();
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("export_dest")
+                        .width(if !custom && ex.placement == Placement::Subfolder { 220.0 } else { ui.available_width() - 4.0 })
+                        .selected_text(dest_name(custom, ex.placement))
+                        .show_ui(ui, |ui| {
+                            for p in [Placement::Subfolder, Placement::SameFolder] {
+                                if ui.selectable_label(!custom && ex.placement == p, dest_name(false, p)).clicked() {
+                                    ex.placement = p;
+                                    picked_dir = Some(PathBuf::new());
+                                    save = true;
+                                }
+                            }
+                            if ui.selectable_label(custom, "Custom folder…").clicked() {
+                                let start = custom_dir.clone().unwrap_or_else(|| scan_dir.clone());
+                                if let Some(picked) = picker::pick_folder(Some(&start), Some("Choose")) {
+                                    picked_dir = Some(picked);
+                                }
+                            }
+                        });
+                    if !custom && ex.placement == Placement::Subfolder {
+                        save |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut ex.subfolder)
+                                    .hint_text("Positives")
+                                    .desired_width(ui.available_width() - 4.0),
+                            )
+                            .on_hover_text("Subfolder name")
+                            .changed();
                     }
-                }
+                });
+                let mut shown = ex.clone();
+                shown.output_dir = custom_dir.clone();
+                let dest = crate::engine::export::output_path(
+                    &first_path,
+                    &shown,
+                    &crate::engine::export::NameCtx { n: 1, meta: &first_meta },
+                );
+                let dest = dest.parent().unwrap_or(&scan_dir).display().to_string();
+                let r = ui.add(
+                    egui::Label::new(egui::RichText::new(&dest).small().color(theme::FAINT)).truncate(),
+                );
+                r.on_hover_text(&dest);
 
                 ui.add_space(10.0);
                 egui::CollapsingHeader::new(
@@ -810,16 +902,37 @@ impl NlpApp {
                             .response
                             .on_hover_text("Long edge of the exported image");
                         let ui = &mut cols[1];
-                        ui.label(egui::RichText::new("File name").small().color(theme::MUTED))
-                            .on_hover_text(
-                                "Tokens: {name} source name · {suffix} · {n} or {n:03} position in the export · {stock} · {iso} · {date} scan date",
-                            );
+                        ui.label(egui::RichText::new("File name").small().color(theme::MUTED));
                         save |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut ex.name_template)
                                     .desired_width(ui.available_width() - 4.0),
                             )
                             .changed();
+                    });
+                    // Click a token to add it to the file name.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                        for (tok, tip) in [
+                            ("{name}", "Source file name"),
+                            ("{suffix}", "The suffix, e.g. -positive"),
+                            ("{n:03}", "Position in the export: 001, 002, …"),
+                            ("{stock}", "Film stock"),
+                            ("{iso}", "Film ISO"),
+                            ("{date}", "Scan date"),
+                        ] {
+                            if ui
+                                .add(
+                                    egui::Button::new(egui::RichText::new(tok).small().monospace().color(theme::MUTED))
+                                        .corner_radius(8.0),
+                                )
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                ex.name_template.push_str(tok);
+                                save = true;
+                            }
+                        }
                     });
                     let preview = crate::engine::export::file_name(
                         &first_path,
@@ -861,9 +974,10 @@ impl NlpApp {
         if save {
             let _ = crate::engine::sidecar::save_defaults(&self.defaults);
         }
+        // An empty path clears the custom folder.
         if let Some(picked) = picked_dir {
-            self.defaults.export.output_dir = Some(picked);
-            let _ = crate::engine::sidecar::save_defaults(&self.defaults);
+            let dir = (!picked.as_os_str().is_empty()).then_some(picked);
+            self.set_export_dir(dir);
         }
 
         if r.should_close() || should_close || go {
@@ -879,7 +993,7 @@ impl NlpApp {
             self.editor.export_open = false;
 
             let mut ex = self.defaults.export.clone();
-            ex.output_dir = Some(display_dir);
+            ex.output_dir = custom_dir;
 
             for &t in &targets {
                 self.save_frame(t);
@@ -894,7 +1008,10 @@ impl NlpApp {
         while let Ok(r) = self.jobs.rx.try_recv() {
             match r {
                 JobResult::ExposureVariance { items, spread } => {
-                    self.exposure_prompt = Some((items, spread));
+                    self.auto.convert_done += items.len();
+                    if let Some(items) = self.auto_exposure_variance(items, spread) {
+                        self.exposure_prompt = Some((items, spread));
+                    }
                 }
                 JobResult::Proxy { path, result } => {
                     let Some(i) = self.index_of(&path) else {
@@ -913,10 +1030,11 @@ impl NlpApp {
                             });
                             self.frames[i].proxy = ProxyState::Ready(p);
                             self.frames[i].thumb_dirty = true;
+                            self.auto_queue(i);
                         }
                         Err(e) => {
-                            self.frames[i].proxy = ProxyState::Failed(e.clone());
-                            self.toast(e, true);
+                            self.frames[i].proxy = ProxyState::Failed(e);
+                            self.read_failed(self.frames[i].name.clone());
                         }
                     }
                 }
@@ -940,10 +1058,13 @@ impl NlpApp {
                     roll,
                     errors,
                 } => {
-                    for e in errors {
-                        self.toast(e, true);
+                    for e in &errors {
+                        self.toast(e.clone(), true);
                     }
                     let n = frames.len();
+                    self.auto.convert_done += n + errors.len();
+                    let paths: Vec<PathBuf> = frames.iter().map(|f| f.0.clone()).collect();
+                    let auto = self.auto_converted(&paths, roll.is_some());
                     for (path, src, a, detected) in frames {
                         let Some(i) = self.index_of(&path) else {
                             continue;
@@ -983,8 +1104,13 @@ impl NlpApp {
                             );
                         }
                     }
-                    self.toast(format!("Converted {n} frame(s)"), false);
+                    if !auto {
+                        self.toast(format!("Converted {n} frame(s)"), false);
+                    } else if roll.is_some() {
+                        self.toast(format!("Balanced {n} frames as a roll"), false);
+                    }
                     self.editor.invalidate();
+                    self.flush_waiting_exports();
                 }
                 JobResult::Exported { path, result } => {
                     self.export_done += 1;
@@ -994,13 +1120,17 @@ impl NlpApp {
                     match result {
                         Ok(p) => {
                             if self.export_done >= self.export_total {
+                                let dir = p.parent().unwrap_or(&p).display().to_string();
                                 let msg = format!(
-                                    "Exported {} positive cop{} (last: {})",
+                                    "Exported {} positive cop{} to {dir}",
                                     self.export_total,
                                     if self.export_total == 1 { "y" } else { "ies" },
-                                    p.display()
                                 );
                                 self.toast(msg, false);
+                                if let Some(t) = self.toasts.last_mut() {
+                                    t.reveal = Some(p);
+                                    t.until += 4.0;
+                                }
                             }
                         }
                         Err(e) => self.toast(format!("Export failed: {e}"), true),
@@ -1068,7 +1198,6 @@ impl NlpApp {
         }
         self.request_proxy(i);
         self.view = View::Editor;
-        self.start_wizard(i);
     }
 
     pub fn choose_folder(&mut self) {
@@ -1091,11 +1220,11 @@ impl NlpApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
         egui::Area::new(egui::Id::new("toasts"))
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -44.0])
-            .interactable(false)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     let n = self.toasts.len();
+                    let mut reveal = None;
                     for t in self.toasts.iter().skip(n.saturating_sub(3)) {
                         egui::Frame::new()
                             .fill(theme::SURFACE)
@@ -1119,8 +1248,29 @@ impl NlpApp {
                                         )
                                         .wrap(),
                                     );
+                                    if let Some(p) = &t.reveal {
+                                        let label = if cfg!(target_os = "macos") {
+                                            "Show in Finder"
+                                        } else {
+                                            "Show"
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(label).color(theme::ACCENT),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            reveal = Some(p.clone());
+                                        }
+                                    }
                                 });
                             });
+                    }
+                    if let Some(p) = reveal {
+                        picker::reveal(&p);
                     }
                 });
             });
@@ -1157,9 +1307,10 @@ impl eframe::App for NlpApp {
             }
         }
         self.poll_jobs();
+        self.auto_tick();
         self.render_thumbs(ctx);
         self.autosave();
-        if self.jobs.busy() > 0 {
+        if self.jobs.busy() > 0 || self.auto.queued_since.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
     }
@@ -1173,7 +1324,6 @@ impl eframe::App for NlpApp {
         self.toasts_ui(&ctx);
         self.export_dialog(&ctx);
         self.convert_dialog_ui(&ctx);
-        self.wizard_ui(&ctx);
         self.roll_dialog_ui(&ctx);
         self.exposure_prompt_ui(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -1236,6 +1386,7 @@ mod tests {
             dirty_since: None,
             exporting: false,
             source_auto: false,
+            auto_convert: false,
         };
 
         let dummy_src = SourceImage {
@@ -1272,7 +1423,8 @@ mod ui_tests {
                     .frames
                     .iter()
                     .any(|f| f.thumb_dirty && f.thumb_src.is_some())
-                || h.state().editor.loading;
+                || h.state().editor.loading
+                || h.state().auto.busy();
             if (!busy && t0.elapsed().as_secs_f32() > 0.5) || t0.elapsed().as_secs_f32() > secs {
                 break;
             }
@@ -1524,6 +1676,54 @@ mod ui_tests {
         assert!(h.state().view == View::Folder && !h.state().frames.is_empty());
     }
 
+    /// A new folder converts itself: each frame as it loads, then the roll.
+    #[test]
+    #[ignore]
+    fn folder_converts_itself() {
+        let src = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
+        let dir = std::env::temp_dir().join(format!("nlp_auto_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut raws: Vec<PathBuf> = std::fs::read_dir(&src)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| decode::is_raw(p))
+            .collect();
+        raws.sort();
+        for p in raws.iter().take(3) {
+            std::fs::copy(p, dir.join(p.file_name().unwrap())).unwrap();
+        }
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
+        settle(&mut h, 120.0);
+        let app = h.state();
+        assert_eq!(app.frames.len(), 3);
+        for f in &app.frames {
+            assert!(f.sc.is_converted(), "{} converted", f.name);
+            assert!(f.sc.roll.is_some(), "{} balanced as a roll", f.name);
+            assert!(f.auto_convert);
+        }
+        assert_eq!(app.auto.roll_pass, auto::RollPass::Done);
+        assert!(app.convert_dialog.is_none() && app.exposure_prompt.is_none());
+
+        // A paste to the whole roll undoes and redoes in one step.
+        let app = h.state_mut();
+        let before: Vec<f32> = app.frames.iter().map(|f| f.sc.settings.brightness).collect();
+        let mut c = app.frames[0].sc.settings.clone();
+        c.brightness = 17.0;
+        app.clipboard = Some(c);
+        app.selected = (0..3).collect();
+        app.paste_settings();
+        assert!(app.frames.iter().all(|f| f.sc.settings.brightness == 17.0));
+        assert!(app.history_step(true));
+        let undone: Vec<f32> = app.frames.iter().map(|f| f.sc.settings.brightness).collect();
+        assert_eq!(undone, before);
+        assert!(app.history_step(false));
+        assert!(app.frames.iter().all(|f| f.sc.settings.brightness == 17.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     #[ignore]
     fn unconverted_opens_convert_tab() {
@@ -1595,7 +1795,8 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
-            wizard: Default::default(),
+            auto: Default::default(),
+            history: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1641,7 +1842,8 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
-            wizard: Default::default(),
+            auto: Default::default(),
+            history: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1680,7 +1882,8 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
-            wizard: Default::default(),
+            auto: Default::default(),
+            history: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1697,12 +1900,6 @@ mod ui_tests {
         let d = app.convert_dialog.as_ref().unwrap();
         assert!(d.as_roll);
         assert_eq!(d.targets, vec![0, 1]);
-    }
-
-    #[test]
-    fn wizard_starts_idle() {
-        let w = folder::WizardState::default();
-        assert!(w.active.is_none() && w.seen.is_empty());
     }
 
     #[test]
@@ -1765,7 +1962,8 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
-            wizard: Default::default(),
+            auto: Default::default(),
+            history: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),

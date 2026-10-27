@@ -96,8 +96,6 @@ pub struct Editor {
     pub before: bool,
     color_tab: ColorTab,
     pick: Option<Pick>,
-    undo: Vec<Settings>,
-    redo: Vec<Settings>,
     committed: Option<Settings>,
     hist: [[u32; 256]; 3],
     curves: Vec<[f32; 4]>,
@@ -122,6 +120,8 @@ pub struct Editor {
     pub split: bool,
     split_pos: f32,
     before_tex: Option<egui::TextureHandle>,
+    /// The thumbnail strip under the canvas (F).
+    pub filmstrip: bool,
 }
 
 impl Editor {
@@ -154,8 +154,6 @@ impl Default for Editor {
             before: false,
             color_tab: ColorTab::Mids,
             pick: None,
-            undo: Vec::new(),
-            redo: Vec::new(),
             committed: None,
             hist: [[0; 256]; 3],
             curves: Vec::new(),
@@ -173,6 +171,7 @@ impl Default for Editor {
             split: false,
             split_pos: 0.5,
             before_tex: None,
+            filmstrip: true,
         }
     }
 }
@@ -190,7 +189,7 @@ impl Editor {
     }
 
     pub fn load(&mut self, path: &Path, settings: Settings) {
-        let keep = self.color_tab;
+        let (keep, strip) = (self.color_tab, self.filmstrip);
         *self = Editor {
             path: Some(path.to_path_buf()),
             loading: true,
@@ -198,6 +197,13 @@ impl Editor {
             ..Default::default()
         };
         self.color_tab = keep;
+        self.filmstrip = strip;
+    }
+
+    /// The settings an undo step brought back: the base for the next one.
+    pub fn set_committed(&mut self, s: Settings) {
+        self.committed = Some(s);
+        self.invalidate();
     }
 
     /// Force the negative to be re-prepared and the preview re-rendered.
@@ -206,6 +212,14 @@ impl Editor {
         self.dirty = true;
     }
 }
+
+/// Drag distance in points for one lab correction click.
+const LAB_DRAG_PX: f32 = 12.0;
+
+/// Height of the editor's filmstrip.
+const FILMSTRIP_H: f32 = 84.0;
+/// Height of the bar that collapses and expands the filmstrip.
+const FILMSTRIP_TOGGLE_H: f32 = 16.0;
 
 /// Rotate crop insets [l, t, r, b] with the image.
 fn rotate_insets(c: [f32; 4], clockwise: bool) -> [f32; 4] {
@@ -236,25 +250,6 @@ impl NlpApp {
         self.editor.dirty = true;
     }
 
-    fn history_step(&mut self, i: usize, undo: bool) {
-        let target = if undo {
-            self.editor.undo.pop()
-        } else {
-            self.editor.redo.pop()
-        };
-        let Some(t) = target else { return };
-        let cur = self.frames[i].sc.settings.clone();
-        if undo {
-            self.editor.redo.push(cur.clone());
-        } else {
-            self.editor.undo.push(cur.clone());
-        }
-        self.editor.committed = Some(t.clone());
-        self.frames[i].sc.settings = t;
-        self.mark_changed(i);
-        self.editor.dirty = true;
-    }
-
     fn track_history(&mut self, i: usize, pointer_down: bool) {
         if pointer_down {
             return;
@@ -262,12 +257,9 @@ impl NlpApp {
         let cur = &self.frames[i].sc.settings;
         match &self.editor.committed {
             Some(c) if c != cur => {
-                self.editor.undo.push(c.clone());
-                if self.editor.undo.len() > 200 {
-                    self.editor.undo.remove(0);
-                }
-                self.editor.redo.clear();
+                let step = vec![(self.frames[i].path.clone(), c.clone())];
                 self.editor.committed = Some(cur.clone());
+                self.history.push(step);
             }
             None => self.editor.committed = Some(cur.clone()),
             _ => {}
@@ -533,9 +525,106 @@ impl NlpApp {
             self.apply_change(i, &before, s2);
         }
 
+        if self.frames.len() > 1 && self.editor.crop.is_none() {
+            egui::Panel::bottom("editor_filmstrip_toggle")
+                .exact_size(FILMSTRIP_TOGGLE_H)
+                .frame(egui::Frame::new().fill(theme::PANEL))
+                .show(ui, |ui| {
+                    let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+                    let c = if resp.hovered() { theme::ACCENT } else { egui::Color32::from_gray(140) };
+                    // Chevron points down to collapse, up to expand.
+                    let (m, w, d) = (rect.center(), 5.0, 2.5);
+                    let d = if self.editor.filmstrip { d } else { -d };
+                    ui.painter().line(
+                        vec![
+                            egui::pos2(m.x - w, m.y - d),
+                            egui::pos2(m.x, m.y + d),
+                            egui::pos2(m.x + w, m.y - d),
+                        ],
+                        egui::Stroke::new(1.5, c),
+                    );
+                    let tip = if self.editor.filmstrip { "Hide filmstrip (F)" } else { "Show filmstrip (F)" };
+                    if resp.on_hover_text(tip).clicked() {
+                        self.editor.filmstrip = !self.editor.filmstrip;
+                    }
+                });
+        }
+        if self.editor.filmstrip && self.frames.len() > 1 && self.editor.crop.is_none() {
+            egui::Panel::bottom("editor_filmstrip")
+                .exact_size(FILMSTRIP_H)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::PANEL)
+                        .inner_margin(egui::Margin::symmetric(8, 6)),
+                )
+                .show(ui, |ui| self.filmstrip(ui, i));
+            if self.editor_index() != Some(i) {
+                return;
+            }
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::CANVAS))
             .show(ui, |ui| self.canvas(ui, i));
+    }
+
+    /// Thumbnails of every frame; a click opens that frame.
+    fn filmstrip(&mut self, ui: &mut egui::Ui, i: usize) {
+        let h = FILMSTRIP_H - 12.0;
+        let mut open = None;
+        let scroll_id = ui.id().with("filmstrip_scrolled_to");
+        let scrolled_to: Option<usize> = ui.data(|d| d.get_temp(scroll_id));
+        egui::ScrollArea::horizontal()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for (j, f) in self.frames.iter().enumerate() {
+                        let w = f
+                            .thumb
+                            .as_ref()
+                            .map_or(h * 1.5, |t| t.size_vec2().x / t.size_vec2().y * h);
+                        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), egui::Sense::click());
+                        if j == i && scrolled_to != Some(i) {
+                            resp.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if !ui.is_rect_visible(rect) {
+                            continue;
+                        }
+                        match &f.thumb {
+                            Some(t) => {
+                                egui::Image::new((t.id(), t.size_vec2()))
+                                    .corner_radius(2.0)
+                                    .paint_at(ui, rect);
+                            }
+                            None => {
+                                ui.painter().rect_filled(rect, 2.0, egui::Color32::from_white_alpha(8));
+                            }
+                        }
+                        if j == i {
+                            ui.painter().rect_stroke(
+                                rect.expand(2.0),
+                                3.0,
+                                egui::Stroke::new(2.0, theme::ACCENT),
+                                egui::StrokeKind::Outside,
+                            );
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_white_alpha(20));
+                        }
+                        if resp.on_hover_text(&f.name).clicked() && j != i {
+                            open = Some(j);
+                        }
+                    }
+                });
+            });
+        ui.data_mut(|d| d.insert_temp(scroll_id, i));
+        if let Some(j) = open {
+            self.save_frame(i);
+            self.selected.clear();
+            self.selected.insert(j);
+            self.open_editor(j);
+        }
     }
 
     /// Returns true when the view changed and drawing should stop.
@@ -562,6 +651,13 @@ impl NlpApp {
                 inp.key_pressed(egui::Key::C) && !cmd,
                 inp.key_pressed(egui::Key::B) && inp.modifiers.shift,
                 inp.key_pressed(egui::Key::J) && !cmd,
+                cmd && inp.key_pressed(egui::Key::C),
+                cmd && !inp.modifiers.shift && inp.key_pressed(egui::Key::V),
+                cmd && inp.modifiers.shift && inp.key_pressed(egui::Key::V),
+                cmd && inp.key_pressed(egui::Key::OpenBracket),
+                cmd && inp.key_pressed(egui::Key::CloseBracket),
+                !cmd && inp.key_pressed(egui::Key::H),
+                !cmd && inp.key_pressed(egui::Key::F),
             ]
         });
         let [
@@ -579,7 +675,41 @@ impl NlpApp {
             c,
             shift_b,
             j,
+            copy,
+            paste,
+            sync,
+            rot_left,
+            rot_right,
+            flip,
+            strip,
         ] = k;
+        if copy {
+            self.copy_settings();
+        }
+        if paste {
+            self.paste_settings_to(vec![i]);
+        }
+        if sync {
+            self.paste_settings_to((0..self.frames.len()).collect());
+        }
+        if (rot_left || rot_right || flip) && self.editor.crop.is_none() {
+            let s = &mut self.frames[i].sc.settings;
+            if flip {
+                s.flip_h = !s.flip_h;
+                s.crop = [s.crop[2], s.crop[1], s.crop[0], s.crop[3]];
+            } else if rot_right {
+                s.rotation = (s.rotation + 1) % 4;
+                s.crop = rotate_insets(s.crop, true);
+            } else {
+                s.rotation = (s.rotation + 3) % 4;
+                s.crop = rotate_insets(s.crop, false);
+            }
+            self.mark_changed(i);
+            self.editor.dirty = true;
+        }
+        if strip {
+            self.editor.filmstrip = !self.editor.filmstrip;
+        }
         if b {
             self.editor.before = !self.editor.before;
             self.editor.split = false;
@@ -602,10 +732,10 @@ impl NlpApp {
             }
         }
         if undo {
-            self.history_step(i, true);
+            self.history_step(true);
         }
         if redo {
-            self.history_step(i, false);
+            self.history_step(false);
         }
         if plus {
             self.editor.zoom_req = Some(ZoomReq::Factor(1.5));
@@ -615,7 +745,7 @@ impl NlpApp {
         }
         if c {
             if self.editor.crop.is_some() {
-                self.cancel_crop();
+                self.apply_crop(i);
             } else {
                 self.enter_crop(i);
             }
@@ -741,22 +871,22 @@ impl NlpApp {
                 Icon::Undo,
                 &format!("Undo ({undo_key})"),
                 false,
-                !self.editor.undo.is_empty(),
+                self.history.can_undo(),
             )
             .clicked()
             {
-                self.history_step(i, true);
+                self.history_step(true);
             }
             if icon_button(
                 ui,
                 Icon::Redo,
                 &format!("Redo ({redo_key})"),
                 false,
-                !self.editor.redo.is_empty(),
+                self.history.can_redo(),
             )
             .clicked()
             {
-                self.history_step(i, false);
+                self.history_step(false);
             }
             ui.add_space(6.0);
             if ui
@@ -790,15 +920,21 @@ impl NlpApp {
                         self.enter_crop(i);
                     }
                 }
-                if icon_button(ui, Icon::Flip, "Flip horizontally", s.flip_h, !cropping).clicked() {
+                let ctx = ui.ctx().clone();
+                let key = |m, k| widgets::shortcut(&ctx, m, k);
+                let cmd = egui::Modifiers::COMMAND;
+                let flip_tip = format!("Flip horizontally ({})", key(egui::Modifiers::NONE, egui::Key::H));
+                let right_tip = format!("Rotate right ({})", key(cmd, egui::Key::CloseBracket));
+                let left_tip = format!("Rotate left ({})", key(cmd, egui::Key::OpenBracket));
+                if icon_button(ui, Icon::Flip, &flip_tip, s.flip_h, !cropping).clicked() {
                     s.flip_h = !s.flip_h;
                     s.crop = [s.crop[2], s.crop[1], s.crop[0], s.crop[3]];
                 }
-                if icon_button(ui, Icon::RotateRight, "Rotate right", false, !cropping).clicked() {
+                if icon_button(ui, Icon::RotateRight, &right_tip, false, !cropping).clicked() {
                     s.rotation = (s.rotation + 1) % 4;
                     s.crop = rotate_insets(s.crop, true);
                 }
-                if icon_button(ui, Icon::RotateLeft, "Rotate left", false, !cropping).clicked() {
+                if icon_button(ui, Icon::RotateLeft, &left_tip, false, !cropping).clicked() {
                     s.rotation = (s.rotation + 3) % 4;
                     s.crop = rotate_insets(s.crop, false);
                 }
@@ -813,6 +949,7 @@ impl NlpApp {
                 .clicked()
                 {
                     self.editor.before = !self.editor.before;
+                    self.editor.split = false;
                     self.editor.dirty = true;
                 }
                 if self.editor.loading || self.jobs.busy() > 0 {
@@ -1049,7 +1186,7 @@ impl NlpApp {
         {
             if fl_combo(
                 ui,
-                "",
+                "Image type",
                 &mut s.image_type,
                 ImageType::ALL,
                 ImageType::label,
@@ -1117,7 +1254,7 @@ impl NlpApp {
             super::folder::flat_field_ui(ui, &mut s.flat_field, start.as_deref());
         }
         self.editor.border_preview = false;
-        if widgets::fold_with(ui, "Analysis", false) {
+        if widgets::fold_with(ui, "Analysis area", false) {
             fl_slider_u8(
                 ui,
                 "Pre-saturation",
@@ -1145,7 +1282,7 @@ impl NlpApp {
         if widgets::fold(ui, "Tone") {
             fl_combo(
                 ui,
-                "",
+                "Tone profile",
                 &mut s.tone_profile,
                 ToneProfile::ALL,
                 ToneProfile::label,
@@ -1307,13 +1444,36 @@ impl NlpApp {
                             v if v > 0 => format!("+{v}"),
                             v => format!("−{}", -v),
                         };
-                        ui.label(RichText::new(format!("{name} {v}")).monospace().color(
-                            if clicks[k] == 0 {
-                                theme::MUTED
-                            } else {
-                                theme::TEXT
-                            },
-                        ));
+                        // Drag the value sideways to step through clicks;
+                        // double-click to zero it.
+                        let r = ui
+                            .add(
+                                egui::Label::new(RichText::new(format!("{name} {v}")).monospace().color(
+                                    if clicks[k] == 0 {
+                                        theme::MUTED
+                                    } else {
+                                        theme::TEXT
+                                    },
+                                ))
+                                .sense(Sense::click_and_drag()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                            .on_hover_text("Drag to change · double-click to reset");
+                        let acc_id = r.id.with("drag_acc");
+                        let mut acc: f32 = ui.data(|d| d.get_temp(acc_id)).unwrap_or(0.0);
+                        acc += r.drag_delta().x;
+                        let steps = (acc / LAB_DRAG_PX).trunc();
+                        if steps != 0.0 {
+                            lab::nudge(s, ch, steps as i32);
+                            acc -= steps * LAB_DRAG_PX;
+                        }
+                        if r.drag_stopped() {
+                            acc = 0.0;
+                        }
+                        ui.data_mut(|d| d.insert_temp(acc_id, acc));
+                        if r.double_clicked() {
+                            lab::nudge(s, ch, -clicks[k]);
+                        }
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             if ui
@@ -1420,7 +1580,7 @@ impl NlpApp {
             }
         }
         if widgets::fold(ui, "Look") {
-            fl_combo(ui, "", &mut s.lut, Lut::ALL, Lut::label, "");
+            fl_combo(ui, "LUT", &mut s.lut, Lut::ALL, Lut::label, "");
             fl_slider(
                 ui,
                 "Amount",
@@ -1441,7 +1601,7 @@ impl NlpApp {
             );
             fl_combo(
                 ui,
-                "",
+                "Sharpening",
                 &mut s.sharpening,
                 Sharpening::ALL,
                 Sharpening::label,
@@ -1475,6 +1635,34 @@ impl NlpApp {
 
     /// The ⋯ menu next to Re-convert: defaults, unconvert and the LUT folder.
     fn defaults_menu(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
+        let ctx = ui.ctx().clone();
+        let cmd = egui::Modifiers::COMMAND;
+        let key = |m, k| RichText::new(widgets::shortcut(&ctx, m, k)).color(theme::FAINT);
+        if ui
+            .add(egui::Button::new("Copy settings").shortcut_text(key(cmd, egui::Key::C)))
+            .clicked()
+        {
+            self.copy_settings();
+        }
+        let paste = self.clipboard.is_some();
+        if ui
+            .add_enabled(paste, egui::Button::new("Paste settings").shortcut_text(key(cmd, egui::Key::V)))
+            .clicked()
+        {
+            self.paste_settings_to(vec![i]);
+        }
+        if ui
+            .add_enabled(
+                paste,
+                egui::Button::new("Paste to every frame")
+                    .shortcut_text(key(cmd | egui::Modifiers::SHIFT, egui::Key::V)),
+            )
+            .on_hover_text("Sync the copied edit to the whole roll")
+            .clicked()
+        {
+            self.paste_settings_to((0..self.frames.len()).collect());
+        }
+        ui.separator();
         if ui
             .button("Save as default")
             .on_hover_text("New frames start with these settings")

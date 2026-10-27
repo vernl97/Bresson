@@ -4,7 +4,7 @@
 use eframe::egui::{self, Color32, RichText, Sense, pos2, vec2};
 
 use super::widgets::{self, Icon, icon_button, theme};
-use super::{NlpApp, ProxyState, View};
+use super::{NlpApp, ProxyState};
 use crate::engine::settings::*;
 
 /// One-line hint shown under the scan source.
@@ -16,6 +16,108 @@ pub fn source_instructions(s: Source) -> &'static str {
         Source::VueScanRaw => "Sample the film border, or leave the film base on Auto.",
         Source::TifScan => "TIF scans are not white balanced: the film base stays off.",
         Source::LinearScan => "Linear (gamma 1.0) scans are read as stored; no preparation needed.",
+    }
+}
+
+/// egui memory keys: the grid's column count (for the arrow keys) and the
+/// cell to scroll into view.
+const GRID_COLS: &str = "grid_cols";
+const GRID_SCROLL_TO: &str = "grid_scroll_to";
+
+/// Short name for the scan source chip.
+fn source_short(s: Source) -> &'static str {
+    match s {
+        Source::DigitalCamera => "Camera scan",
+        Source::VueScanRaw => "VueScan / SilverFast",
+        Source::TifScan => "TIF scan",
+        Source::LinearScan => "Linear scan",
+    }
+}
+
+impl NlpApp {
+    /// The roll's scan source, detected from the files: shows what was
+    /// found and sets the source of every frame.
+    pub fn source_chip(&mut self, ui: &mut egui::Ui) {
+        let mut counts: Vec<(Source, usize)> = Source::ALL
+            .iter()
+            .map(|&s| (s, self.frames.iter().filter(|f| f.sc.settings.source == s).count()))
+            .filter(|c| c.1 > 0)
+            .collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        let Some(&(main, _)) = counts.first() else {
+            return;
+        };
+        let text = match counts.len() {
+            1 => source_short(main).to_string(),
+            n => format!("{} +{}", source_short(main), n - 1),
+        };
+        let r = ui
+            .add(
+                egui::Button::new(RichText::new(text).small().color(theme::MUTED))
+                    .corner_radius(10.0)
+                    .min_size(vec2(0.0, 20.0)),
+            )
+            .on_hover_text("Scan source, detected from the files. Click to change it for the roll.");
+        egui::Popup::menu(&r).show(|ui| {
+            ui.set_width(270.0);
+            ui.label(RichText::new("Scan source").small().color(theme::MUTED));
+            for &(s, n) in &counts {
+                ui.label(format!("{n} × {}", s.label()));
+            }
+            ui.separator();
+            ui.label(RichText::new("Set for the whole roll").small().color(theme::MUTED));
+            for &s in Source::ALL {
+                let only = counts.len() == 1 && main == s;
+                if ui.selectable_label(only, s.label()).clicked() && !only {
+                    self.set_roll_source(s);
+                }
+            }
+            ui.add_space(4.0);
+            ui.label(RichText::new(source_instructions(main)).small().color(theme::FAINT));
+        });
+    }
+}
+
+impl NlpApp {
+    /// Slim notices under the top bar, each dismissible.
+    fn banners_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(spread) = self.auto.exposure_note else {
+            return;
+        };
+        egui::Panel::top("folder_banner")
+            .exact_size(32.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    widgets::paint_icon(
+                        ui.painter(),
+                        egui::Rect::from_center_size(ui.cursor().min + vec2(7.0, 0.0), vec2(14.0, 14.0)),
+                        Icon::Warn,
+                        theme::WARN,
+                    );
+                    ui.add_space(18.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "Exposures vary by {spread:.1} EV, so the roll was balanced by the images instead"
+                        ))
+                        .small()
+                        .color(theme::MUTED),
+                    );
+                    if ui.small_button("Use exposure data").clicked() {
+                        self.auto.exposure_note = None;
+                        self.convert((0..self.frames.len()).collect(), true);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_button(ui, Icon::Close, "Dismiss", false, true).clicked() {
+                            self.auto.exposure_note = None;
+                        }
+                    });
+                });
+            });
     }
 }
 
@@ -190,14 +292,11 @@ impl NlpApp {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     // Breadcrumb: Rolls / <roll name>.
-                    let back = icon_button(ui, Icon::Back, "Back to all rolls", false, true);
-                    let rolls = ui
-                        .add(
-                            egui::Label::new(RichText::new("Rolls").color(theme::MUTED))
-                                .sense(Sense::click()),
-                        )
+                    let back = ui
+                        .add(egui::Button::new(RichText::new("‹  Rolls").color(theme::MUTED)).frame(false))
+                        .on_hover_text("Back to all rolls")
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if back.clicked() || rolls.clicked() {
+                    if back.clicked() {
                         self.close_to_projects();
                     }
                     if let Some(f) = self.folder.clone() {
@@ -222,6 +321,8 @@ impl NlpApp {
                             self.open_roll_dialog(&f, false);
                         }
                     }
+                    ui.add_space(4.0);
+                    self.source_chip(ui);
                     ui.add_space(2.0);
                     let r = icon_button(ui, Icon::More, "More", false, true);
                     egui::Popup::menu(&r).show(|ui| {
@@ -233,13 +334,6 @@ impl NlpApp {
                             self.choose_files();
                         }
                         ui.separator();
-                        if !self.single_mode {
-                            if let Some(f) = self.folder.clone() {
-                                if ui.button("Roll info…").clicked() {
-                                    self.open_roll_dialog(&f, false);
-                                }
-                            }
-                        }
                         if ui
                             .button("Contact sheet")
                             .on_hover_text("Save a JPEG contact sheet in the NLP folder (selection, or all frames)")
@@ -263,48 +357,50 @@ impl NlpApp {
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // With nothing selected the actions cover the whole roll.
                         let n = self.selected.len();
+                        let targets: Vec<usize> = if n > 0 {
+                            self.sel_vec()
+                        } else {
+                            (0..self.frames.len()).collect()
+                        };
+                        if ui
+                            .add(widgets::primary(if n > 0 { "Export" } else { "Export all" }))
+                            .on_hover_text(format!("Export positive copies ({export_key})"))
+                            .clicked()
+                        {
+                            self.open_export_dialog(targets.clone());
+                        }
+                        // Split Convert button: main action + ▾ for roll mode.
+                        ui.spacing_mut().item_spacing.x = 1.0;
+                        let more = ui
+                            .add(widgets::ghost("").min_size(vec2(22.0, 28.0)))
+                            .on_hover_text("Convert options");
+                        let c = more.rect.center();
+                        ui.painter().line(
+                            vec![pos2(c.x - 4.0, c.y - 2.0), pos2(c.x, c.y + 2.0), pos2(c.x + 4.0, c.y - 2.0)],
+                            egui::Stroke::new(1.5, theme::MUTED),
+                        );
+                        egui::Popup::menu(&more).show(|ui| {
+                            if ui
+                                .add_enabled(targets.len() >= 2, egui::Button::new("Convert as roll…"))
+                                .on_hover_text("Analyse the frames together for one consistent roll balance")
+                                .on_disabled_hover_text("Select two or more frames")
+                                .clicked()
+                            {
+                                self.open_convert_dialog(targets.clone(), true);
+                            }
+                        });
+                        let converted = targets.iter().all(|&i| self.frames[i].sc.is_converted());
+                        if ui
+                            .add(widgets::ghost(if converted { "Re-convert…" } else { "Convert…" }))
+                            .on_hover_text("Analyse each frame on its own, with new conversion options")
+                            .clicked()
+                        {
+                            self.open_convert_dialog(targets.clone(), false);
+                        }
+                        ui.spacing_mut().item_spacing.x = 6.0;
                         if n > 0 {
-                            if ui
-                                .add(widgets::primary("Export"))
-                                .on_hover_text(format!("Export positive copies ({export_key})"))
-                                .clicked()
-                            {
-                                self.open_export_dialog(self.sel_vec());
-                            }
-                            // Split Convert button: main action + ▾ for roll mode.
-                            ui.spacing_mut().item_spacing.x = 1.0;
-                            let more = ui
-                                .add(widgets::ghost("").min_size(vec2(22.0, 28.0)))
-                                .on_hover_text("Convert options");
-                            let c = more.rect.center();
-                            ui.painter().line(
-                                vec![pos2(c.x - 4.0, c.y - 2.0), pos2(c.x, c.y + 2.0), pos2(c.x + 4.0, c.y - 2.0)],
-                                egui::Stroke::new(1.5, theme::MUTED),
-                            );
-                            egui::Popup::menu(&more).show(|ui| {
-                                if ui.button("Convert each frame").clicked() {
-                                    self.open_convert_dialog(self.sel_vec(), false);
-                                }
-                                if ui
-                                    .add_enabled(n >= 2, egui::Button::new("Convert as roll"))
-                                    .on_hover_text(
-                                        "Analyse the selection together for one consistent roll balance",
-                                    )
-                                    .on_disabled_hover_text("Select two or more frames")
-                                    .clicked()
-                                {
-                                    self.open_convert_dialog(self.sel_vec(), true);
-                                }
-                            });
-                            if ui
-                                .add(widgets::ghost("Convert"))
-                                .on_hover_text("Analyse each selected frame on its own")
-                                .clicked()
-                            {
-                                self.open_convert_dialog(self.sel_vec(), false);
-                            }
-                            ui.spacing_mut().item_spacing.x = 6.0;
                             ui.add_space(6.0);
                             ui.separator();
                             ui.add_space(6.0);
@@ -331,6 +427,8 @@ impl NlpApp {
                     });
                 });
             });
+        self.roll_banner_ui(ui);
+        self.banners_ui(ui);
 
         egui::Panel::bottom("folder_status")
             .exact_size(28.0)
@@ -363,6 +461,31 @@ impl NlpApp {
                         )
                         .on_hover_text("Thumbnail size");
                         ui.label(tiny("Small"));
+                        let (done, total) = (self.auto.convert_done, self.auto.convert_total);
+                        if self.auto.busy() || done < total {
+                            ui.add_space(12.0);
+                            let auto = !self.auto.queue.is_empty() || self.auto.roll_pass == super::auto::RollPass::Running;
+                            if auto
+                                && ui
+                                    .add(egui::Button::new(tiny("Stop")).frame(false))
+                                    .on_hover_text("Stop converting new frames by themselves")
+                                    .clicked()
+                            {
+                                self.stop_auto();
+                            }
+                            let label = if self.auto.roll_pass == super::auto::RollPass::Running {
+                                "Balancing the roll…".to_string()
+                            } else {
+                                format!("Converting {}/{}", done.min(total), total.max(1))
+                            };
+                            ui.add(
+                                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                                    .desired_width(120.0)
+                                    .desired_height(4.0)
+                                    .fill(theme::ACCENT),
+                            );
+                            ui.label(RichText::new(label).small().color(theme::MUTED));
+                        }
                         if self.export_total > 0 && self.export_done < self.export_total {
                             ui.add_space(12.0);
                             ui.add(
@@ -399,6 +522,18 @@ impl NlpApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        let mac = ctx.os() == egui::os::OperatingSystem::Mac;
+        let (undo, redo) = ctx.input(|i| {
+            let cmd = i.modifiers.command;
+            (
+                cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
+                (cmd && i.modifiers.shift && i.key_pressed(egui::Key::Z))
+                    || (cmd && !mac && i.key_pressed(egui::Key::Y)),
+            )
+        });
+        if undo || redo {
+            self.history_step(undo);
+        }
         let (all, none, enter, copy, paste, export) = ctx.input(|i| {
             (
                 i.modifiers.command && i.key_pressed(egui::Key::A),
@@ -412,6 +547,7 @@ impl NlpApp {
         if all {
             self.selected = (0..self.frames.len()).collect();
         }
+        self.grid_arrows(ctx);
         if none && self.export_targets.is_none() {
             self.selected.clear();
         }
@@ -431,6 +567,9 @@ impl NlpApp {
         }
         if let Some(key) = super::lab_key(ctx).filter(|_| self.export_targets.is_none()) {
             let sel = self.sel_vec();
+            let converted: Vec<usize> =
+                sel.iter().copied().filter(|&i| self.frames[i].sc.is_converted()).collect();
+            self.record(&converted);
             let n = sel.iter().filter(|&&i| self.apply_lab_key(i, key)).count();
             if n < sel.len() {
                 self.toast("Only converted frames can be corrected", false);
@@ -438,8 +577,48 @@ impl NlpApp {
         }
     }
 
+    /// Arrow keys move the selection through the grid; Shift extends it
+    /// from the anchor.
+    fn grid_arrows(&mut self, ctx: &egui::Context) {
+        let cols: usize = ctx.data(|d| d.get_temp(egui::Id::new(GRID_COLS))).unwrap_or(1).max(1);
+        let (step, shift) = ctx.input(|i| {
+            let step = [
+                (egui::Key::ArrowLeft, -1),
+                (egui::Key::ArrowRight, 1),
+                (egui::Key::ArrowUp, -(cols as i64)),
+                (egui::Key::ArrowDown, cols as i64),
+            ]
+            .into_iter()
+            .find(|(k, _)| i.key_pressed(*k))
+            .map(|(_, s)| s);
+            (step, i.modifiers.shift)
+        });
+        let (Some(step), n) = (step, self.frames.len()) else {
+            return;
+        };
+        if n == 0 || self.export_targets.is_some() {
+            return;
+        }
+        let cur = self.active.filter(|i| self.selected.contains(i)).or(self.selected.last().copied());
+        let next = match cur {
+            Some(c) => (c as i64 + step).clamp(0, n as i64 - 1) as usize,
+            None => 0,
+        };
+        if shift {
+            let a = self.anchor.unwrap_or(next);
+            self.selected = (a.min(next)..=a.max(next)).collect();
+        } else {
+            self.selected.clear();
+            self.selected.insert(next);
+            self.anchor = Some(next);
+        }
+        self.active = Some(next);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(GRID_SCROLL_TO), next));
+    }
+
     /// Crop and straighten each frame to its detected frame.
     pub fn detect_frames(&mut self, idx: &[usize]) {
+        self.record(idx);
         let mut missed = 0;
         for &i in idx {
             let f = &self.frames[i];
@@ -475,18 +654,27 @@ impl NlpApp {
     }
 
     pub fn paste_settings(&mut self) {
+        self.paste_settings_to(self.sel_vec());
+    }
+
+    /// Paste the copied edit onto frames `idx`, as one undo step.
+    pub fn paste_settings_to(&mut self, idx: Vec<usize>) {
         let Some(c) = self.clipboard.clone() else {
             return;
         };
-        for i in self.sel_vec() {
+        self.record(&idx);
+        for &i in &idx {
             self.frames[i].sc.settings.copy_edit_from(&c);
             if c.wb_mode != WbMode::Custom {
                 self.frames[i].apply_wb_mode();
             }
             self.mark_changed(i);
+            if self.editor.path.as_ref() == Some(&self.frames[i].path) {
+                self.editor.set_committed(self.frames[i].sc.settings.clone());
+            }
         }
         self.editor.invalidate();
-        let n = self.selected.len();
+        let n = idx.len();
         self.toast(format!("Pasted settings to {n} frame(s)"), false);
     }
 
@@ -510,12 +698,19 @@ impl NlpApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                let cols = ((ui.available_width() + 14.0) / (cell + 14.0)).floor().max(1.0) as usize;
+                let scroll_to: Option<usize> =
+                    ctx.data_mut(|d| d.remove_temp(egui::Id::new(GRID_SCROLL_TO)));
+                ctx.data_mut(|d| d.insert_temp(egui::Id::new(GRID_COLS), cols));
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(14.0, 14.0);
                     for (i, f) in self.frames.iter().enumerate() {
                         let sel = self.selected.contains(&i);
                         let (rect, resp) =
                             ui.allocate_exact_size(vec2(cell, cell + name_h), Sense::click());
+                        if scroll_to == Some(i) {
+                            resp.scroll_to_me(None);
+                        }
                         if !ui.is_rect_visible(rect) {
                             continue;
                         }
@@ -606,7 +801,23 @@ impl NlpApp {
                             p.galley(chip.center() - g.size() / 2.0, g, theme::MUTED);
                             x = chip.left() - 6.0;
                         }
-                        if f.sc.is_converted() {
+                        let converting = self.auto.in_flight.contains(&f.path)
+                            || self.auto.queue.contains(&f.path);
+                        if converting {
+                            // Pulsing while its conversion runs.
+                            let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
+                            p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::MUTED.gamma_multiply(a));
+                            x -= 12.0;
+                            ui.ctx().request_repaint();
+                        } else if !f.sc.is_converted() {
+                            p.circle_stroke(
+                                pos2(x - 3.0, row_y),
+                                2.5,
+                                egui::Stroke::new(1.0, theme::FAINT),
+                            );
+                            x -= 12.0;
+                        }
+                        if f.sc.is_converted() && !converting {
                             p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::OK);
                             x -= 12.0;
                             if let Some(r) = lab::readout(&f.sc.settings) {
@@ -727,7 +938,7 @@ pub struct ConvertDialog {
     pub settings: Settings,
 }
 
-/// The conversion options shared by the folder Convert dialog and the editor wizard.
+/// The conversion options of the folder Convert dialog.
 pub fn conversion_fields(ui: &mut egui::Ui, s: &mut Settings, start: Option<&std::path::Path>) {
     widgets::fl_combo(
         ui,
@@ -855,20 +1066,15 @@ impl NlpApp {
                     .first()
                     .and_then(|&i| self.frames[i].path.parent().map(|p| p.to_path_buf()));
                 conversion_fields(ui, &mut d.settings, start.as_deref());
-                if count > 1 {
-                    ui.add_space(6.0);
-                    ui.checkbox(&mut d.as_roll, "Convert as roll")
-                        .on_hover_text("Analyse the selection together for one consistent roll balance");
-                    if d.as_roll {
-                        widgets::fl_combo(
-                            ui,
-                            "Roll process",
-                            &mut d.settings.roll_mode,
-                            RollMode::ALL,
-                            RollMode::label,
-                            "Both use the film's channel slopes from the roll. Lab: each frame's own colour and density, like a lab scanner · Darkroom: the whole roll at one colour balance and one exposure",
-                        );
-                    }
+                if d.as_roll {
+                    widgets::fl_combo(
+                        ui,
+                        "Roll process",
+                        &mut d.settings.roll_mode,
+                        RollMode::ALL,
+                        RollMode::label,
+                        "Both use the film's channel slopes from the roll. Lab: each frame's own colour and density, like a lab scanner · Darkroom: the whole roll at one colour balance and one exposure",
+                    );
                 }
                 ui.add_space(22.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -892,165 +1098,6 @@ impl NlpApp {
             self.convert(d.targets, d.as_roll);
         } else if !(cancel || r.should_close()) {
             self.convert_dialog = Some(d);
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum WizardStep {
-    Crop,
-    Settings,
-    Convert,
-}
-
-/// The guided first conversion of an unconverted frame.
-pub struct ConvertWizard {
-    pub frame: usize,
-    pub step: WizardStep,
-    pub settings: Settings,
-}
-
-#[derive(Default)]
-pub struct WizardState {
-    pub active: Option<ConvertWizard>,
-    /// Frames the wizard was already shown for this session.
-    pub seen: std::collections::HashSet<std::path::PathBuf>,
-}
-
-impl NlpApp {
-    /// Opens the wizard for an unconverted frame that hasn't had it yet.
-    pub fn start_wizard(&mut self, i: usize) {
-        let f = &self.frames[i];
-        if f.sc.is_converted() || self.wizard.seen.contains(&f.path) {
-            return;
-        }
-        self.begin_wizard(i);
-    }
-
-    /// Opens the wizard at the crop step, whether or not it was seen before.
-    pub fn begin_wizard(&mut self, i: usize) {
-        let path = self.frames[i].path.clone();
-        self.wizard.seen.insert(path);
-        let settings = self.frames[i].sc.settings.clone();
-        self.enter_crop(i);
-        self.wizard.active = Some(ConvertWizard {
-            frame: i,
-            step: WizardStep::Crop,
-            settings,
-        });
-    }
-
-    pub fn wizard_ui(&mut self, ctx: &egui::Context) {
-        let Some(mut w) = self.wizard.active.take() else {
-            return;
-        };
-        // Leaving the editor or switching frames abandons the wizard.
-        if self.view != View::Editor || self.active != Some(w.frame) {
-            return;
-        }
-        let mut go = false;
-        let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape)) && w.step != WizardStep::Crop;
-        match w.step {
-            WizardStep::Crop => {
-                // The editor's own crop tool runs; Done or Cancel there moves on.
-                if self.editor.crop.is_none() {
-                    w.step = WizardStep::Settings;
-                    w.settings = self.frames[w.frame].sc.settings.clone();
-                } else {
-                    egui::Area::new(egui::Id::new("wizard_hint"))
-                        .anchor(egui::Align2::CENTER_TOP, vec2(0.0, 52.0))
-                        .show(ctx, |ui| {
-                            egui::Frame::new()
-                                .fill(theme::PANEL)
-                                .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                .corner_radius(10.0)
-                                .inner_margin(egui::Margin::symmetric(14, 8))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        RichText::new("Step 1 of 3 · Crop the frame, then press Done")
-                                            .color(theme::TEXT),
-                                    );
-                                });
-                        });
-                }
-            }
-            WizardStep::Settings | WizardStep::Convert => {
-                let frame = egui::Frame::new()
-                    .fill(theme::PANEL)
-                    .stroke(egui::Stroke::new(1.0, theme::LINE))
-                    .corner_radius(12.0)
-                    .inner_margin(egui::Margin::same(22))
-                    .shadow(ctx.global_style().visuals.window_shadow);
-                let settings_step = w.step == WizardStep::Settings;
-                let mut back = false;
-                let r = egui::Modal::new(egui::Id::new("wizard_modal"))
-                    .backdrop_color(Color32::from_black_alpha(150))
-                    .frame(frame)
-                    .show(ctx, |ui| {
-                        ui.set_width(420.0);
-                        let title = if settings_step {
-                            "Step 2 of 3 · Conversion settings"
-                        } else {
-                            "Step 3 of 3 · Convert"
-                        };
-                        ui.label(RichText::new(title).font(theme::medium(16.0)).color(theme::TEXT));
-                        ui.add_space(16.0);
-                        if settings_step {
-                            let start = self.frames[w.frame].path.parent().map(|p| p.to_path_buf());
-                            conversion_fields(ui, &mut w.settings, start.as_deref());
-                        } else {
-                            let s = &w.settings;
-                            for line in [
-                                format!("Type: {}", s.image_type.label()),
-                                format!("Source: {}", s.source.label()),
-                                format!("Colour model: {}", s.color_model.label()),
-                                format!("Film base: {}", s.film_base.label()),
-                                format!("White balance: {}", s.wb_mode.label()),
-                            ] {
-                                ui.label(RichText::new(line).color(theme::TEXT));
-                            }
-                        }
-                        ui.add_space(22.0);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let label = if settings_step { "Next" } else { "Convert" };
-                            if ui.add(widgets::primary(label).min_size(vec2(96.0, 30.0))).clicked()
-                                || (!ui.ctx().egui_wants_keyboard_input()
-                                    && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                            {
-                                go = true;
-                            }
-                            if ui.add(widgets::ghost("Back").min_size(vec2(80.0, 30.0))).clicked() {
-                                back = true;
-                            }
-                            if ui.add(widgets::ghost("Cancel").min_size(vec2(80.0, 30.0))).clicked() {
-                                cancel = true;
-                            }
-                        });
-                    });
-                if r.should_close() {
-                    cancel = true;
-                }
-                if back {
-                    if settings_step {
-                        self.enter_crop(w.frame);
-                        w.step = WizardStep::Crop;
-                    } else {
-                        w.step = WizardStep::Settings;
-                    }
-                } else if go {
-                    if settings_step {
-                        w.step = WizardStep::Convert;
-                    } else {
-                        let i = w.frame;
-                        self.apply_conversion_options(i, &w.settings);
-                        self.convert(vec![i], false);
-                        return;
-                    }
-                }
-            }
-        }
-        if !cancel {
-            self.wizard.active = Some(w);
         }
     }
 }

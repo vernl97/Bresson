@@ -362,6 +362,7 @@ pub enum Icon {
     Folder,
     Warn,
     More,
+    Close,
 }
 
 fn arc(c: egui::Pos2, r: f32, a0: f32, a1: f32, n: usize) -> Vec<egui::Pos2> {
@@ -502,6 +503,10 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             for x in [-6.0, 0.0, 6.0] {
                 p.circle_filled(q(x, 0.0), 1.6 * s.max(0.8), color);
             }
+        }
+        Icon::Close => {
+            p.line_segment([q(-5.0, -5.0), q(5.0, 5.0)], st);
+            p.line_segment([q(-5.0, 5.0), q(5.0, -5.0)], st);
         }
     }
 }

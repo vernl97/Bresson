@@ -16,6 +16,9 @@ pub struct RollState {
     /// Roll info of the open folder.
     pub info: Option<RollInfo>,
     pub dialog: Option<RollDialog>,
+    /// "New roll" banner over the grid on a folder's first open: the draft
+    /// name and film stock.
+    pub banner: Option<RollDialog>,
     /// The welcome screen shows the Projects list instead.
     pub projects_open: bool,
     /// Roll info per project folder, read when the Projects screen opens.
@@ -83,6 +86,94 @@ impl NlpApp {
             info,
             new,
         });
+    }
+
+    /// Show the "New roll" banner for a folder opened for the first time.
+    pub fn offer_new_roll(&mut self, dir: &Path) {
+        self.roll.banner = Some(RollDialog {
+            dir: dir.to_path_buf(),
+            info: RollInfo {
+                name: folder_name(dir),
+                ..Default::default()
+            },
+            new: true,
+        });
+    }
+
+    /// The "New roll" banner: name and film stock inline, the rest in the
+    /// roll dialog. Dismissing it keeps the folder name as the roll name.
+    pub fn roll_banner_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(mut d) = self.roll.banner.take() else {
+            return;
+        };
+        let (mut save, mut more, mut dismiss) = (false, false, false);
+        egui::Panel::top("roll_banner")
+            .exact_size(38.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.label(RichText::new("New roll").font(theme::medium(13.0)));
+                    ui.add_space(8.0);
+                    let enter = |r: &egui::Response| {
+                        r.lost_focus() && r.ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                    };
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut d.info.name)
+                            .hint_text("Name")
+                            .desired_width(160.0),
+                    );
+                    save |= enter(&r);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut d.info.metadata.film_stock)
+                            .hint_text("Film stock, e.g. Portra 400")
+                            .desired_width(180.0),
+                    );
+                    save |= enter(&r);
+                    save |= ui.add(widgets::primary("Save")).clicked();
+                    more = ui
+                        .add(egui::Button::new(RichText::new("More details…").small().color(theme::MUTED)).frame(false))
+                        .clicked();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        dismiss = widgets::icon_button(ui, widgets::Icon::Close, "Dismiss", false, true)
+                            .clicked();
+                    });
+                });
+            });
+        if save || dismiss {
+            let RollDialog { dir, info, .. } = d;
+            self.save_roll_info(&dir, info);
+        } else if more {
+            self.roll.dialog = Some(d);
+        } else {
+            self.roll.banner = Some(d);
+        }
+    }
+
+    /// The open roll's custom export folder.
+    pub fn roll_export_dir(&self) -> Option<PathBuf> {
+        self.roll.info.as_ref().and_then(|r| r.export_dir.clone())
+    }
+
+    /// Remember a custom export folder (`None`: next to the scans), with
+    /// the roll when a folder is open, else as the app default.
+    pub fn set_export_dir(&mut self, dir: Option<PathBuf>) {
+        match self.folder.clone().filter(|_| !self.single_mode) {
+            Some(f) => {
+                let mut info = self.roll.info.clone().unwrap_or_else(|| RollInfo {
+                    name: folder_name(&f),
+                    ..Default::default()
+                });
+                info.export_dir = dir;
+                self.save_roll_info(&f, info);
+                self.defaults.export.output_dir = None;
+            }
+            None => self.defaults.export.output_dir = dir,
+        }
+        let _ = sidecar::save_defaults(&self.defaults);
     }
 
     /// Write the roll info and give it to frames without film details of their own.

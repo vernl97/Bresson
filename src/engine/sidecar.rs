@@ -140,6 +140,8 @@ pub struct Defaults {
     pub last_folder: Option<PathBuf>,
     /// Scan folders opened before, most recent first (the Projects list).
     pub projects: Vec<PathBuf>,
+    /// Convert frames only when asked, instead of as they load.
+    pub manual_convert: bool,
 }
 
 /// Move `dir` to the front of the Projects list.
@@ -159,6 +161,8 @@ pub struct RollInfo {
     pub notes: String,
     /// Unix seconds when the roll was first set up.
     pub created: u64,
+    /// Custom export folder for this roll.
+    pub export_dir: Option<PathBuf>,
 }
 
 pub fn roll_info_path(dir: &Path) -> PathBuf {
