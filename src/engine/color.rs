@@ -164,23 +164,29 @@ pub fn prophoto_encode(v: f32) -> f32 {
     }
 }
 
-/// Fast encoder via lookup table (input is linear 0..=1, clamped).
+/// Fast encoder via lookup table (input is linear 0..=1, clamped). The
+/// first interval is computed exactly: pure power encodings are vertical
+/// at 0, where interpolating would lift the deepest shadows.
 pub struct EncodeLut {
     table: Vec<f32>,
+    f: fn(f32) -> f32,
 }
 
 impl EncodeLut {
     const N: usize = 16384;
-    pub fn new(f: impl Fn(f32) -> f32) -> Self {
+    pub fn new(f: fn(f32) -> f32) -> Self {
         let table = (0..=Self::N)
             .map(|i| f(i as f32 / Self::N as f32))
             .collect();
-        Self { table }
+        Self { table, f }
     }
     #[inline]
     pub fn get(&self, v: f32) -> f32 {
         let x = v.clamp(0.0, 1.0) * Self::N as f32;
         let i = x as usize;
+        if i == 0 {
+            return (self.f)(v.max(0.0));
+        }
         if i >= Self::N {
             return self.table[Self::N];
         }
@@ -557,6 +563,22 @@ mod tests {
         let lab = [42.0, 18.0, -30.0];
         let back = xyz_to_lab(lab_to_xyz(lab, D50), D50);
         assert!(delta_e2000(lab, back) < 1e-9);
+    }
+
+    #[test]
+    fn encode_lut_is_exact_near_black() {
+        fn adobe(v: f32) -> f32 {
+            v.max(0.0).powf(1.0 / ADOBE_GAMMA)
+        }
+        let lut = EncodeLut::new(adobe);
+        for v in [1e-7f32, 3e-5, 5e-4, 0.01, 0.18, 0.9] {
+            assert!(
+                (lut.get(v) - adobe(v)).abs() < 2e-5,
+                "{v}: {} vs {}",
+                lut.get(v),
+                adobe(v)
+            );
+        }
     }
 
     #[test]

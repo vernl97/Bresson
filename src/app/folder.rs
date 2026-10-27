@@ -15,9 +15,7 @@ pub fn source_instructions(s: Source) -> &'static str {
         }
         Source::VueScanRaw => "Sample the film border, or leave the film base on Auto.",
         Source::TifScan => "TIF scans are not white balanced: the film base stays off.",
-        Source::LinearScan => {
-            "Prepare linear scans first with `nlp_studio scan-prep`, then convert the -prepped files."
-        }
+        Source::LinearScan => "Linear (gamma 1.0) scans are read as stored; no preparation needed.",
     }
 }
 

@@ -247,18 +247,31 @@ pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Nega
     let edit_only = s.image_type == ImageType::EditOnly;
     // Already positive scans keep their own levels: density is −log10 of
     // the linear value.
+    let base = if !src.is_raw && s.source == super::settings::Source::LinearScan {
+        base.map(color::srgb_encode)
+    } else {
+        base
+    };
     let (mul, level) = if edit_only {
         ([1.0; 3], 1.0)
     } else {
         (base_multipliers(src, s, base), BASE_LEVEL)
     };
     let to_lin = src.to_melissa;
+    // Bitmaps are decoded as sRGB-encoded; linear (gamma 1.0) scans hold
+    // linear values, so undo that decode.
+    let linear_scan = !src.is_raw && s.source == super::settings::Source::LinearScan;
     let m = density_matrix(s);
     let mono = s.is_monochrome();
     let yw = DENSITY_WEIGHTS;
     let data = d
         .par_iter()
         .map(|p| {
+            let p = if linear_scan {
+                p.map(color::srgb_encode)
+            } else {
+                *p
+            };
             let t = color::mul3(&to_lin, [p[0] * mul[0], p[1] * mul[1], p[2] * mul[2]]);
             let dens = t.map(|v| (level / v.max(1e-5)).log10());
             if edit_only {
@@ -1069,6 +1082,93 @@ mod tests {
         let px = Renderer::new(&wb, Some(&a.levels), OutputSpace::Srgb).render(&neg, 0.0);
         let after = cast(&px, &grey);
         assert!(after < 0.01, "auto WB {:?}: cast {after}", (t, n));
+    }
+
+    /// A smooth density ramp renders to a smooth 16-bit gradient.
+    #[test]
+    fn gradients_stay_smooth_in_16_bit() {
+        let l = [ChannelLevels {
+            lo: 0.1,
+            hi: 1.2,
+            mid: 0.6,
+        }; 3];
+        let n = 65536;
+        let neg = Negative {
+            width: n,
+            height: 1,
+            data: (0..n)
+                .map(|i| [(0.1 + 1.1 * i as f64 / (n - 1) as f64) as f32; 3])
+                .collect(),
+        };
+        let s = chart_settings();
+        for space in [
+            OutputSpace::Srgb,
+            OutputSpace::AdobeRgb,
+            OutputSpace::ProPhoto,
+        ] {
+            let px = Renderer::new(&s, Some(&l), space).render(&neg, 0.0);
+            let q: Vec<u16> = px.iter().map(|p| (p[1] * 65535.0).round() as u16).collect();
+            let levels = q.windows(2).filter(|w| w[0] != w[1]).count();
+            let jump = q.windows(2).map(|w| w[1].abs_diff(w[0])).max().unwrap();
+            assert!(levels > 30000, "{space:?}: only {levels} distinct steps");
+            assert!(jump < 40, "{space:?}: jump of {jump} / 65535");
+        }
+    }
+
+    /// The same negative scanned to a linear and to a gamma-encoded TIFF
+    /// gives the same densities once the source says which it is.
+    #[test]
+    fn linear_scans_read_as_linear() {
+        use crate::engine::settings::Source;
+        let chart = crate::engine::testchart::negative(0.0);
+        let dir = std::env::temp_dir().join(format!("nlp_linear_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, f: fn(f32) -> f32| {
+            let p = dir.join(name);
+            let px: Vec<[f32; 3]> = chart
+                .src
+                .data
+                .iter()
+                .map(|v| color::mul3(&chart.src.to_melissa, *v).map(f))
+                .collect();
+            let icc = color::icc_for(OutputSpace::Srgb);
+            crate::engine::export::write_tiff(
+                &p,
+                chart.src.width,
+                chart.src.height,
+                &px,
+                true,
+                false,
+                &icc,
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
+            decode::load(&p, None).unwrap()
+        };
+        let encoded = write("encoded.tif", color::srgb_encode);
+        let linear = write("linear.tif", |v| v);
+        let _ = std::fs::remove_dir_all(&dir);
+        let density = |src: &SourceImage, source: Source| {
+            let s = Settings {
+                source,
+                ..Settings::default()
+            };
+            prepare_negative(src, &s, resolve_base(src, &s, None))
+        };
+        let a = density(&encoded, Source::TifScan);
+        let b = density(&linear, Source::LinearScan);
+        let worst = a
+            .data
+            .iter()
+            .zip(&b.data)
+            .map(|(x, y)| (0..3).map(|c| (x[c] - y[c]).abs()).fold(0.0f32, f32::max))
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.01, "density differs by {worst}");
+        // Read as sRGB, the linear file's densities come out about 2.2× too large.
+        let wrong = density(&linear, Source::TifScan);
+        let p = chart.patches[21].pixels[0];
+        assert!(wrong.data[p][1] > a.data[p][1] * 1.5);
     }
 
     #[test]
