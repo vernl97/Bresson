@@ -2,6 +2,7 @@
 //! Plugin (Lightroom) processing pipeline.
 
 pub mod color;
+pub mod contact;
 pub mod curve;
 pub mod decode;
 pub mod demosaic;

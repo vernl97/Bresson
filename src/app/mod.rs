@@ -491,6 +491,60 @@ impl NlpApp {
 
     // ---- export -------------------------------------------------------------------
 
+    /// Render the given frames (or all, if empty) onto one JPEG in the
+    /// project folder.
+    pub fn make_contact_sheet(&mut self, idx: Vec<usize>) {
+        let idx: Vec<usize> = if idx.is_empty() { (0..self.frames.len()).collect() } else { idx };
+        let jobs: Vec<_> = idx
+            .iter()
+            .filter_map(|&i| {
+                let f = &self.frames[i];
+                let src = f.thumb_src.clone()?;
+                Some((f.name.clone(), src, f.sc.settings.clone(), f.sc.analysis.clone(), f.sc.roll.clone()))
+            })
+            .collect();
+        let Some(first) = idx.first().map(|&i| self.frames[i].path.clone()) else { return };
+        if jobs.is_empty() {
+            self.toast("Frames are still loading", true);
+            return;
+        }
+        let dir = sidecar::project_dir(&first);
+        let stem = self
+            .folder
+            .as_ref()
+            .and_then(|f| f.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "roll".into());
+        let out = dir.join(format!("{stem}_contact_sheet.jpg"));
+        self.jobs.spawn(move || {
+            use rayon::prelude::*;
+            let tiles: Vec<_> = jobs
+                .into_par_iter()
+                .map(|(name, src, s, a, roll)| {
+                    let base = match &a {
+                        Some(a) => a.base,
+                        None => pipeline::resolve_base(&src, &s, None),
+                    };
+                    let neg = pipeline::prepare_negative(&src, &s, base);
+                    let levels = pipeline::levels_for(&s, a.as_ref(), roll.as_ref());
+                    let r = Renderer::new(&s, levels.as_ref(), OutputSpace::Srgb);
+                    crate::engine::contact::Tile {
+                        name,
+                        w: neg.width,
+                        h: neg.height,
+                        px: r.render(&neg, 0.0),
+                    }
+                })
+                .collect();
+            let res = std::fs::create_dir_all(&dir)
+                .map_err(anyhow::Error::from)
+                .and_then(|_| crate::engine::contact::write_sheet(&out, &tiles))
+                .map(|_| out)
+                .map_err(|e| format!("{e:#}"));
+            JobResult::ContactSheet(res)
+        });
+    }
+
     pub fn open_export_dialog(&mut self, targets: Vec<usize>) {
         if targets.is_empty() {
             return;
@@ -952,6 +1006,10 @@ impl NlpApp {
                         Err(e) => self.toast(format!("Export failed: {e}"), true),
                     }
                 }
+                JobResult::ContactSheet(r) => match r {
+                    Ok(p) => self.toast(format!("Saved contact sheet: {}", p.display()), false),
+                    Err(e) => self.toast(format!("Contact sheet failed: {e}"), true),
+                },
                 JobResult::Message(m) => self.toast(m, true),
             }
         }

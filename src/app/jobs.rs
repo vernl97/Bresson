@@ -39,6 +39,7 @@ pub enum JobResult {
         path: PathBuf,
         result: Result<PathBuf, String>,
     },
+    ContactSheet(Result<PathBuf, String>),
     /// The roll's frames differ by more than 1 EV in their exposure
     /// metadata; ask before converting without it (`L22_1`).
     ExposureVariance {

@@ -241,6 +241,13 @@ impl NlpApp {
                             }
                         }
                         if ui
+                            .button("Contact sheet")
+                            .on_hover_text("Save a JPEG contact sheet in the NLP folder (selection, or all frames)")
+                            .clicked()
+                        {
+                            self.make_contact_sheet(self.sel_vec());
+                        }
+                        if ui
                             .add(egui::Button::new("Select all").shortcut_text(key(&select_key)))
                             .clicked()
                         {
