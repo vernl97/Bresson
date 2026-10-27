@@ -4,6 +4,7 @@
 pub mod color;
 pub mod curve;
 pub mod decode;
+pub mod demosaic;
 pub mod export;
 pub mod flat;
 pub mod frame;

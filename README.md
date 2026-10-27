@@ -76,12 +76,13 @@ The engine started as a port of the Lightroom plugin and now models the film its
 | `look.rs` | Native looks (`assets/looks.json`, measured from the plugin's looks), sharpening |
 | `color.rs` | Working and output spaces, CIELAB / CIEDE2000, generated ICC profiles |
 | `flat.rs` | Flat-field gain maps |
+| `demosaic.rs` | Bayer demosaic for full-resolution exports |
 | `testchart.rs` | Physically modelled test negative and quality metrics |
 | `export.rs` | Positive copies with ICC and EXIF, TIF scan prep |
 
 ### Notes
 - **GPU preview.** With wgpu (the default), the editor draws its preview in a fragment shader (`app/gpu.rs`, `app/preview.wgsl`): the density image is a texture, the print curves and the native look are buffers. It matches the CPU renderer within 0.04/255 and stays at full editor resolution while sliders move. The histogram, readout and clipping view come from a 1024 px CPU render. Exports, thumbnails and the no-wgpu fallback use the CPU renderer. The preview leaves out output sharpening.
-- **Raw processing.** `rawler` decodes the raw files and supplies the camera matrix.
+- **Raw processing.** `rawler` decodes the raw files and supplies the camera matrix. Full-resolution exports demosaic Bayer sensors with an RCD-style ratio-corrected method (`demosaic.rs`) and X-Trans with Markesteijn, instead of rawler's PPG and bilinear. Previews bin the mosaic instead. Scanner DNGs (LinearRaw) need no demosaic.
 - **No plugin assets.** The conversion uses no camera profiles (DCP) or look files (XMP). VueScan / SilverFast DNGs are set as the scan source by hand.
 - **Film base.** *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper. In density a wrong base is a constant per-channel offset that the levels absorb, so the conversion barely depends on it (tested on a chart cropped tight with no rebate).
 - **Flat field.** A frame of the bare light source or clear film leader, shot with the same camera, lens and light (Convert dialog, the editor's Source section, or `--flat FILE`). Uneven light varies across the frame, which the levels can't absorb.
