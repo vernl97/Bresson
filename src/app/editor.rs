@@ -218,6 +218,8 @@ const LAB_DRAG_PX: f32 = 12.0;
 
 /// Height of the editor's filmstrip.
 const FILMSTRIP_H: f32 = 84.0;
+/// Height of the bar that collapses and expands the filmstrip.
+const FILMSTRIP_TOGGLE_H: f32 = 16.0;
 
 /// Rotate crop insets [l, t, r, b] with the image.
 fn rotate_insets(c: [f32; 4], clockwise: bool) -> [f32; 4] {
@@ -523,6 +525,30 @@ impl NlpApp {
             self.apply_change(i, &before, s2);
         }
 
+        if self.frames.len() > 1 && self.editor.crop.is_none() {
+            egui::Panel::bottom("editor_filmstrip_toggle")
+                .exact_size(FILMSTRIP_TOGGLE_H)
+                .frame(egui::Frame::new().fill(theme::PANEL))
+                .show(ui, |ui| {
+                    let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+                    let c = if resp.hovered() { theme::ACCENT } else { egui::Color32::from_gray(140) };
+                    // Chevron points down to collapse, up to expand.
+                    let (m, w, d) = (rect.center(), 5.0, 2.5);
+                    let d = if self.editor.filmstrip { d } else { -d };
+                    ui.painter().line(
+                        vec![
+                            egui::pos2(m.x - w, m.y - d),
+                            egui::pos2(m.x, m.y + d),
+                            egui::pos2(m.x + w, m.y - d),
+                        ],
+                        egui::Stroke::new(1.5, c),
+                    );
+                    let tip = if self.editor.filmstrip { "Hide filmstrip (F)" } else { "Show filmstrip (F)" };
+                    if resp.on_hover_text(tip).clicked() {
+                        self.editor.filmstrip = !self.editor.filmstrip;
+                    }
+                });
+        }
         if self.editor.filmstrip && self.frames.len() > 1 && self.editor.crop.is_none() {
             egui::Panel::bottom("editor_filmstrip")
                 .exact_size(FILMSTRIP_H)
