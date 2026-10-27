@@ -120,12 +120,12 @@ choice_enum!(
 );
 
 choice_enum!(
-    /// How a roll's frames are printed. Both use the roll's colour balance;
-    /// Lab sets each frame's density from the frame, Darkroom prints the
-    /// whole roll at one exposure.
+    /// How a roll's frames are printed. Both use the film's channel slopes
+    /// from the roll; Lab sets each frame's colour and density from the
+    /// frame, Darkroom prints the whole roll at one balance and exposure.
     RollMode {
-        Lab => "Lab (density per frame)",
-        Darkroom => "Darkroom (one exposure)",
+        Lab => "Lab (per frame)",
+        Darkroom => "Darkroom (one setting)",
     } default Lab
 );
 

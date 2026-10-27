@@ -291,6 +291,39 @@ pub fn neutral_cast(chart: &Chart, srgb: &[[f32; 3]]) -> (f64, f64) {
     )
 }
 
+/// Replace the rebate with a scanner holder or mask that reads `density`
+/// above the base (many scans can't measure much more than 2–2.5 D).
+pub fn with_holder(chart: &mut Chart, density: f64) {
+    let holder = scan(None, 0.0).map(|v| (v * 10f64.powf(-density)) as f32);
+    let (w, h) = (chart.src.width, chart.src.height);
+    for (i, p) in chart.src.data.iter_mut().enumerate() {
+        let (x, y) = (i % w, i / w);
+        if x < REBATE || x >= w - REBATE || y < REBATE || y >= h - REBATE {
+            *p = holder;
+        }
+    }
+}
+
+/// Put a light source (a lamp, 20× brighter than white) in a strip down
+/// the left tenth of the frame. Returns the patches it doesn't cover.
+pub fn with_light(chart: &mut Chart, ev: f64) -> Vec<usize> {
+    let lamp = scan(Some([0.9 * 20.0; 3]), ev).map(|v| v as f32);
+    let (w, h) = (chart.src.width, chart.src.height);
+    let x1 = REBATE + (w - 2 * REBATE) / 10;
+    let inside = |i: usize| {
+        let (x, y) = (i % w, i / w);
+        (REBATE..x1).contains(&x) && (REBATE..h - REBATE).contains(&y)
+    };
+    for (i, p) in chart.src.data.iter_mut().enumerate() {
+        if inside(i) {
+            *p = lamp;
+        }
+    }
+    (0..chart.patches.len())
+        .filter(|&k| !chart.patches[k].pixels.iter().any(|&i| inside(i)))
+        .collect()
+}
+
 /// Uneven illumination (lens falloff plus a light source that is warmer at
 /// the edges): camera RGB gain at normalised position `(u, v)`.
 pub fn falloff(u: f64, v: f64, strength: f64) -> [f64; 3] {

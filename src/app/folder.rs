@@ -872,7 +872,7 @@ impl NlpApp {
                             &mut d.settings.roll_mode,
                             RollMode::ALL,
                             RollMode::label,
-                            "Both print the roll with one colour balance. Lab: each frame's density from the frame · Darkroom: the whole roll at one exposure",
+                            "Both use the film's channel slopes from the roll. Lab: each frame's own colour and density, like a lab scanner · Darkroom: the whole roll at one colour balance and one exposure",
                         );
                     }
                 }

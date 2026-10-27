@@ -326,21 +326,32 @@ pub fn analysis_buffer(neg: &Negative, s: &Settings) -> Negative {
 }
 
 /// Whether a density is not image: unexposed film (within 0.05 D of the
-/// base), light past the film (thinner than the base), or the holder
-/// (nearly opaque).
-fn not_image(p: [f32; 3]) -> bool {
-    p.iter().all(|d| d.abs() < 0.05) || p.iter().any(|&d| d < -0.15) || p.iter().all(|&d| d > 2.8)
+/// base), light past the film (thinner than the base), or the holder (at
+/// least `opaque` in every channel).
+fn not_image(p: [f32; 3], opaque: f32) -> bool {
+    p.iter().all(|d| d.abs() < 0.05)
+        || p.iter().any(|&d| d < -0.15)
+        || p.iter().all(|&d| d > opaque)
+}
+
+/// Density from which an edge counts as holder: within 0.2 D of the
+/// frame's densest area. A holder or mask reads as dense as the scan can
+/// measure, which for many scanners and cameras is only 2–2.5 D.
+fn opaque_density(d: &[[f32; 3]]) -> f32 {
+    let mut v: Vec<f32> = d.iter().map(|p| p[0].min(p[1]).min(p[2])).collect();
+    (quantile(&mut v, 0.999) as f32 - 0.2).max(1.4)
 }
 
 /// Insets (percent: left, top, right, bottom) that trim the rows and columns
 /// along the edges that are mostly not image, up to 20 % per side, plus two
 /// lines for the soft edge between film border and image.
 fn frame_insets(d: &[[f32; 3]], w: usize, h: usize) -> [f32; 4] {
+    let opaque = opaque_density(d);
     let line_is_border = |pixels: &mut dyn Iterator<Item = [f32; 3]>| {
         let (mut n, mut border) = (0usize, 0usize);
         for p in pixels {
             n += 1;
-            border += not_image(p) as usize;
+            border += not_image(p, opaque) as usize;
         }
         n > 0 && border * 2 >= n
     };
@@ -410,6 +421,19 @@ impl NeutralAxis {
 /// image has too little near-neutral content.
 pub fn levels_from_buffer(buf: &Negative, t: ImageType) -> (Levels, Option<NeutralAxis>) {
     let mut l = channel_quantiles(buf, t);
+    if t == ImageType::Negative {
+        // A light source or specular in the frame is far denser than the
+        // scene around it and would print the whole scene dark: keep green's
+        // white end within twice its shadow-to-median span above the median,
+        // and shorten every channel's range by the same fraction so neutrals
+        // stay neutral.
+        let g = l[1];
+        let cap = (g.mid + 2.0 * (g.mid - g.lo)).max(g.mid + 0.1);
+        let f = ((cap - g.lo) / (g.hi - g.lo).max(1e-6)).min(1.0);
+        for c in l.iter_mut() {
+            c.hi = c.lo + (c.hi - c.lo) * f;
+        }
+    }
     let own = l;
     let mut axis = None;
     for _ in 0..3 {
@@ -812,10 +836,17 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
     )
 }
 
-/// Pick the levels a frame renders with: its own analysis, or the roll's
-/// balance. In Lab mode each frame keeps its own density range in green
-/// (auto exposure per frame) with red and blue on the roll's axis; Darkroom
-/// mode prints every frame with the roll's one exposure.
+/// Below this auto WB confidence a frame's own colour balance is not
+/// trusted.
+pub const LOW_CONFIDENCE: f32 = 0.4;
+
+/// Pick the levels a frame renders with: its own analysis, or the roll's.
+/// A roll always prints with the film's slopes from the roll. In Lab mode
+/// each frame keeps its own colour balance (the light changes from frame
+/// to frame: daylight, shade, tungsten) and its own density range, falling
+/// back to the roll's balance when the frame has too few neutral tones to
+/// judge. Darkroom mode prints every frame with the roll's one balance and
+/// one exposure.
 pub fn levels_for(
     s: &Settings,
     frame: Option<&Analysis>,
@@ -830,11 +861,19 @@ pub fn levels_for(
         _ => 0.0,
     };
     let balance = roll.balance.shifted(d);
-    let green = match (s.roll_mode, frame) {
-        (RollMode::Lab, Some(f)) => f.levels[1],
-        _ => shift_levels(&roll.levels, d)[1],
+    let Some(f) = frame.filter(|_| s.roll_mode == RollMode::Lab) else {
+        return Some(balance.levels(shift_levels(&roll.levels, d)[1]));
     };
-    Some(balance.levels(green))
+    let balance = if f.auto_wb.confidence >= LOW_CONFIDENCE {
+        let (_, centre) = frame_axis(f);
+        RollBalance {
+            slope: balance.slope,
+            offset: std::array::from_fn(|c| centre[c] - balance.slope[c] * centre[1]),
+        }
+    } else {
+        balance
+    };
+    Some(balance.levels(f.levels[1]))
 }
 
 // ---- rendering --------------------------------------------------------------------
@@ -1065,7 +1104,15 @@ mod tests {
         // Green is the frame's own range, red and blue on the roll's axis.
         assert_eq!(lab[1].lo, frames[1].levels[1].lo);
         assert_eq!(lab[1].hi, frames[1].levels[1].hi);
+        // Too few neutral tones (confidence 0): the roll's balance.
         assert_eq!(lab, agg.balance.levels(frames[1].levels[1]));
+        // A frame with a reliable neutral axis keeps its own balance.
+        let mut own = frames[1].clone();
+        own.auto_wb.confidence = 1.0;
+        let l = levels_for(&s, Some(&own), Some(&roll)).unwrap();
+        for c in 0..3 {
+            assert!((l[c].mid - own.levels[c].mid).abs() < 1e-9, "{l:?}");
+        }
         s.use_roll = false;
         assert_eq!(get(&s), frames[1].levels);
     }
@@ -1405,6 +1452,32 @@ mod tests {
         let m = measure(&chart, &convert_chart(&chart, &s, &a, None));
         // With the rebate in the analysis: neutral C* 3.21, full dE00 10.17.
         assert!(m.neutral_cast < 0.5, "neutral C* {}", m.neutral_cast);
+    }
+
+    /// Neither a scanner holder that reads only ~2.2 D nor a lamp in the
+    /// frame may set the white point and print the scene dark.
+    #[test]
+    fn holder_and_light_sources_keep_the_scene_bright() {
+        use crate::engine::testchart::{negative, patch_lab, with_holder, with_light};
+        // No border buffer: real scans' holders are wider than the chart's.
+        let s = Settings {
+            border_buffer: 0.0,
+            ..chart_settings()
+        };
+        let grey_l = |chart: &crate::engine::testchart::Chart| {
+            let a = analyse_chart(chart, &s);
+            patch_lab(chart, &convert_chart(chart, &s, &a, None))[21][0]
+        };
+        let normal = grey_l(&negative(0.0));
+        let mut holder = negative(0.0);
+        with_holder(&mut holder, 2.2);
+        let mut lamp = negative(0.0);
+        let free = with_light(&mut lamp, 0.0);
+        assert!(free.contains(&21));
+        let (h, l) = (grey_l(&holder), grey_l(&lamp));
+        eprintln!("mid grey L*: normal {normal:.1}, holder {h:.1}, lamp {l:.1}");
+        assert!((h - normal).abs() < 3.0, "holder: L* {h} vs {normal}");
+        assert!((l - normal).abs() < 6.0, "lamp: L* {l} vs {normal}");
     }
 
     /// A flat-field frame divides out uneven illumination.

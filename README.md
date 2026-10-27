@@ -19,7 +19,7 @@ cargo run --release -- scan-prep FILES              # level + gamma 2.2 encode l
 cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorChecker negative (ev = stops over)
 ```
 
-`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Lab (density per frame, default) or Darkroom (one exposure for the roll). `--auto-crop` crops and straightens each frame to its detected frame before analysis. `--name` takes the export file name template (see Export below).
+`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Lab (each frame's own colour and density, default) or Darkroom (one setting for the roll). `--auto-crop` crops and straightens each frame to its detected frame before analysis. `--name` takes the export file name template (see Export below).
 
 ## GUI
 
@@ -61,10 +61,10 @@ Settings are saved inside the `NLP/` subfolder as `<file>.nlp.json`.
 The engine started as a port of the Lightroom plugin and now models the film itself: a scan becomes density, density is printed onto a paper curve.
 
 1. **Density.** `pipeline::prepare_negative` divides out uneven light with an optional flat-field frame (`flat.rs`), takes linear camera RGB through the camera matrix, divides out the film base and stores `log10(base / transmittance)` per channel, unclamped. A C-41 dye crosstalk correction (the dyes' unwanted absorptions) and the colour model's calibration are applied in density.
-2. **Levels.** `pipeline::analyze` trims film rebate, holder and light past the film off the edges (found by density), then measures each channel's density range (exact 0.05 % / 99.99 % quantiles and the median) on the 600 px, border-cropped, blurred analysis buffer. Red and blue are placed on the image's neutral axis. Normalising every channel to its own range matches the layers' different H&D slopes, so neutrals stay neutral from shadows to highlights.
+2. **Levels.** `pipeline::analyze` trims film rebate, holder (within 0.2 D of the frame's densest area) and light past the film off the edges, then measures each channel's density range (exact 0.05 % / 99.99 % quantiles and the median) on the 600 px, border-cropped, blurred analysis buffer. Red and blue are placed on the image's neutral axis. The white end stays within twice the shadow-to-median span above the median, so a lamp or specular in the frame can't print the scene dark. Normalising every channel to its own range matches the layers' different H&D slopes, so neutrals stay neutral from shadows to highlights.
 3. **Print.** `curve.rs` shapes the normalised density (brightness, contrast, lights/darks, whites/blacks, toning), turns it into paper log exposure plus printing filtration (white balance and the C·M·Y keys, in CC) and print time (EV), and prints it on a logistic paper curve with a toe and shoulder. The result is baked into density-indexed LUTs.
 4. **Auto colour.** Auto-Neutral is the filtration that prints the near-neutral pixels grey.
-5. **Rolls.** A roll is printed with one colour balance: the film's channel slopes (the median of the frames' neutral-axis slopes; one frame's fit also follows its light) and the roll's filtration (the median axis offset, leaving out frames with an outlying balance). *Lab* sets each frame's density from the frame; *Darkroom* prints the whole roll at one exposure. EXIF exposure differences are exact density offsets (`log10 2` per stop).
+5. **Rolls.** The roll supplies the film's properties: its channel slopes are the median of the frames' neutral-axis slopes (a single frame's fit also follows its light). *Lab* (default) then gives each frame its own colour balance and density, like a lab scanner, falling back to the roll's balance when a frame has too few neutral tones. *Darkroom* prints the whole roll at one balance and one exposure. EXIF exposure differences are exact density offsets (`log10 2` per stop).
 
 `testchart.rs` models a ColorChecker shot on C-41 film; `chart_quality` measures colour error, neutrality and roll consistency against it.
 

@@ -1201,7 +1201,7 @@ impl NlpApp {
                 .editor_index()
                 .and_then(|i| self.frames[i].auto_wb(s))
                 .map(|w| w.confidence);
-            if auto && confidence.is_some_and(|c| c < 0.4) {
+            if auto && confidence.is_some_and(|c| c < pipeline::LOW_CONFIDENCE) {
                 widgets::status_line(
                     ui,
                     Icon::Warn,
