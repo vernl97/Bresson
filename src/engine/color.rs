@@ -164,35 +164,35 @@ pub fn prophoto_encode(v: f32) -> f32 {
     }
 }
 
-/// Fast encoder via lookup table (input is linear 0..=1, clamped).
+/// Fast encoder via lookup table (input is linear 0..=1, clamped). The
+/// first interval is computed exactly: pure power encodings are vertical
+/// at 0, where interpolating would lift the deepest shadows.
 pub struct EncodeLut {
     table: Vec<f32>,
+    f: fn(f32) -> f32,
 }
 
 impl EncodeLut {
     const N: usize = 16384;
-    pub fn new(f: impl Fn(f32) -> f32) -> Self {
+    pub fn new(f: fn(f32) -> f32) -> Self {
         let table = (0..=Self::N)
             .map(|i| f(i as f32 / Self::N as f32))
             .collect();
-        Self { table }
+        Self { table, f }
     }
     #[inline]
     pub fn get(&self, v: f32) -> f32 {
         let x = v.clamp(0.0, 1.0) * Self::N as f32;
         let i = x as usize;
+        if i == 0 {
+            return (self.f)(v.max(0.0));
+        }
         if i >= Self::N {
             return self.table[Self::N];
         }
         let t = x - i as f32;
         self.table[i] + (self.table[i + 1] - self.table[i]) * t
     }
-}
-
-pub fn srgb_encode_lut() -> &'static EncodeLut {
-    use std::sync::OnceLock;
-    static L: OnceLock<EncodeLut> = OnceLock::new();
-    L.get_or_init(|| EncodeLut::new(srgb_encode))
 }
 
 pub fn srgb_decode_lut() -> &'static EncodeLut {
@@ -243,22 +243,106 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
     }
 }
 
-/// HSL lightness.
-#[inline]
-pub fn hsl_lightness(c: [f32; 3]) -> f32 {
-    (c[0].max(c[1]).max(c[2]) + c[0].min(c[1]).min(c[2])) * 0.5
-}
-
 /// Rec.709-ish luminance on encoded values (used for display helpers / sharpening).
 #[inline]
 pub fn luma(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
-/// Relative luminance (Y) of linear MelissaRGB.
-pub fn melissa_luminance_weights() -> [f32; 3] {
-    let m = rgb_to_xyz(&MELISSA);
-    [m[1][0] as f32, m[1][1] as f32, m[1][2] as f32]
+// ---- CIELAB ------------------------------------------------------------------
+
+/// XYZ (relative to `white`, Y = 1) → CIELAB.
+pub fn xyz_to_lab(xyz: [f64; 3], white: [f64; 2]) -> [f64; 3] {
+    let w = xy_to_xyz(white);
+    let f = |t: f64| {
+        if t > 216.0 / 24389.0 {
+            t.cbrt()
+        } else {
+            (24389.0 / 27.0 * t + 16.0) / 116.0
+        }
+    };
+    let [fx, fy, fz] = [f(xyz[0] / w[0]), f(xyz[1] / w[1]), f(xyz[2] / w[2])];
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// CIELAB → XYZ (relative to `white`, Y = 1).
+pub fn lab_to_xyz(lab: [f64; 3], white: [f64; 2]) -> [f64; 3] {
+    let w = xy_to_xyz(white);
+    let fy = (lab[0] + 16.0) / 116.0;
+    let fx = fy + lab[1] / 500.0;
+    let fz = fy - lab[2] / 200.0;
+    let inv = |f: f64| {
+        if f.powi(3) > 216.0 / 24389.0 {
+            f.powi(3)
+        } else {
+            (116.0 * f - 16.0) * 27.0 / 24389.0
+        }
+    };
+    [inv(fx) * w[0], inv(fy) * w[1], inv(fz) * w[2]]
+}
+
+/// Linear RGB in `p` → CIELAB under `p`'s white.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rgb_to_lab(p: &Primaries, rgb: [f64; 3]) -> [f64; 3] {
+    xyz_to_lab(mat_vec(&rgb_to_xyz(p), rgb), p.white)
+}
+
+/// CIEDE2000 colour difference.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn delta_e2000(a: [f64; 3], b: [f64; 3]) -> f64 {
+    use std::f64::consts::PI;
+    let (l1, a1, b1) = (a[0], a[1], a[2]);
+    let (l2, a2, b2) = (b[0], b[1], b[2]);
+    let c_bar = ((a1 * a1 + b1 * b1).sqrt() + (a2 * a2 + b2 * b2).sqrt()) / 2.0;
+    let g = 0.5 * (1.0 - (c_bar.powi(7) / (c_bar.powi(7) + 25f64.powi(7))).sqrt());
+    let (a1p, a2p) = (a1 * (1.0 + g), a2 * (1.0 + g));
+    let (c1p, c2p) = ((a1p * a1p + b1 * b1).sqrt(), (a2p * a2p + b2 * b2).sqrt());
+    let hue = |b: f64, a: f64| {
+        if a == 0.0 && b == 0.0 {
+            0.0
+        } else {
+            b.atan2(a).rem_euclid(2.0 * PI)
+        }
+    };
+    let (h1p, h2p) = (hue(b1, a1p), hue(b2, a2p));
+    let dl = l2 - l1;
+    let dc = c2p - c1p;
+    let dh = if c1p * c2p == 0.0 {
+        0.0
+    } else {
+        let d = h2p - h1p;
+        if d > PI {
+            d - 2.0 * PI
+        } else if d < -PI {
+            d + 2.0 * PI
+        } else {
+            d
+        }
+    };
+    let dhh = 2.0 * (c1p * c2p).sqrt() * (dh / 2.0).sin();
+    let l_bar = (l1 + l2) / 2.0;
+    let c_bar_p = (c1p + c2p) / 2.0;
+    let h_bar = if c1p * c2p == 0.0 {
+        h1p + h2p
+    } else if (h1p - h2p).abs() <= PI {
+        (h1p + h2p) / 2.0
+    } else if h1p + h2p < 2.0 * PI {
+        (h1p + h2p + 2.0 * PI) / 2.0
+    } else {
+        (h1p + h2p - 2.0 * PI) / 2.0
+    };
+    let t = 1.0 - 0.17 * (h_bar - PI / 6.0).cos()
+        + 0.24 * (2.0 * h_bar).cos()
+        + 0.32 * (3.0 * h_bar + PI / 30.0).cos()
+        - 0.20 * (4.0 * h_bar - 63.0 * PI / 180.0).cos();
+    let d_theta = 30.0 * (-((h_bar.to_degrees() - 275.0) / 25.0).powi(2)).exp();
+    let rc = 2.0 * (c_bar_p.powi(7) / (c_bar_p.powi(7) + 25f64.powi(7))).sqrt();
+    let sl = 1.0 + 0.015 * (l_bar - 50.0).powi(2) / (20.0 + (l_bar - 50.0).powi(2)).sqrt();
+    let sc = 1.0 + 0.045 * c_bar_p;
+    let sh = 1.0 + 0.015 * c_bar_p * t;
+    let rt = -(2.0 * d_theta.to_radians()).sin() * rc;
+    ((dl / sl).powi(2) + (dc / sc).powi(2) + (dhh / sh).powi(2) + rt * (dc / sc) * (dhh / sh))
+        .sqrt()
 }
 
 // ---- ICC profiles --------------------------------------------------------------
@@ -451,6 +535,43 @@ mod tests {
         let w = mat_vec(&m, [1.0, 1.0, 1.0]);
         for c in w {
             assert!((c - 1.0).abs() < 1e-3, "{w:?}");
+        }
+    }
+
+    #[test]
+    fn delta_e2000_reference_pairs() {
+        // Sharma, Wu & Dalal (2005) test data.
+        let pairs = [
+            ([50.0, 2.6772, -79.7751], [50.0, 0.0, -82.7485], 2.0425),
+            ([50.0, -1.0, 2.0], [50.0, 0.0, 0.0], 2.3669),
+            ([50.0, 2.5, 0.0], [73.0, 25.0, -18.0], 27.1492),
+            (
+                [60.2574, -34.0099, 36.2677],
+                [60.4626, -34.1751, 39.4387],
+                1.2644,
+            ),
+        ];
+        for (a, b, de) in pairs {
+            assert!((delta_e2000(a, b) - de).abs() < 1e-3, "{a:?} {b:?}");
+        }
+        let lab = [42.0, 18.0, -30.0];
+        let back = xyz_to_lab(lab_to_xyz(lab, D50), D50);
+        assert!(delta_e2000(lab, back) < 1e-9);
+    }
+
+    #[test]
+    fn encode_lut_is_exact_near_black() {
+        fn adobe(v: f32) -> f32 {
+            v.max(0.0).powf(1.0 / ADOBE_GAMMA)
+        }
+        let lut = EncodeLut::new(adobe);
+        for v in [1e-7f32, 3e-5, 5e-4, 0.01, 0.18, 0.9] {
+            assert!(
+                (lut.get(v) - adobe(v)).abs() < 2e-5,
+                "{v}: {} vs {}",
+                lut.get(v),
+                adobe(v)
+            );
         }
     }
 

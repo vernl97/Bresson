@@ -19,12 +19,13 @@ USAGE:
 
 CONVERT OPTIONS:
   --roll               Analyse all files as one roll
-  --roll-process NAME  Pro Lab (default) | Basic Lab | Darkroom Paper
-  --tone NAME          Tone profile (e.g. \"LAB - Standard\", \"Cinematic - Rich\")
+  --roll-process NAME  Lab (default: density per frame) | Darkroom (one exposure)
+  --tone NAME          Tone profile, e.g. \"LAB - Standard\" (or Standard), \"Cinematic - Rich\"
   --wb NAME            White balance (Auto-Neutral, Kodak, Fuji, ...)
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
   --border PCT         Border buffer percent (default 5)
   --auto-crop          Crop and straighten each frame to its detected frame
+  --flat FILE          Flat-field frame (bare light or clear film leader, shot like the negatives)
   --jpg                Write JPEG instead of 16-bit TIFF
   --long-edge PX       Resize so the long edge is at most PX (default: full size)
   --name TEMPLATE      File name: {name} {suffix} {n} {n:03} {stock} {iso} {date}
@@ -32,11 +33,17 @@ CONVERT OPTIONS:
   --out DIR            Output folder (default: <source>/Positives)
 ";
 
+/// The first choice whose label is `name`, starts with `name` and a space
+/// ("Lab" for "Lab (per frame)") or ends with a space and `name` ("Rich"
+/// for "Cinematic - Rich").
 fn find<T: Copy>(all: &[T], label: impl Fn(T) -> &'static str, name: &str) -> Result<T> {
     let n = name.to_ascii_lowercase();
     all.iter()
         .copied()
-        .find(|v| label(*v).to_ascii_lowercase() == n)
+        .find(|v| {
+            let l = label(*v).to_ascii_lowercase();
+            l == n || l.starts_with(&format!("{n} ")) || l.ends_with(&format!(" {n}"))
+        })
         .with_context(|| format!("unknown value '{name}'"))
 }
 
@@ -55,7 +62,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
             let out = it.next().unwrap_or_else(|| "synthetic-negative.tif".into());
             synth_negative(
                 Path::new(&out),
-                it.next().map(|v| v.parse().unwrap_or(0)).unwrap_or(0),
+                it.next().map(|v| v.parse().unwrap_or(0.0)).unwrap_or(0.0),
             )
         }
         _ => {
@@ -89,6 +96,7 @@ fn convert(args: Vec<String>) -> Result<()> {
             "--lut" => s.lut = find(Lut::ALL, Lut::label, &val()?)?,
             "--border" => s.border_buffer = val()?.parse()?,
             "--auto-crop" => s.auto_crop = true,
+            "--flat" => s.flat_field = Some(PathBuf::from(val()?)),
             "--jpg" => ex.format = ExportFormat::Jpeg,
             "--long-edge" => ex.long_edge = val()?.parse()?,
             "--name" => ex.name_template = val()?,
@@ -101,7 +109,7 @@ fn convert(args: Vec<String>) -> Result<()> {
     if files.is_empty() {
         bail!("no input files\n{HELP}");
     }
-    // `createRoll` only runs for more than one frame.
+    // A roll needs more than one frame.
     let roll = roll && files.len() > 1;
     // Analyse every frame on its proxy.
     let mut frames = Vec::new();
@@ -138,8 +146,8 @@ fn convert(args: Vec<String>) -> Result<()> {
         ));
     }
     let roll_data = roll.then(|| {
-        // `L22_1`: with more than 1 EV between frames there is no prompt in
-        // batch mode, so continue without exposure data.
+        // With more than 1 EV between frames there is no prompt in batch
+        // mode, so continue without exposure data.
         let common_ev = pipeline::common_ev(&analyses).filter(|&c| {
             let spread = pipeline::ev_spread(&analyses, c);
             if spread > 1.0 {
@@ -153,11 +161,11 @@ fn convert(args: Vec<String>) -> Result<()> {
         let (agg, excluded) = pipeline::aggregate_roll(&analyses, common_ev);
         RollData {
             id: format!("roll-{}", std::process::id()),
-            origins: agg.origins,
+            levels: agg.levels,
+            balance: agg.balance,
             base: roll_base.unwrap_or_else(|| analyses[0].base),
             frames: files.len(),
             auto_wb: Some(agg.auto_wb),
-            multipliers: Some(agg.multipliers),
             common_ev: agg.common_ev,
             excluded: excluded
                 .iter()
@@ -209,52 +217,23 @@ fn convert(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// Generate a synthetic colour negative (orange mask, H&D response) for testing.
-fn synth_negative(path: &Path, variant: u32) -> Result<()> {
-    let (w, h) = (900usize, 600usize);
-    let patches: [[f32; 3]; 12] = [
-        [0.45, 0.32, 0.25], // skin
-        [0.12, 0.25, 0.55], // sky
-        [0.15, 0.35, 0.10], // foliage
-        [0.60, 0.10, 0.08], // red
-        [0.70, 0.60, 0.10], // yellow
-        [0.10, 0.10, 0.40], // blue
-        [0.05, 0.05, 0.05],
-        [0.18, 0.18, 0.18],
-        [0.40, 0.40, 0.40],
-        [0.75, 0.75, 0.75],
-        [0.30, 0.15, 0.40],
-        [0.20, 0.45, 0.45],
-    ];
-    let exposure = 1.0 + variant as f32 * 0.35;
-    let base = [0.92f32, 0.62, 0.38];
-    let gamma = [0.62f32, 0.66, 0.70];
-    let mut px = vec![[0.0f32; 3]; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let border = x < 30 || x >= w - 30 || y < 30 || y >= h - 30;
-            let scene = if border {
-                None
-            } else if y < 120 {
-                let t = (x - 30) as f32 / (w - 60) as f32;
-                Some([t * t * 0.9 + 0.01; 3])
-            } else {
-                let (cx, cy) = ((x - 30) * 6 / (w - 60), (y - 120) * 2 / (h - 150));
-                Some(patches[(cy.min(1) * 6 + cx.min(5)) % 12])
-            };
-            let t = match scene {
-                None => base,
-                Some(e) => [0, 1, 2]
-                    .map(|c| base[c] * ((e[c] * exposure + 0.004) / 0.004).powf(-gamma[c] * 0.42)),
-            };
-            px[y * w + x] = t.map(crate::engine::color::srgb_encode);
-        }
-    }
+/// Write the physically modelled ColorChecker negative (`testchart`),
+/// exposed `ev` stops over normal, as a linear-light 16-bit TIFF.
+fn synth_negative(path: &Path, ev: f64) -> Result<()> {
+    let chart = crate::engine::testchart::negative(ev);
+    let src = &chart.src;
+    let px: Vec<[f32; 3]> = src
+        .data
+        .iter()
+        .map(|p| {
+            crate::engine::color::mul3(&src.to_melissa, *p).map(crate::engine::color::srgb_encode)
+        })
+        .collect();
     let icc = crate::engine::color::icc_for(crate::engine::settings::OutputSpace::Srgb);
     export::write_tiff(
         path,
-        w,
-        h,
+        src.width,
+        src.height,
         &px,
         true,
         true,

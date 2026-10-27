@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, pos2, vec2};
 
-use super::folder::{lut_folder_ui, source_instructions};
+use super::folder::source_instructions;
 use super::widgets::{
     self, Icon, fl_combo, fl_slider, fl_slider_u8, grad, icon_button, pill, segmented, theme,
 };
-use super::{NlpApp, View, to_color_image};
+use super::{NlpApp, View, gpu, to_color_image};
 use crate::engine::decode::{self, SourceImage};
 use crate::engine::pipeline::{self, Negative, Renderer};
 use crate::engine::settings::*;
@@ -47,7 +47,7 @@ enum Handle {
 
 /// Uncommitted crop / straighten state while crop mode is open.
 #[derive(Clone, Copy)]
-struct CropEdit {
+pub(super) struct CropEdit {
     insets: [f32; 4],
     angle: f32,
     drag: Option<Handle>,
@@ -84,7 +84,14 @@ pub struct Editor {
     neg: Option<Negative>,
     neg_small: Option<Negative>,
     neg_key: Option<(AnalysisKey, [i32; 4], i32, u8, bool, [i32; 3])>,
+    /// CPU-rendered preview (without wgpu).
     tex: Option<egui::TextureHandle>,
+    /// Size of the shown negative in pixels; `None` until the first render.
+    size: Option<[usize; 2]>,
+    /// GPU preview: the negative, and how to draw it and its "before" side.
+    gpu_neg: Option<Arc<gpu::NegData>>,
+    gpu_view: Option<Arc<gpu::ViewData>>,
+    gpu_before: Option<Arc<gpu::ViewData>>,
     dirty: bool,
     pub before: bool,
     color_tab: ColorTab,
@@ -94,18 +101,18 @@ pub struct Editor {
     committed: Option<Settings>,
     hist: [[u32; 256]; 3],
     curves: Vec<[f32; 4]>,
-    uses_table: bool,
     /// Display scale (screen points per preview pixel); `None` = fit.
     zoom: Option<f32>,
     pan: egui::Vec2,
-    crop: Option<CropEdit>,
+    pub(super) crop: Option<CropEdit>,
     pub export_open: bool,
     zoom_req: Option<ZoomReq>,
     zoom_anim: Option<ZoomAnim>,
     /// The Border buffer slider is held: outline the analysis area.
     border_preview: bool,
     /// The rendered preview (display sRGB, 0..1) and its size, for the
-    /// pixel readout.
+    /// pixel readout and clipping view (a 1024 px render when the preview
+    /// is drawn on the GPU).
     px: Vec<[f32; 3]>,
     px_size: [usize; 2],
     /// Paint clipped highlights red and blocked shadows blue (J).
@@ -139,6 +146,10 @@ impl Default for Editor {
             neg_small: None,
             neg_key: None,
             tex: None,
+            size: None,
+            gpu_neg: None,
+            gpu_view: None,
+            gpu_before: None,
             dirty: true,
             before: false,
             color_tab: ColorTab::Mids,
@@ -148,7 +159,6 @@ impl Default for Editor {
             committed: None,
             hist: [[0; 256]; 3],
             curves: Vec::new(),
-            uses_table: false,
             zoom: None,
             pan: egui::Vec2::ZERO,
             crop: None,
@@ -213,21 +223,9 @@ impl NlpApp {
     }
 
     /// Commit a settings change made in the editor.
-    fn apply_change(&mut self, i: usize, before: &Settings, mut s: Settings) {
+    fn apply_change(&mut self, i: usize, before: &Settings, s: Settings) {
         if s == *before {
             return;
-        }
-        if s.engine != before.engine {
-            let p = s.engine;
-            s.apply_engine_preset(p);
-        } else if s.curve_points != before.curve_points
-            || s.correction_type != before.correction_type
-            || s.layer_order != before.layer_order
-            || s.wb_tonality != before.wb_tonality
-            || s.wb_method != before.wb_method
-            || s.clip_method != before.clip_method
-        {
-            s.engine = EnginePreset::Custom;
         }
         let wb_changed = s.wb_mode != before.wb_mode;
         self.frames[i].sc.settings = s;
@@ -319,12 +317,16 @@ impl NlpApp {
         s
     }
 
-    /// (Re)render the preview texture if needed.
+    /// (Re)render the preview if needed. With wgpu the full-size preview is
+    /// drawn by the GPU on every frame, and the CPU only renders a 1024 px
+    /// copy for the histogram, readout and clipping view; without it the
+    /// CPU renders the preview itself (from the 1024 px copy while a slider
+    /// is dragged).
     fn update_preview(&mut self, ctx: &egui::Context, i: usize, dragging: bool) {
         let Some(src) = self.editor.src.clone() else {
             return;
         };
-        if !self.editor.dirty && self.editor.tex.is_some() {
+        if !self.editor.dirty && self.editor.size.is_some() {
             return;
         }
         let s = self.preview_settings(i);
@@ -346,73 +348,83 @@ impl NlpApp {
                 height: h,
                 data: d,
             });
+            self.editor.gpu_neg = self.gpu.then(|| gpu::NegData::new(&neg));
             self.editor.neg = Some(neg);
             self.editor.neg_key = Some(key);
         }
-        let use_small = dragging
-            && self
-                .editor
-                .neg
-                .as_ref()
-                .map(|n| n.width.max(n.height) > 1100)
-                .unwrap_or(false);
-        let neg = if use_small {
-            self.editor.neg_small.as_ref().unwrap()
-        } else {
-            self.editor.neg.as_ref().unwrap()
-        };
+        let full = self.editor.neg.as_ref().unwrap();
+        let small = self.editor.neg_small.as_ref().unwrap();
+        let use_small = !self.gpu && dragging && full.width.max(full.height) > 1100;
+        let cpu_neg = if self.gpu || use_small { small } else { full };
         let origins = if self.editor.before {
             None
         } else {
-            pipeline::origins_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
+            pipeline::levels_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
         };
         let mp = (src.info.full_width * src.info.full_height) as f32 / 1e6;
         let r = Renderer::new(&s, origins.as_ref(), OutputSpace::Srgb).with_megapixels(mp);
         let full_long = src.info.full_width.max(src.info.full_height).max(1) as f32;
         let crop_frac = 1.0 - (s.crop[0] + s.crop[2]).max(s.crop[1] + s.crop[3]) / 100.0;
-        let scale = neg.width.max(neg.height) as f32 / (full_long * crop_frac.max(0.1));
-        let px = r.render(neg, scale.min(1.0));
+        let scale = cpu_neg.width.max(cpu_neg.height) as f32 / (full_long * crop_frac.max(0.1));
+        let px = r.render(cpu_neg, scale.min(1.0));
         let mut hist = [[0u32; 256]; 3];
-        for p in px.iter().step_by(3) {
+        let step = if self.gpu { 1 } else { 3 };
+        for p in px.iter().step_by(step) {
             for c in 0..3 {
                 hist[c][(p[c].clamp(0.0, 1.0) * 255.0) as usize] += 1;
             }
         }
         self.editor.hist = hist;
         self.editor.curves = r.curve_lut().map(|l| l.sample(96)).unwrap_or_default();
-        self.editor.uses_table = r.uses_lut_table();
-        let img = to_color_image(&px, neg.width, neg.height);
-        set_texture(ctx, &mut self.editor.tex, "editor-preview", img);
+        let (w, h) = (cpu_neg.width, cpu_neg.height);
+        if self.gpu {
+            self.editor.gpu_view = Some(gpu::ViewData::new(&r));
+            self.editor.tex = None;
+        } else {
+            set_texture(
+                ctx,
+                &mut self.editor.tex,
+                "editor-preview",
+                to_color_image(&px, w, h),
+            );
+        }
         let cropping = self.editor.crop.is_some();
         if self.editor.clip_view && !self.editor.before && !cropping {
-            let img = clip_image(&px, neg.width, neg.height);
+            let img = clip_image(&px, w, h);
             set_texture(ctx, &mut self.editor.clip_tex, "editor-clipping", img);
         } else {
             self.editor.clip_tex = None;
         }
+        self.editor.gpu_before = None;
+        self.editor.before_tex = None;
         if self.editor.split && !self.editor.before && !cropping {
-            let before = Renderer::new(&s, None, OutputSpace::Srgb)
-                .with_megapixels(mp)
-                .render(neg, scale.min(1.0));
-            let img = to_color_image(&before, neg.width, neg.height);
-            set_texture(ctx, &mut self.editor.before_tex, "editor-before", img);
-        } else {
-            self.editor.before_tex = None;
+            let before = Renderer::new(&s, None, OutputSpace::Srgb).with_megapixels(mp);
+            if self.gpu {
+                self.editor.gpu_before = Some(gpu::ViewData::new(&before));
+            } else {
+                let img = to_color_image(&before.render(cpu_neg, scale.min(1.0)), w, h);
+                set_texture(ctx, &mut self.editor.before_tex, "editor-before", img);
+            }
         }
+        self.editor.size = Some([full.width, full.height]);
         self.editor.px = px;
-        self.editor.px_size = [neg.width, neg.height];
+        self.editor.px_size = [w, h];
         self.editor.dirty = use_small;
     }
 
-    fn zoom_by(&mut self, factor: f32, fit: f32) {
+    /// Zoom by `factor` keeping the image point under `rel` (cursor relative
+    /// to the canvas centre) fixed.
+    fn zoom_by(&mut self, factor: f32, fit: f32, rel: egui::Vec2) {
         self.editor.zoom_anim = None;
         let cur = self.editor.zoom.unwrap_or(fit);
-        let next = (cur * factor).clamp(fit * 0.5, 8.0);
+        let next = (cur * factor).clamp(fit, 8.0f32.max(fit));
         if next <= fit * 1.001 && factor < 1.0 {
             self.editor.zoom = None;
             self.editor.pan = egui::Vec2::ZERO;
         } else {
-            self.editor.zoom = Some(next.max(fit));
+            let k = next / cur;
+            self.editor.pan = (self.editor.pan - rel) * k + rel;
+            self.editor.zoom = Some(next);
         }
     }
 
@@ -1019,21 +1031,9 @@ impl NlpApp {
         if open {
             self.conversion_settings(ui, s);
         } else {
-            let profile = match self.editor.src.as_ref().map(|src| src.is_raw) {
-                Some(true) => match self
-                    .editor
-                    .src
-                    .as_ref()
-                    .and_then(|src| pipeline::camera_profile(src))
-                {
-                    Some(_) => " · profile ✓",
-                    None => " · camera matrix",
-                },
-                _ => "",
-            };
             ui.label(
                 RichText::new(format!(
-                    "{} · {} · base {}{profile}",
+                    "{} · {} · base {}",
                     s.source.label(),
                     s.color_model.label(),
                     s.film_base.label().to_lowercase(),
@@ -1057,8 +1057,7 @@ impl NlpApp {
             ) {
                 if s.image_type == ImageType::Negative {
                     let d = Settings::default();
-                    (s.tone_profile, s.wb_mode, s.correction_type) =
-                        (d.tone_profile, d.wb_mode, d.correction_type);
+                    (s.tone_profile, s.wb_mode) = (d.tone_profile, d.wb_mode);
                 } else {
                     s.apply_positive_defaults();
                 }
@@ -1098,37 +1097,6 @@ impl NlpApp {
             {
                 s.apply_mono_defaults();
             }
-            ui.label(RichText::new("Camera profile").small().color(theme::MUTED));
-            match self
-                .editor
-                .src
-                .as_ref()
-                .map(|src| (src.is_raw, pipeline::camera_profile(src)))
-            {
-                Some((_, Some(p))) => {
-                    widgets::status_line(ui, Icon::Check, theme::OK, &p.name)
-                        .on_hover_text(format!("{}\n{}", p.camera, p.path.display()));
-                }
-                Some((true, None)) => {
-                    widgets::status_line(
-                        ui,
-                        Icon::Warn,
-                        theme::WARN,
-                        "No Negative Lab profile for this camera, so the camera matrix is used.",
-                    );
-                }
-                Some((false, None)) => {
-                    ui.label(
-                        RichText::new("Not used for TIF / JPEG scans")
-                            .small()
-                            .color(theme::FAINT),
-                    );
-                }
-                None => {
-                    ui.label(RichText::new("…").small().color(theme::FAINT));
-                }
-            }
-            ui.add_space(8.0);
             ui.label(RichText::new("Film base").small().color(theme::MUTED))
                 .on_hover_text("Neutralises the orange mask before analysis");
             self.combo_with_picker(
@@ -1140,6 +1108,13 @@ impl NlpApp {
                 "Sample the unexposed film border",
                 true,
             );
+            ui.add_space(8.0);
+            let start = self
+                .editor
+                .path
+                .as_ref()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+            super::folder::flat_field_ui(ui, &mut s.flat_field, start.as_deref());
         }
         self.editor.border_preview = false;
         if widgets::fold_with(ui, "Analysis", false) {
@@ -1206,6 +1181,23 @@ impl NlpApp {
                 &mut s.blacks,
                 "Black point: up = matte, down = deeper",
             );
+            if widgets::fold_with(ui, "Hyper Tone", false) {
+                let amount = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
+                    fl_slider(ui, l, v, 0.0..=100.0, 0.0, 0, tip, None)
+                };
+                amount(
+                    ui,
+                    "Burn highlights",
+                    &mut s.hyper_tone_highlights,
+                    "Holds back large bright areas (sky, window light) while keeping their detail",
+                );
+                amount(
+                    ui,
+                    "Dodge shadows",
+                    &mut s.hyper_tone_shadows,
+                    "Opens large dark areas (backlit subjects, shade) while keeping their detail",
+                );
+            }
             if widgets::fold_with(ui, "Glow, fade & clipping", false) {
                 tone(ui, "Lab glow", &mut s.glow, "Silky compressed highlights");
                 tone(ui, "Lab fade", &mut s.fade, "Open, compressed deep shadows");
@@ -1229,11 +1221,6 @@ impl NlpApp {
                     "Negative values recover crushed shadows",
                     None,
                 );
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut s.soft_highlights, "Soft highs");
-                    ui.add_space(16.0);
-                    ui.checkbox(&mut s.soft_shadows, "Soft lows");
-                });
             }
         }
         if widgets::fold(ui, "White balance") {
@@ -1247,15 +1234,33 @@ impl NlpApp {
                 &format!("Pick a neutral grey in the image ({wb_key})"),
                 true,
             );
+            let auto = matches!(
+                s.wb_mode,
+                WbMode::AutoNeutral | WbMode::AutoWarm | WbMode::AutoCool | WbMode::AutoMix
+            );
+            let confidence = self
+                .editor_index()
+                .and_then(|i| self.frames[i].auto_wb(s))
+                .map(|w| w.confidence);
+            if auto && confidence.is_some_and(|c| c < pipeline::LOW_CONFIDENCE) {
+                widgets::status_line(
+                    ui,
+                    Icon::Warn,
+                    theme::WARN,
+                    &format!(
+                        "Few neutral tones to balance on. Pick a grey ({wb_key}) or use the roll."
+                    ),
+                );
+            }
             let mut t = s.wb_temp;
             if fl_slider(
                 ui,
                 "Temp",
                 &mut t,
-                -75.0..=75.0,
+                -50.0..=50.0,
                 0.0,
-                2,
-                "Blue ↔ Yellow: most film conversions need some warmth",
+                1,
+                "Yellow printing filtration in CC: blue ↔ yellow",
                 Some(grad::TEMP),
             ) {
                 s.wb_temp = t;
@@ -1266,10 +1271,10 @@ impl NlpApp {
                 ui,
                 "Tint",
                 &mut k,
-                -75.0..=75.0,
+                -50.0..=50.0,
                 0.0,
-                2,
-                "Green ↔ Magenta",
+                1,
+                "Magenta printing filtration in CC: green ↔ magenta",
                 Some(grad::TINT),
             ) {
                 s.wb_tint = k;
@@ -1432,16 +1437,8 @@ impl NlpApp {
                 &mut s.post_saturation,
                 1..=10,
                 5,
-                "LUT saturation variant (5 = default)",
+                "Look saturation (5 = default)",
             );
-            if s.lut != Lut::None && !self.editor.uses_table && !s.is_monochrome() {
-                widgets::status_line(
-                    ui,
-                    Icon::Warn,
-                    theme::WARN,
-                    "Plugin LUTs not found, so approximations are used (choose the folder in the ⋯ menu).",
-                );
-            }
             fl_combo(
                 ui,
                 "",
@@ -1473,7 +1470,6 @@ impl NlpApp {
         } else if s.is_monochrome() {
             s.apply_mono_defaults();
         }
-        s.apply_engine_preset(keep.engine);
         self.refresh_wb(i, s);
     }
 
@@ -1519,102 +1515,31 @@ impl NlpApp {
             self.unconvert(&[i]);
             ui.close();
         }
-        ui.separator();
-        lut_folder_ui(self, ui);
     }
 
-    /// Engine internals and the curve diagnostics, collapsed by default.
+    /// The print curves and the analysed density levels, collapsed by default.
     fn engine_section(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
-        if widgets::fold_with(ui, "Engine", false) {
-            fl_combo(
-                ui,
-                "Engine preset",
-                &mut s.engine,
-                EnginePreset::ALL,
-                EnginePreset::label,
-                "",
-            );
-            fl_combo(
-                ui,
-                "Curve points",
-                &mut s.curve_points,
-                CurvePoints::ALL,
-                CurvePoints::label,
-                "Auto: by tonal range · Smooth: 4 · Precise: 14 · Manual: 2–14",
-            );
-            if s.curve_points == CurvePoints::Manual {
-                fl_slider_u8(ui, "Points", &mut s.curve_resolution, 2..=14, 7, "");
-            }
-            fl_combo(
-                ui,
-                "Processing",
-                &mut s.correction_type,
-                CorrectionType::ALL,
-                CorrectionType::label,
-                "",
-            );
-            fl_combo(
-                ui,
-                "Order",
-                &mut s.layer_order,
-                LayerOrder::ALL,
-                LayerOrder::label,
-                "Colors First keeps colour stable while editing tones",
-            );
-            fl_combo(
-                ui,
-                "WB density",
-                &mut s.wb_tonality,
-                WbTonality::ALL,
-                WbTonality::label,
-                "",
-            );
-            fl_combo(
-                ui,
-                "WB type",
-                &mut s.wb_method,
-                WbMethod::ALL,
-                WbMethod::label,
-                "",
-            );
-            fl_combo(
-                ui,
-                "Toning",
-                &mut s.toning_method,
-                ToningMethod::ALL,
-                ToningMethod::label,
-                "",
-            );
-            fl_combo(
-                ui,
-                "Clipping",
-                &mut s.clip_method,
-                ClipMethod::ALL,
-                ClipMethod::label,
-                "",
-            );
+        if widgets::fold_with(ui, "Analysis", false) {
             if !self.editor.curves.is_empty() {
                 ui.add_space(8.0);
                 widgets::curves_plot(ui, &self.editor.curves, vec2(ui.available_width(), 150.0));
             }
             let f = &self.frames[i];
-            let o = pipeline::origins_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
-                .map(|fo| fo.origins);
-            if let Some(o) = o {
+            if let Some(o) = pipeline::levels_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref()) {
                 ui.add_space(6.0);
                 egui::Grid::new("origins")
                     .num_columns(4)
                     .spacing([18.0, 2.0])
                     .show(ui, |ui| {
-                        for h in ["", "White", "Black", "Mean"] {
+                        for h in ["", "Black D", "White D", "Median D"] {
                             ui.label(RichText::new(h).small().color(theme::MUTED));
                         }
                         ui.end_row();
                         for (c, n) in ["R", "G", "B"].iter().enumerate() {
                             ui.label(*n);
-                            ui.label(format!("{:.0}", o[c].white));
-                            ui.label(format!("{:.0}", o[c].black));
-                            ui.label(format!("{:.3}", o[c].mean));
+                            ui.label(format!("{:.2}", o[c].lo));
+                            ui.label(format!("{:.2}", o[c].hi));
+                            ui.label(format!("{:.2}", o[c].mid));
                             ui.end_row();
                         }
                     });
@@ -1639,7 +1564,7 @@ impl NlpApp {
 
     fn canvas(&mut self, ui: &mut egui::Ui, i: usize) {
         let avail = ui.max_rect();
-        let Some(tex) = self.editor.tex.clone() else {
+        let Some([tw, th]) = self.editor.size else {
             ui.centered_and_justified(|ui| {
                 ui.add(egui::Spinner::new().size(24.0).color(theme::MUTED));
             });
@@ -1651,7 +1576,7 @@ impl NlpApp {
         } else {
             vec2(32.0, 32.0)
         };
-        let ts = tex.size_vec2();
+        let ts = vec2(tw as f32, th as f32);
         let fit = ((avail.width() - margin.x) / ts.x)
             .min((avail.height() - margin.y) / ts.y)
             .max(0.01);
@@ -1725,6 +1650,18 @@ impl NlpApp {
                 self.editor.pan = egui::Vec2::ZERO;
             }
         }
+        // Zoom with ⌘/Ctrl + scroll or pinch (about the cursor); scroll pans
+        // when zoomed. Applied before the geometry below so it takes effect
+        // in the same frame.
+        if let Some(hover) = ui.input(|inp| inp.pointer.hover_pos()).filter(|h| avail.contains(*h)) {
+            let (zoom_delta, scroll) = ui.input(|inp| (inp.zoom_delta(), inp.smooth_scroll_delta));
+            if zoom_delta != 1.0 {
+                self.zoom_by(zoom_delta, fit, hover - center);
+            } else if self.editor.zoom.is_some() && scroll != egui::Vec2::ZERO {
+                self.editor.zoom_anim = None;
+                self.editor.pan += scroll;
+            }
+        }
         let scale = self.editor.zoom.unwrap_or(fit);
         let size = ts * scale;
         // Clamp pan so the image never leaves the canvas entirely.
@@ -1732,16 +1669,6 @@ impl NlpApp {
         self.editor.pan = self.editor.pan.clamp(-maxp, maxp);
         let rect = Rect::from_center_size(center + self.editor.pan, size);
         let resp = ui.allocate_rect(avail, Sense::click_and_drag());
-
-        // Zoom with ⌘/Ctrl + scroll or pinch; scroll pans when zoomed.
-        if resp.hovered() {
-            let (zoom_delta, scroll) = ui.input(|inp| (inp.zoom_delta(), inp.smooth_scroll_delta));
-            if zoom_delta != 1.0 {
-                self.zoom_by(zoom_delta, fit);
-            } else if self.editor.zoom.is_some() && scroll != egui::Vec2::ZERO {
-                self.editor.pan += scroll;
-            }
-        }
 
         let p = ui.painter_at(avail);
         p.add(
@@ -1753,12 +1680,20 @@ impl NlpApp {
             }
             .as_shape(rect, 0.0),
         );
-        p.image(
-            tex.id(),
-            rect,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        let full_uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        match (
+            &self.editor.gpu_neg,
+            &self.editor.gpu_view,
+            &self.editor.tex,
+        ) {
+            (Some(n), Some(v), _) if self.gpu => {
+                gpu_paint_clipped(&p, rect, avail, 0, n, v, [0.0, 0.0, 1.0, 1.0])
+            }
+            (_, _, Some(t)) => {
+                p.image(t.id(), rect, full_uv, Color32::WHITE);
+            }
+            _ => {}
+        }
         if let Some(t) = self.editor.clip_tex.as_ref().filter(|_| !cropping) {
             p.image(
                 t.id(),
@@ -1767,17 +1702,28 @@ impl NlpApp {
                 Color32::WHITE,
             );
         }
-        let split = self.editor.before_tex.clone().filter(|_| !cropping);
-        if let Some(t) = &split {
+        let split =
+            !cropping && (self.editor.before_tex.is_some() || self.editor.gpu_before.is_some());
+        if split {
             let k = self.editor.split_pos;
             let x = rect.left() + rect.width() * k;
             let left = Rect::from_min_max(rect.min, pos2(x, rect.bottom()));
-            p.image(
-                t.id(),
-                left,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(k, 1.0)),
-                Color32::WHITE,
-            );
+            match (
+                &self.editor.gpu_neg,
+                &self.editor.gpu_before,
+                &self.editor.before_tex,
+            ) {
+                (Some(n), Some(b), _) => gpu_paint_clipped(&p, left, avail, 1, n, b, [0.0, 0.0, k, 1.0]),
+                (_, _, Some(t)) => {
+                    p.image(
+                        t.id(),
+                        left,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(k, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+                _ => {}
+            }
             let shown = rect.intersect(avail);
             p.line_segment(
                 [pos2(x, shown.top()), pos2(x, shown.bottom())],
@@ -1884,7 +1830,7 @@ impl NlpApp {
         if self.editor.before && !cropping {
             pill(&p, pos2(avail.left() + 44.0, avail.top() + 22.0), "Before");
         }
-        if split.is_some() {
+        if split {
             pill(&p, pos2(avail.left() + 44.0, avail.top() + 22.0), "Before");
             pill(&p, pos2(avail.right() - 40.0, avail.top() + 22.0), "After");
         }
@@ -2232,7 +2178,7 @@ impl NlpApp {
             sample(&self.editor.px, w, h, u, v, 1).map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
         let mut text = format!("RGB {} {} {}", rgb[0], rgb[1], rgb[2]);
         if let Some(neg) = &self.editor.neg {
-            let d = pipeline::density_above_base(sample(&neg.data, neg.width, neg.height, u, v, 1));
+            let d = sample(&neg.data, neg.width, neg.height, u, v, 1);
             text += &format!("  ·  D {:.2} {:.2} {:.2}", d[0], d[1], d[2]);
         }
         Some(text)
@@ -2245,19 +2191,14 @@ impl NlpApp {
             Pick::WhiteBalance => {
                 let Some(neg) = &self.editor.neg else { return };
                 let f = &self.frames[i];
-                let Some(fo) =
-                    pipeline::origins_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
+                let Some(levels) =
+                    pipeline::levels_for(&s, f.sc.analysis.as_ref(), f.sc.roll.as_ref())
                 else {
                     self.toast("Convert the negative first, then pick a neutral.", true);
                     return;
                 };
-                let avg = sample(&neg.data, neg.width, neg.height, u, v, 3);
-                let origins = fo.origins;
-                let lut = crate::engine::curve::CurveLut::from_curves(
-                    &crate::engine::curve::update_tone_curve_roll(&origins, &s, fo.roll_clip),
-                );
-                let pos = [0, 1, 2].map(|c| lut.apply(c, avg[c]) as f64);
-                match crate::engine::curve::eyedropper_wb(pos, &origins, &s) {
+                let avg = sample(&neg.data, neg.width, neg.height, u, v, 3).map(|d| d as f64);
+                match crate::engine::curve::eyedropper_wb(avg, &levels, &s) {
                     Ok((t, n)) => {
                         s.wb_temp = (t * 100.0).round() / 100.0;
                         s.wb_tint = (n * 100.0).round() / 100.0;
@@ -2334,4 +2275,32 @@ fn sample(d: &[[f32; 3]], w: usize, h: usize, u: f32, v: f32, r: isize) -> [f32;
         }
     }
     acc.map(|v| v / n.max(1.0))
+}
+
+/// Draw the part of `rect` that lies inside `clip`. The GPU callback's
+/// viewport is clipped to the canvas, so a zoomed rectangle has to be cut down
+/// together with its UVs, otherwise the whole image is squeezed into the view.
+fn gpu_paint_clipped(
+    painter: &egui::Painter,
+    rect: Rect,
+    clip: Rect,
+    slot: u8,
+    neg: &std::sync::Arc<gpu::NegData>,
+    view: &std::sync::Arc<gpu::ViewData>,
+    part: [f32; 4],
+) {
+    let vis = rect.intersect(clip);
+    if vis.width() <= 0.0 || vis.height() <= 0.0 {
+        return;
+    }
+    let fx = |x: f32| (x - rect.left()) / rect.width();
+    let fy = |y: f32| (y - rect.top()) / rect.height();
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let uv = [
+        lerp(part[0], part[2], fx(vis.left())),
+        lerp(part[1], part[3], fy(vis.top())),
+        lerp(part[0], part[2], fx(vis.right())),
+        lerp(part[1], part[3], fy(vis.bottom())),
+    ];
+    gpu::paint(painter, vis, slot, neg, view, uv);
 }

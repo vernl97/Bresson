@@ -2567,7 +2567,9 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 name = "nlp_studio"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
+ "bytemuck",
  "dirs",
  "eframe",
  "egui_kittest",
@@ -2576,6 +2578,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pollster",
  "rawler",
  "rayon",
  "rfd",

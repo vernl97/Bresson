@@ -169,9 +169,9 @@ pub fn export_frame(
         };
     }
     let scale = neg.width.max(neg.height) as f32 / full_long as f32;
-    let origins = pipeline::origins_for(s, analysis, roll);
+    let levels = pipeline::levels_for(s, analysis, roll);
     let mp = (src.info.full_width * src.info.full_height) as f32 / 1e6;
-    let r = Renderer::new(s, origins.as_ref(), ex.space).with_megapixels(mp);
+    let r = Renderer::new(s, levels.as_ref(), ex.space).with_megapixels(mp);
     let px = r.render(&neg, scale);
     let out = out.to_path_buf();
     if let Some(p) = out.parent() {

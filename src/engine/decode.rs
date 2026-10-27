@@ -55,10 +55,6 @@ pub struct SourceInfo {
     pub model: String,
     pub full_width: usize,
     pub full_height: usize,
-    /// Camera identification strings (DNG UniqueCameraModel, make + model …)
-    /// used to find the matching camera profile.
-    #[serde(default)]
-    pub camera_ids: Vec<String>,
     /// EXIF exposure of the capture: shutter (s), f-number, ISO. Used to
     /// match exposure across a roll (NLPRolls `L19_1`).
     #[serde(default)]
@@ -131,7 +127,6 @@ fn load_bitmap(path: &Path) -> Result<SourceImage> {
             model: String::new(),
             full_width: w,
             full_height: h,
-            camera_ids: Vec::new(),
             exposure: None,
         },
     })
@@ -196,16 +191,11 @@ fn load_raw(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
         let g = raw.wb_coeffs[1];
         [raw.wb_coeffs[0] / g, 1.0, raw.wb_coeffs[2] / g]
     };
-    let mut camera_ids = super::dcp::tiff_camera_ids(path);
-    camera_ids.push(format!("{} {}", raw.camera.make, raw.camera.model));
-    camera_ids.push(format!("{} {}", raw.make, raw.model));
-    camera_ids.push(raw.model.clone());
     let info = SourceInfo {
         make: raw.clean_make.clone(),
         model: raw.clean_model.clone(),
         full_width: raw.width,
         full_height: raw.height,
-        camera_ids,
         exposure: raw_exposure(path),
     };
 
@@ -238,7 +228,68 @@ fn load_raw(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
     })
 }
 
+/// Full-resolution develop: our own demosaic for Bayer (RCD-style, see
+/// `demosaic.rs`) and rawler's Markesteijn for X-Trans, where rawler's
+/// develop would use PPG and bilinear; anything else goes through rawler.
 fn develop_full(raw: &rawler::RawImage) -> Result<(Vec<[f32; 3]>, usize, usize)> {
+    match develop_cfa(raw)? {
+        Some(r) => Ok(r),
+        None => develop_rawler(raw),
+    }
+}
+
+fn develop_cfa(raw: &rawler::RawImage) -> Result<Option<(Vec<[f32; 3]>, usize, usize)>> {
+    use rawler::imgop::sensor::{Demosaic, SensorType};
+    use rawler::imgop::{Dim2, Point, Rect};
+    let RawPhotometricInterpretation::Cfa(config) = &raw.photometric else {
+        return Ok(None);
+    };
+    if raw.cpp != 1 || !config.cfa.is_rgb() || raw.fuji_rotation_width.is_some() {
+        return Ok(None);
+    }
+    let mut raw = raw.clone();
+    raw.apply_scaling().map_err(|e| anyhow!("scaling: {e}"))?;
+    let (w, h) = (raw.width, raw.height);
+    let data = raw.data.as_f32();
+    let roi = raw
+        .active_area
+        .unwrap_or(Rect::new(Point::new(0, 0), Dim2::new(w, h)));
+    let (rx, ry, rw, rh) = (roi.p.x, roi.p.y, roi.d.w.min(w - roi.p.x), roi.d.h.min(h - roi.p.y));
+    let mut out = match config.sensor {
+        SensorType::Bayer => {
+            let m: Vec<f32> = (0..rh)
+                .flat_map(|y| data[(ry + y) * w + rx..][..rw].iter().copied())
+                .collect();
+            let cfa = &config.cfa;
+            super::demosaic::rcd(&m, rw, rh, |r, c| cfa.color_at(ry + r, rx + c).min(2))
+        }
+        SensorType::Xtrans => {
+            use rawler::imgop::sensor::xtrans::markesteijn::XTransMarkesteijnDemosaic;
+            let pixels = rawler::pixarray::PixF32::new_with(data.into_owned(), w, h);
+            XTransMarkesteijnDemosaic::new_pass_1()
+                .demosaic(&pixels, &config.cfa, &config.colors, Rect::new(Point::new(rx, ry), Dim2::new(rw, rh)))
+                .data
+        }
+    };
+    // Default crop, relative to the active area (as rawler's develop does).
+    let (mut ow, mut oh) = (rw, rh);
+    if let Some(mut crop) = raw.crop_area.or(raw.active_area) {
+        if let Some(a) = &raw.active_area {
+            crop = crop.adapt(a);
+        }
+        let (cx, cy) = (crop.p.x.min(ow), crop.p.y.min(oh));
+        let (cw, ch) = (crop.d.w.min(ow - cx), crop.d.h.min(oh - cy));
+        if (cw, ch) != (ow, oh) && cw > 0 && ch > 0 {
+            out = (0..ch)
+                .flat_map(|y| out[(cy + y) * ow + cx..][..cw].iter().copied())
+                .collect();
+            (ow, oh) = (cw, ch);
+        }
+    }
+    Ok(Some((out, ow, oh)))
+}
+
+fn develop_rawler(raw: &rawler::RawImage) -> Result<(Vec<[f32; 3]>, usize, usize)> {
     let dev = RawDevelop::new_with(&[
         ProcessingStep::Rescale,
         ProcessingStep::Demosaic,
