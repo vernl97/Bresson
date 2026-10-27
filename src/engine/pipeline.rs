@@ -1226,6 +1226,118 @@ mod tests {
         assert_eq!(a.auto_wb, AutoWb::default());
     }
 
+    /// Convert a test chart the way the app does: analyse, apply the auto
+    /// WB of the frame's (or roll's) WB mode, render to sRGB.
+    fn convert_chart(
+        chart: &crate::engine::testchart::Chart,
+        s: &Settings,
+        a: &Analysis,
+        roll: Option<&RollData>,
+    ) -> Vec<[f32; 3]> {
+        let neg = prepare_negative(&chart.src, s, a.base);
+        let mut s = s.clone();
+        s.use_roll = roll.is_some();
+        let wb = roll.and_then(|r| r.auto_wb).unwrap_or(a.auto_wb);
+        if let Some((t, n)) = wb_for_mode(s.wb_mode, &wb) {
+            (s.wb_temp, s.wb_tint) = (t, n);
+        }
+        let o = origins_for(&s, Some(a), roll).unwrap();
+        Renderer::new(&s, Some(&o), OutputSpace::Srgb).render(&neg, 0.0)
+    }
+
+    fn chart_settings() -> Settings {
+        Settings {
+            lut: crate::engine::settings::Lut::None,
+            ..Settings::default()
+        }
+    }
+
+    fn analyse_chart(chart: &crate::engine::testchart::Chart, s: &Settings) -> Analysis {
+        let base = resolve_base(&chart.src, s, None);
+        analyze(&prepare_negative(&chart.src, s, base), s, base, None)
+    }
+
+    /// Mean over the 24 patches of the largest colour difference (lightness
+    /// ignored) between any two frames.
+    fn roll_spread(chart: &crate::engine::testchart::Chart, frames: &[Vec<[f32; 3]>]) -> f64 {
+        use crate::engine::testchart::{color_de, patch_lab};
+        let labs: Vec<_> = frames.iter().map(|f| patch_lab(chart, f)).collect();
+        let mut sum = 0.0;
+        for p in 0..24 {
+            let mut worst = 0.0f64;
+            for a in &labs {
+                for b in &labs {
+                    worst = worst.max(color_de(a[p], b[p]));
+                }
+            }
+            sum += worst;
+        }
+        sum / 24.0
+    }
+
+    /// Conversion quality on the physically modelled chart: colour accuracy,
+    /// neutrality, and consistency of a roll shot at −1, 0 and +1 EV.
+    #[test]
+    fn chart_quality() {
+        use crate::engine::testchart::{measure, negative};
+        let s = chart_settings();
+        let chart = negative(0.0);
+        let a = analyse_chart(&chart, &s);
+        let m = measure(&chart, &convert_chart(&chart, &s, &a, None));
+
+        let charts: Vec<_> = [-1.0, 0.0, 1.0].into_iter().map(negative).collect();
+        let analyses: Vec<_> = charts.iter().map(|c| analyse_chart(c, &s)).collect();
+        let single: Vec<_> = charts
+            .iter()
+            .zip(&analyses)
+            .map(|(c, a)| convert_chart(c, &s, a, None))
+            .collect();
+        let (agg, _) = aggregate_roll(&analyses, None);
+        let roll = RollData {
+            id: "chart".into(),
+            origins: agg.origins,
+            base: analyses[1].base,
+            frames: 3,
+            excluded: vec![],
+            auto_wb: Some(agg.auto_wb),
+            multipliers: Some(agg.multipliers),
+            common_ev: None,
+        };
+        let rolled: Vec<_> = charts
+            .iter()
+            .zip(&analyses)
+            .map(|(c, a)| convert_chart(c, &s, a, Some(&roll)))
+            .collect();
+        let frame_spread = roll_spread(&chart, &single);
+        let roll_spread = roll_spread(&chart, &rolled);
+        let roll_cast = rolled
+            .iter()
+            .map(|f| measure(&chart, f).neutral_cast)
+            .fold(0.0, f64::max);
+        eprintln!(
+            "chart: colour dE00 {:.2}, full dE00 {:.2}, neutral C* {:.2} (max {:.2}); \
+             frame spread {:.2}, roll spread {:.2}, roll neutral C* {:.2}",
+            m.color_de,
+            m.full_de,
+            m.neutral_cast,
+            m.neutral_cast_max,
+            frame_spread,
+            roll_spread,
+            roll_cast
+        );
+        // Baseline of the plugin-port engine; the bounds only ever tighten.
+        assert!(m.color_de < 5.3, "colour dE00 {}", m.color_de);
+        assert!(m.neutral_cast < 3.3, "neutral C* {}", m.neutral_cast);
+        assert!(
+            m.neutral_cast_max < 7.0,
+            "neutral C* max {}",
+            m.neutral_cast_max
+        );
+        assert!(frame_spread < 2.9, "frame spread {frame_spread}");
+        assert!(roll_spread < 3.8, "roll spread {roll_spread}");
+        assert!(roll_cast < 4.8, "roll neutral C* {roll_cast}");
+    }
+
     #[test]
     fn auto_base_samples_entire_image_regardless_of_crop() {
         let mut data = vec![[0.1f32, 0.1, 0.1]; 100 * 100];

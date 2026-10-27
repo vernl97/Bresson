@@ -55,7 +55,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
             let out = it.next().unwrap_or_else(|| "synthetic-negative.tif".into());
             synth_negative(
                 Path::new(&out),
-                it.next().map(|v| v.parse().unwrap_or(0)).unwrap_or(0),
+                it.next().map(|v| v.parse().unwrap_or(0.0)).unwrap_or(0.0),
             )
         }
         _ => {
@@ -209,52 +209,23 @@ fn convert(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// Generate a synthetic colour negative (orange mask, H&D response) for testing.
-fn synth_negative(path: &Path, variant: u32) -> Result<()> {
-    let (w, h) = (900usize, 600usize);
-    let patches: [[f32; 3]; 12] = [
-        [0.45, 0.32, 0.25], // skin
-        [0.12, 0.25, 0.55], // sky
-        [0.15, 0.35, 0.10], // foliage
-        [0.60, 0.10, 0.08], // red
-        [0.70, 0.60, 0.10], // yellow
-        [0.10, 0.10, 0.40], // blue
-        [0.05, 0.05, 0.05],
-        [0.18, 0.18, 0.18],
-        [0.40, 0.40, 0.40],
-        [0.75, 0.75, 0.75],
-        [0.30, 0.15, 0.40],
-        [0.20, 0.45, 0.45],
-    ];
-    let exposure = 1.0 + variant as f32 * 0.35;
-    let base = [0.92f32, 0.62, 0.38];
-    let gamma = [0.62f32, 0.66, 0.70];
-    let mut px = vec![[0.0f32; 3]; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let border = x < 30 || x >= w - 30 || y < 30 || y >= h - 30;
-            let scene = if border {
-                None
-            } else if y < 120 {
-                let t = (x - 30) as f32 / (w - 60) as f32;
-                Some([t * t * 0.9 + 0.01; 3])
-            } else {
-                let (cx, cy) = ((x - 30) * 6 / (w - 60), (y - 120) * 2 / (h - 150));
-                Some(patches[(cy.min(1) * 6 + cx.min(5)) % 12])
-            };
-            let t = match scene {
-                None => base,
-                Some(e) => [0, 1, 2]
-                    .map(|c| base[c] * ((e[c] * exposure + 0.004) / 0.004).powf(-gamma[c] * 0.42)),
-            };
-            px[y * w + x] = t.map(crate::engine::color::srgb_encode);
-        }
-    }
+/// Write the physically modelled ColorChecker negative (`testchart`),
+/// exposed `ev` stops over normal, as a linear-light 16-bit TIFF.
+fn synth_negative(path: &Path, ev: f64) -> Result<()> {
+    let chart = crate::engine::testchart::negative(ev);
+    let src = &chart.src;
+    let px: Vec<[f32; 3]> = src
+        .data
+        .iter()
+        .map(|p| {
+            crate::engine::color::mul3(&src.to_melissa, *p).map(crate::engine::color::srgb_encode)
+        })
+        .collect();
     let icc = crate::engine::color::icc_for(crate::engine::settings::OutputSpace::Srgb);
     export::write_tiff(
         path,
-        w,
-        h,
+        src.width,
+        src.height,
         &px,
         true,
         true,

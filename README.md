@@ -16,7 +16,7 @@ cargo run --release -- help
 cargo run --release -- convert [--roll] [--roll-process NAME] [--tone NAME] [--wb NAME] \
     [--lut NAME] [--border PCT] [--auto-crop] [--jpg] [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
 cargo run --release -- scan-prep FILES              # level + gamma 2.2 encode linear (gamma 1.0) TIF scans
-cargo run --release -- synth [out.tif] [variant]    # write a synthetic colour negative for testing
+cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorChecker negative (ev = stops over)
 ```
 
 `--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Pro Lab, Basic Lab or Darkroom Paper. `--auto-crop` crops and straightens each frame to its detected frame before analysis. `--name` takes the export file name template (see Export below).
