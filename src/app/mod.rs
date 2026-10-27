@@ -267,7 +267,10 @@ impl NlpApp {
             1 => format!("Couldn't read {}", names[0]),
             n => format!("Couldn't read {n} files: {}", names.join(", ")),
         };
-        let live = self.toasts.iter_mut().find(|t| t.error && t.text.starts_with("Couldn't read"));
+        let live = self
+            .toasts
+            .iter_mut()
+            .find(|t| t.error && t.text.starts_with("Couldn't read"));
         match live {
             Some(t) => (t.text, t.until) = (text, until),
             None => self.toasts.push(Toast {
@@ -530,16 +533,28 @@ impl NlpApp {
     /// Render the given frames (or all, if empty) onto one JPEG in the
     /// project folder.
     pub fn make_contact_sheet(&mut self, idx: Vec<usize>) {
-        let idx: Vec<usize> = if idx.is_empty() { (0..self.frames.len()).collect() } else { idx };
+        let idx: Vec<usize> = if idx.is_empty() {
+            (0..self.frames.len()).collect()
+        } else {
+            idx
+        };
         let jobs: Vec<_> = idx
             .iter()
             .filter_map(|&i| {
                 let f = &self.frames[i];
                 let src = f.thumb_src.clone()?;
-                Some((f.name.clone(), src, f.sc.settings.clone(), f.sc.analysis.clone(), f.sc.roll.clone()))
+                Some((
+                    f.name.clone(),
+                    src,
+                    f.sc.settings.clone(),
+                    f.sc.analysis.clone(),
+                    f.sc.roll.clone(),
+                ))
             })
             .collect();
-        let Some(first) = idx.first().map(|&i| self.frames[i].path.clone()) else { return };
+        let Some(first) = idx.first().map(|&i| self.frames[i].path.clone()) else {
+            return;
+        };
         if jobs.is_empty() {
             self.toast("Frames are still loading", true);
             return;
@@ -610,7 +625,9 @@ impl NlpApp {
                 self.spawn_export(i, target, ex.clone());
             } else {
                 unconverted.push(i);
-                self.auto.export_waiting.push((f.path.clone(), target, ex.clone()));
+                self.auto
+                    .export_waiting
+                    .push((f.path.clone(), target, ex.clone()));
             }
         }
         self.convert(unconverted, false);
@@ -761,11 +778,21 @@ impl NlpApp {
                 let custom = custom_dir.is_some();
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("export_dest")
-                        .width(if !custom && ex.placement == Placement::Subfolder { 220.0 } else { ui.available_width() - 4.0 })
+                        .width(if !custom && ex.placement == Placement::Subfolder {
+                            220.0
+                        } else {
+                            ui.available_width() - 4.0
+                        })
                         .selected_text(dest_name(custom, ex.placement))
                         .show_ui(ui, |ui| {
                             for p in [Placement::Subfolder, Placement::SameFolder] {
-                                if ui.selectable_label(!custom && ex.placement == p, dest_name(false, p)).clicked() {
+                                if ui
+                                    .selectable_label(
+                                        !custom && ex.placement == p,
+                                        dest_name(false, p),
+                                    )
+                                    .clicked()
+                                {
                                     ex.placement = p;
                                     picked_dir = Some(PathBuf::new());
                                     save = true;
@@ -773,7 +800,9 @@ impl NlpApp {
                             }
                             if ui.selectable_label(custom, "Custom folder…").clicked() {
                                 let start = custom_dir.clone().unwrap_or_else(|| scan_dir.clone());
-                                if let Some(picked) = picker::pick_folder(Some(&start), Some("Choose")) {
+                                if let Some(picked) =
+                                    picker::pick_folder(Some(&start), Some("Choose"))
+                                {
                                     picked_dir = Some(picked);
                                 }
                             }
@@ -794,17 +823,23 @@ impl NlpApp {
                 let dest = crate::engine::export::output_path(
                     &first_path,
                     &shown,
-                    &crate::engine::export::NameCtx { n: 1, meta: &first_meta },
+                    &crate::engine::export::NameCtx {
+                        n: 1,
+                        meta: &first_meta,
+                    },
                 );
                 let dest = dest.parent().unwrap_or(&scan_dir).display().to_string();
                 let r = ui.add(
-                    egui::Label::new(egui::RichText::new(&dest).small().color(theme::FAINT)).truncate(),
+                    egui::Label::new(egui::RichText::new(&dest).small().color(theme::FAINT))
+                        .truncate(),
                 );
                 r.on_hover_text(&dest);
 
                 ui.add_space(10.0);
                 egui::CollapsingHeader::new(
-                    egui::RichText::new("Size, file name and presets").small().color(theme::MUTED),
+                    egui::RichText::new("Size, file name and presets")
+                        .small()
+                        .color(theme::MUTED),
                 )
                 .id_salt("export_more")
                 .default_open(false)
@@ -814,7 +849,11 @@ impl NlpApp {
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("export_preset")
                             .width(ui.available_width() - 120.0)
-                            .selected_text(current.map(|k| presets[k].name.as_str()).unwrap_or("Custom"))
+                            .selected_text(
+                                current
+                                    .map(|k| presets[k].name.as_str())
+                                    .unwrap_or("Custom"),
+                            )
                             .show_ui(ui, |ui| {
                                 for (k, p) in presets.iter().enumerate() {
                                     if k == n_builtin {
@@ -855,7 +894,9 @@ impl NlpApp {
                             let name = draft.trim().to_string();
                             let ok = !name.is_empty();
                             if ui.add_enabled(ok, widgets::primary("Save")).clicked()
-                                || (ok && r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                                || (ok
+                                    && r.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                             {
                                 let p = ExportPreset::new(&name, ex);
                                 let list = &mut self.defaults.export_presets;
@@ -888,7 +929,10 @@ impl NlpApp {
                             .selected_text(size_name(ex.long_edge))
                             .show_ui(ui, |ui| {
                                 for v in [0, 2000, 3000, 4500, 6000] {
-                                    if ui.selectable_label(ex.long_edge == v, size_name(v)).clicked() {
+                                    if ui
+                                        .selectable_label(ex.long_edge == v, size_name(v))
+                                        .clicked()
+                                    {
                                         ex.long_edge = v;
                                         save = true;
                                     }
@@ -918,8 +962,13 @@ impl NlpApp {
                         ] {
                             if ui
                                 .add(
-                                    egui::Button::new(egui::RichText::new(tok).small().monospace().color(theme::MUTED))
-                                        .corner_radius(8.0),
+                                    egui::Button::new(
+                                        egui::RichText::new(tok)
+                                            .small()
+                                            .monospace()
+                                            .color(theme::MUTED),
+                                    )
+                                    .corner_radius(8.0),
                                 )
                                 .on_hover_text(tip)
                                 .clicked()
@@ -932,7 +981,10 @@ impl NlpApp {
                     let preview = crate::engine::export::file_name(
                         &first_path,
                         ex,
-                        &crate::engine::export::NameCtx { n: 1, meta: &first_meta },
+                        &crate::engine::export::NameCtx {
+                            n: 1,
+                            meta: &first_meta,
+                        },
                     );
                     ui.label(
                         egui::RichText::new(if count > 1 {
@@ -943,7 +995,6 @@ impl NlpApp {
                         .small()
                         .color(theme::FAINT),
                     );
-
                 });
 
                 ui.add_space(22.0);
@@ -1704,7 +1755,11 @@ mod ui_tests {
 
         // A paste to the whole roll undoes and redoes in one step.
         let app = h.state_mut();
-        let before: Vec<f32> = app.frames.iter().map(|f| f.sc.settings.brightness).collect();
+        let before: Vec<f32> = app
+            .frames
+            .iter()
+            .map(|f| f.sc.settings.brightness)
+            .collect();
         let mut c = app.frames[0].sc.settings.clone();
         c.brightness = 17.0;
         app.clipboard = Some(c);
@@ -1712,7 +1767,11 @@ mod ui_tests {
         app.paste_settings();
         assert!(app.frames.iter().all(|f| f.sc.settings.brightness == 17.0));
         assert!(app.history_step(true));
-        let undone: Vec<f32> = app.frames.iter().map(|f| f.sc.settings.brightness).collect();
+        let undone: Vec<f32> = app
+            .frames
+            .iter()
+            .map(|f| f.sc.settings.brightness)
+            .collect();
         assert_eq!(undone, before);
         assert!(app.history_step(false));
         assert!(app.frames.iter().all(|f| f.sc.settings.brightness == 17.0));

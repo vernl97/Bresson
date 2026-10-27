@@ -152,17 +152,29 @@ fn tiff_software(path: &Path) -> Option<String> {
         b"MM\0*" => false,
         _ => return None,
     };
-    let u16_at = |b: &[u8]| if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) };
+    let u16_at = |b: &[u8]| {
+        if le {
+            u16::from_le_bytes([b[0], b[1]])
+        } else {
+            u16::from_be_bytes([b[0], b[1]])
+        }
+    };
     let u32_at = |b: &[u8]| {
         let a = [b[0], b[1], b[2], b[3]];
-        if le { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) }
+        if le {
+            u32::from_le_bytes(a)
+        } else {
+            u32::from_be_bytes(a)
+        }
     };
     f.seek(SeekFrom::Start(u32_at(&head[4..]) as u64)).ok()?;
     let mut n = [0u8; 2];
     f.read_exact(&mut n).ok()?;
     let mut entries = vec![0u8; u16_at(&n) as usize * 12];
     f.read_exact(&mut entries).ok()?;
-    let e = entries.chunks_exact(12).find(|e| u16_at(e) == 305 && u16_at(&e[2..]) == 2)?;
+    let e = entries
+        .chunks_exact(12)
+        .find(|e| u16_at(e) == 305 && u16_at(&e[2..]) == 2)?;
     let count = u32_at(&e[4..]) as usize;
     let mut s = if count <= 4 {
         e[8..8 + count].to_vec()
@@ -299,7 +311,12 @@ fn develop_cfa(raw: &rawler::RawImage) -> Result<Option<(Vec<[f32; 3]>, usize, u
     let roi = raw
         .active_area
         .unwrap_or(Rect::new(Point::new(0, 0), Dim2::new(w, h)));
-    let (rx, ry, rw, rh) = (roi.p.x, roi.p.y, roi.d.w.min(w - roi.p.x), roi.d.h.min(h - roi.p.y));
+    let (rx, ry, rw, rh) = (
+        roi.p.x,
+        roi.p.y,
+        roi.d.w.min(w - roi.p.x),
+        roi.d.h.min(h - roi.p.y),
+    );
     let mut out = match config.sensor {
         SensorType::Bayer => {
             let m: Vec<f32> = (0..rh)
@@ -312,7 +329,12 @@ fn develop_cfa(raw: &rawler::RawImage) -> Result<Option<(Vec<[f32; 3]>, usize, u
             use rawler::imgop::sensor::xtrans::markesteijn::XTransMarkesteijnDemosaic;
             let pixels = rawler::pixarray::PixF32::new_with(data.into_owned(), w, h);
             XTransMarkesteijnDemosaic::new_pass_1()
-                .demosaic(&pixels, &config.cfa, &config.colors, Rect::new(Point::new(rx, ry), Dim2::new(rw, rh)))
+                .demosaic(
+                    &pixels,
+                    &config.cfa,
+                    &config.colors,
+                    Rect::new(Point::new(rx, ry), Dim2::new(rw, rh)),
+                )
                 .data
         }
     };

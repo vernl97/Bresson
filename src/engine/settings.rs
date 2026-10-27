@@ -138,6 +138,52 @@ choice_enum!(
 );
 
 choice_enum!(
+    /// Shape of the crop rectangle. Fixed ratios follow the frame's
+    /// orientation (a 2:3 crop of a portrait frame is portrait).
+    CropAspect {
+        Original => "Original",
+        Free => "Free",
+        Square => "1:1",
+        OneTwo => "1:2",
+        TwoThree => "2:3",
+        ThreeFour => "3:4",
+        FourFive => "4:5",
+        FiveSeven => "5:7",
+        LetterSheet => "8.5:11",
+        NineSixteen => "9:16",
+    } default Original
+);
+
+impl CropAspect {
+    /// Short side : long side, for the fixed ratios.
+    pub fn short_long(self) -> Option<f32> {
+        Some(match self {
+            Self::Original | Self::Free => return None,
+            Self::Square => 1.0,
+            Self::OneTwo => 1.0 / 2.0,
+            Self::TwoThree => 2.0 / 3.0,
+            Self::ThreeFour => 3.0 / 4.0,
+            Self::FourFive => 4.0 / 5.0,
+            Self::FiveSeven => 5.0 / 7.0,
+            Self::LetterSheet => 8.5 / 11.0,
+            Self::NineSixteen => 9.0 / 16.0,
+        })
+    }
+
+    /// Width : height of the crop for a frame of aspect `frame` (w / h), or
+    /// `None` when the shape is free.
+    pub fn ratio(self, frame: f32) -> Option<f32> {
+        match self {
+            Self::Free => None,
+            Self::Original => Some(frame),
+            _ => self
+                .short_long()
+                .map(|r| if frame >= 1.0 { 1.0 / r } else { r }),
+        }
+    }
+}
+
+choice_enum!(
     ExportFormat {
         Tiff => "TIF",
         Jpeg => "JPG",
@@ -191,6 +237,8 @@ pub struct Settings {
     pub straighten: f32,
     /// Crop insets in percent of the (rotated) frame: left, top, right, bottom.
     pub crop: [f32; 4],
+    /// Shape the crop (and auto-crop) keeps.
+    pub crop_aspect: CropAspect,
 
     // ---- Tone ----------------------------------------------------------------
     pub tone_profile: ToneProfile,
@@ -267,6 +315,7 @@ impl Default for Settings {
             flip_h: false,
             straighten: 0.0,
             crop: [0.0; 4],
+            crop_aspect: CropAspect::Original,
             tone_profile: ToneProfile::Standard,
             print_exposure: 0.0,
             brightness: 0.0,
@@ -368,6 +417,7 @@ impl Settings {
         );
         (self.rotation, self.flip_h, self.straighten, self.crop) =
             (k.rotation, k.flip_h, k.straighten, k.crop);
+        self.crop_aspect = k.crop_aspect;
         self.flat_field = k.flat_field.clone();
     }
 

@@ -135,11 +135,17 @@ impl NlpApp {
                     save |= enter(&r);
                     save |= ui.add(widgets::primary("Save")).clicked();
                     more = ui
-                        .add(egui::Button::new(RichText::new("More details…").small().color(theme::MUTED)).frame(false))
+                        .add(
+                            egui::Button::new(
+                                RichText::new("More details…").small().color(theme::MUTED),
+                            )
+                            .frame(false),
+                        )
                         .clicked();
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        dismiss = widgets::icon_button(ui, widgets::Icon::Close, "Dismiss", false, true)
-                            .clicked();
+                        dismiss =
+                            widgets::icon_button(ui, widgets::Icon::Close, "Dismiss", false, true)
+                                .clicked();
                     });
                 });
             });

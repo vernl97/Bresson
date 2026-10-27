@@ -157,9 +157,13 @@ pub fn reveal(path: &Path) {
     let r = if cfg!(target_os = "macos") {
         Command::new("open").arg("-R").arg(path).spawn()
     } else if cfg!(target_os = "windows") {
-        Command::new("explorer").arg(format!("/select,{}", path.display())).spawn()
+        Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
     } else {
-        Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn()
+        Command::new("xdg-open")
+            .arg(path.parent().unwrap_or(path))
+            .spawn()
     };
     let _ = r;
 }

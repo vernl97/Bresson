@@ -41,7 +41,9 @@ fn landscape(t: &Tile) -> (usize, usize, Vec<[f32; 3]>) {
 /// Draw `text` centred on `cx`, with its top at `y`; long names are cut with "…".
 fn label(buf: &mut [u8], w: usize, cx: usize, y: usize, text: &str) {
     use ab_glyph::{Font, FontRef, ScaleFont};
-    let Ok(font) = FontRef::try_from_slice(FONT) else { return };
+    let Ok(font) = FontRef::try_from_slice(FONT) else {
+        return;
+    };
     let f = font.as_scaled(FONT_PX);
     let adv = |s: &str| s.chars().map(|c| f.h_advance(f.glyph_id(c))).sum::<f32>();
     let mut text = text.to_owned();
@@ -90,7 +92,12 @@ pub fn write_sheet(path: &Path, tiles: &[Tile]) -> Result<()> {
             continue;
         }
         let (sw, sh, spx) = landscape(t);
-        let t = &Tile { name: String::new(), w: sw, h: sh, px: spx };
+        let t = &Tile {
+            name: String::new(),
+            w: sw,
+            h: sh,
+            px: spx,
+        };
         let scale = (CELL_W as f32 / t.w as f32).min(CELL_H as f32 / t.h as f32);
         let (tw, th) = (
             ((t.w as f32 * scale).round() as usize).clamp(1, CELL_W),
@@ -100,7 +107,13 @@ pub fn write_sheet(path: &Path, tiles: &[Tile]) -> Result<()> {
         let cy0 = MARGIN + (k / cols) * (row_h + GAP);
         let x0 = cx0 + (CELL_W - tw) / 2;
         let y0 = cy0 + (CELL_H - th) / 2;
-        label(&mut buf, w, cx0 + CELL_W / 2, cy0 + CELL_H + 8, &tiles[k].name);
+        label(
+            &mut buf,
+            w,
+            cx0 + CELL_W / 2,
+            cy0 + CELL_H + 8,
+            &tiles[k].name,
+        );
         for y in 0..th {
             // Box-average the source area behind each output pixel.
             let sy0 = y * t.h / th;
@@ -125,7 +138,8 @@ pub fn write_sheet(path: &Path, tiles: &[Tile]) -> Result<()> {
             }
         }
     }
-    let f = BufWriter::new(File::create(path).with_context(|| format!("create {}", path.display()))?);
+    let f =
+        BufWriter::new(File::create(path).with_context(|| format!("create {}", path.display()))?);
     image::codecs::jpeg::JpegEncoder::new_with_quality(f, 92).write_image(
         &buf,
         w as u32,
@@ -141,7 +155,12 @@ mod tests {
 
     #[test]
     fn writes_a_sheet() {
-        let tile = |w, h| Tile { name: "a.tif".into(), w, h, px: vec![[0.5; 3]; w * h] };
+        let tile = |w, h| Tile {
+            name: "a.tif".into(),
+            w,
+            h,
+            px: vec![[0.5; 3]; w * h],
+        };
         let p = std::env::temp_dir().join("nlp_contact_test.jpg");
         write_sheet(&p, &[tile(30, 20), tile(20, 30), tile(10, 10)]).unwrap();
         assert!(std::fs::metadata(&p).unwrap().len() > 0);

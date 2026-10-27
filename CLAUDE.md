@@ -24,7 +24,7 @@ It reads camera RAW negatives or TIFF/JPEG/PNG scans, converts them with a densi
 ```bash
 cargo run --release                          # GUI (reopens last folder)
 cargo run --release -- /path/to/scans        # GUI on a folder or single file
-cargo run --release -- convert [--roll] [--roll-process NAME] [--tone NAME] [--wb NAME] [--lut NAME] [--border PCT] [--auto-crop] [--flat FILE] [--jpg] [--out DIR] FILES
+cargo run --release -- convert [--roll] [--roll-process NAME] [--tone NAME] [--wb NAME] [--lut NAME] [--border PCT] [--auto-crop] [--aspect NAME] [--flat FILE] [--jpg] [--out DIR] FILES
 cargo run --release -- scan-prep FILES       # gamma-encode linear TIF scans (Linear Scan source reads them directly)
 cargo run --release -- synth [out.tif] [ev]  # write the modelled ColorChecker negative (testchart.rs)
 
@@ -47,6 +47,8 @@ NLP_UI_TEST_DIR=<scans> NLP_UI_OUT=<dir> cargo test --release ui_screens -- --ig
 5. `pipeline::Renderer` is built from `Settings` and `Levels` (`levels_for` chooses roll or frame levels). `curve.rs` is the print engine: normalised density → tone/colour shaping → paper log exposure plus filtration (WB, C·M·Y keys, in CC) and print time (EV) → the tone profile (the plugin's 14 profiles, fitted as 21-knot curves over normalised density), baked into density-indexed LUTs. A base saturation (`DENSITY_SATURATION`) in density keeps chroma near the scene's. Hyper Tone (`dodge.rs`, off by default) adds a density offset before the curves, from a two-scale low-pass of green density, compressing large areas away from the key. Then come the native `look.rs` looks (saturation spares skin tones), output-space conversion (`color.rs`) and grain-aware sharpening. Sharpening weighs edges against grain by the local R/G/B correlation of the detail bands; it runs only on CPU renders (exports) with Sharpening set to Lab or Scanner. `export.rs` writes TIFF/JPEG with ICC and EXIF. `contact.rs` tiles rendered frames (rotated to landscape, labelled with ab_glyph and the embedded Inter) into the folder's contact sheet JPEG; `NlpApp::make_contact_sheet` renders them from the thumbnail sources.
 
 Conversion quality is measured on `testchart.rs`, a ColorChecker modelled on C-41 film. `pipeline::tests::chart_quality` and `dominated_scenes_stay_neutral` hold the metrics; their bounds only tighten. Bump `settings::ENGINE_VERSION` when analyses change meaning, and `sidecar::VERSION` when stored analyses or rolls change shape.
+
+Crop shape is `Settings::crop_aspect` (`CropAspect`: Original by default, Free, or a fixed ratio that follows the frame's orientation). `frame::detect` trims its result to it with `fit_aspect`, and the editor's lock (`lock_aspect`) keeps drags at the ratio. It is geometry, not part of `AnalysisKey`.
 
 Key data types live in `settings.rs`: `Settings` holds the per-image edit state, `ExportSettings`, `FilmMetadata` and `AnalysisKey`. `AnalysisKey` is the subset of settings the analysis depends on. If you change one of those fields, the frame needs re-analysis ("Convert"). Any other edit only rebuilds the `Renderer`. A new setting that affects analysis must go into `AnalysisKey`.
 

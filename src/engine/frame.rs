@@ -50,7 +50,10 @@ pub fn detect(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Option<Detecte
     } else {
         (px, w, h)
     };
-    let crop = insets(&px, w, h)?;
+    let mut crop = insets(&px, w, h)?;
+    if let Some(k) = s.crop_aspect.ratio(w as f32 / h as f32) {
+        crop = fit_aspect(crop, w as f32 / h as f32, k);
+    }
     Some(Detected {
         crop,
         straighten: angle,
@@ -164,6 +167,23 @@ fn insets(px: &[Px], w: usize, h: usize) -> Option<[f32; 4]> {
     (keep >= 0.3).then_some(out)
 }
 
+/// Shrink `insets` (percent, [l, t, r, b]) around their centre to the crop
+/// ratio `ratio` (width : height in pixels) of a frame of aspect `frame`.
+pub fn fit_aspect(insets: [f32; 4], frame: f32, ratio: f32) -> [f32; 4] {
+    let [l, t, r, b] = insets;
+    let (w, h) = (100.0 - l - r, 100.0 - t - b);
+    // Width per height in percent units.
+    let k = ratio / frame;
+    let (nw, nh) = if w / h > k { (h * k, h) } else { (w, w / k) };
+    let (cx, cy) = (l + w / 2.0, t + h / 2.0);
+    [
+        cx - nw / 2.0,
+        cy - nh / 2.0,
+        100.0 - cx - nw / 2.0,
+        100.0 - cy - nh / 2.0,
+    ]
+}
+
 /// Straighten angle in degrees, from line fits through the frame's edges.
 fn angle(mask: &[bool], w: usize, h: usize) -> f32 {
     let mut angles = Vec::new();
@@ -238,6 +258,7 @@ fn fit(pts: &[(f32, f32)]) -> Option<(f32, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::settings::CropAspect;
 
     const BASE: [f32; 3] = [0.6, 0.35, 0.2];
 
@@ -293,10 +314,27 @@ mod tests {
         )
     }
 
+    fn free() -> Settings {
+        Settings {
+            crop_aspect: CropAspect::Free,
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn auto_crop_keeps_the_original_aspect() {
+        let src = scan(300, 200, 12, 10, 0.0);
+        let s = Settings::default();
+        let d = detect(&src, &s, BASE).expect("frame");
+        let (w, h) = (100.0 - d.crop[0] - d.crop[2], 100.0 - d.crop[1] - d.crop[3]);
+        let frame = src.width as f32 / src.height as f32;
+        assert!((w / h * frame - frame).abs() < 0.01, "{d:?}");
+    }
+
     #[test]
     fn finds_frame_inside_holder_and_rebate() {
         let src = scan(1200, 800, 60, 40, 0.0);
-        let d = detect(&src, &Settings::default(), BASE).expect("frame");
+        let d = detect(&src, &free(), BASE).expect("frame");
         // Border is 100 px: 8.33 % of the width, 12.5 % of the height.
         let want = [8.33 + SAFETY, 12.5 + SAFETY, 8.33 + SAFETY, 12.5 + SAFETY];
         for k in 0..4 {
@@ -310,7 +348,7 @@ mod tests {
     fn straightens_a_tilted_frame() {
         for deg in [2.0f32, -1.5] {
             let src = scan(1200, 800, 90, 40, deg);
-            let d = detect(&src, &Settings::default(), BASE).expect("frame");
+            let d = detect(&src, &free(), BASE).expect("frame");
             assert!(
                 (d.straighten + deg).abs() < 0.3,
                 "tilt {deg}: straighten {}",
@@ -325,7 +363,7 @@ mod tests {
     #[test]
     fn borderless_scan_is_left_alone() {
         let src = scan(1200, 800, 0, 0, 0.0);
-        let d = detect(&src, &Settings::default(), BASE).expect("frame");
+        let d = detect(&src, &free(), BASE).expect("frame");
         assert_eq!(d.crop, [0.0; 4]);
         assert_eq!(d.straighten, 0.0);
     }
@@ -344,7 +382,7 @@ mod tests {
                 *p = BASE.map(|b| b * t);
             }
         }
-        let d = detect(&src, &Settings::default(), BASE).expect("frame");
+        let d = detect(&src, &free(), BASE).expect("frame");
         assert!(d.crop[2] < 2.0, "{d:?}");
     }
 
@@ -352,6 +390,6 @@ mod tests {
     fn blank_frame_is_rejected() {
         let mut src = scan(600, 400, 0, 0, 0.0);
         src.data.fill(BASE);
-        assert_eq!(detect(&src, &Settings::default(), BASE), None);
+        assert_eq!(detect(&src, &free(), BASE), None);
     }
 }

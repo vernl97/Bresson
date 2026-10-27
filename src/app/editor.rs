@@ -50,7 +50,64 @@ enum Handle {
 pub(super) struct CropEdit {
     insets: [f32; 4],
     angle: f32,
+    aspect: CropAspect,
+    /// The ratio the lock returns to after Free.
+    locked_aspect: CropAspect,
     drag: Option<Handle>,
+}
+
+/// Make the insets keep `k` (width : height in percent units) while `h` is
+/// dragged; the opposite edge or corner stays put.
+fn lock_aspect(ins: &mut [f32; 4], h: Handle, k: f32) {
+    let [l, t, r, b] = *ins;
+    let (w, hh) = (100.0 - l - r, 100.0 - t - b);
+    match h {
+        Handle::TL | Handle::TR | Handle::BL | Handle::BR => {
+            let left = matches!(h, Handle::TL | Handle::BL);
+            let top = matches!(h, Handle::TL | Handle::TR);
+            let max_w = 100.0 - if left { r } else { l };
+            let max_h = 100.0 - if top { b } else { t };
+            let nw = w.max(hh * k).min(max_w.min(max_h * k)).max(1.0);
+            let nh = nw / k;
+            if left {
+                ins[0] = 100.0 - r - nw;
+            } else {
+                ins[2] = 100.0 - l - nw;
+            }
+            if top {
+                ins[1] = 100.0 - b - nh;
+            } else {
+                ins[3] = 100.0 - t - nh;
+            }
+        }
+        Handle::L | Handle::R => {
+            let cy = t + hh / 2.0;
+            let max_w = 100.0 - if h == Handle::L { r } else { l };
+            let nw = w.min(max_w).min(2.0 * cy.min(100.0 - cy) * k).max(1.0);
+            let nh = nw / k;
+            if h == Handle::L {
+                ins[0] = 100.0 - r - nw;
+            } else {
+                ins[2] = 100.0 - l - nw;
+            }
+            ins[1] = cy - nh / 2.0;
+            ins[3] = 100.0 - cy - nh / 2.0;
+        }
+        Handle::T | Handle::B => {
+            let cx = l + w / 2.0;
+            let max_h = 100.0 - if h == Handle::T { b } else { t };
+            let nh = hh.min(max_h).min(2.0 * cx.min(100.0 - cx) / k).max(1.0);
+            let nw = nh * k;
+            if h == Handle::T {
+                ins[1] = 100.0 - b - nh;
+            } else {
+                ins[3] = 100.0 - t - nh;
+            }
+            ins[0] = cx - nw / 2.0;
+            ins[2] = 100.0 - cx - nw / 2.0;
+        }
+        Handle::Move | Handle::Dial => {}
+    }
 }
 
 /// A requested zoom change, resolved in the canvas where the geometry is known.
@@ -425,8 +482,15 @@ impl NlpApp {
         self.editor.crop = Some(CropEdit {
             insets: s.crop,
             angle: s.straighten,
+            aspect: s.crop_aspect,
+            locked_aspect: if s.crop_aspect == CropAspect::Free {
+                CropAspect::Original
+            } else {
+                s.crop_aspect
+            },
             drag: None,
         });
+        self.fit_pending_crop();
         self.editor.pick = None;
         self.editor.zoom = None;
         self.editor.pan = egui::Vec2::ZERO;
@@ -439,9 +503,34 @@ impl NlpApp {
             let mut s = before.clone();
             s.crop = c.insets;
             s.straighten = c.angle;
+            s.crop_aspect = c.aspect;
             self.apply_change(i, &before, s);
         }
         self.editor.dirty = true;
+    }
+
+    /// Aspect (w / h) of the frame after its quarter turns, which the crop
+    /// insets are relative to.
+    fn frame_aspect(&self) -> Option<f32> {
+        let src = self.editor.src.as_ref()?;
+        let (w, h) = (src.width as f32, src.height as f32);
+        let turned = self
+            .active
+            .and_then(|i| self.frames.get(i))
+            .is_some_and(|f| f.sc.settings.rotation % 2 == 1);
+        Some(if turned { h / w } else { w / h })
+    }
+
+    /// Shrink the pending crop to the selected aspect ratio.
+    fn fit_pending_crop(&mut self) {
+        let Some(frame) = self.frame_aspect() else {
+            return;
+        };
+        if let Some(c) = &mut self.editor.crop {
+            if let Some(ratio) = c.aspect.ratio(frame) {
+                c.insets = crate::engine::frame::fit_aspect(c.insets, frame, ratio);
+            }
+        }
     }
 
     /// Propose the detected frame as the pending crop.
@@ -450,7 +539,11 @@ impl NlpApp {
             return;
         };
         let f = &self.frames[i];
-        match crate::engine::frame::detect(&src, &f.sc.settings, f.base_for(&src)) {
+        let mut settings = f.sc.settings.clone();
+        if let Some(c) = &self.editor.crop {
+            settings.crop_aspect = c.aspect;
+        }
+        match crate::engine::frame::detect(&src, &settings, f.base_for(&src)) {
             Some(d) => {
                 if let Some(c) = &mut self.editor.crop {
                     (c.insets, c.angle) = (d.crop, d.straighten);
@@ -530,8 +623,13 @@ impl NlpApp {
                 .exact_size(FILMSTRIP_TOGGLE_H)
                 .frame(egui::Frame::new().fill(theme::PANEL))
                 .show(ui, |ui| {
-                    let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
-                    let c = if resp.hovered() { theme::ACCENT } else { egui::Color32::from_gray(140) };
+                    let (rect, resp) =
+                        ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+                    let c = if resp.hovered() {
+                        theme::ACCENT
+                    } else {
+                        egui::Color32::from_gray(140)
+                    };
                     // Chevron points down to collapse, up to expand.
                     let (m, w, d) = (rect.center(), 5.0, 2.5);
                     let d = if self.editor.filmstrip { d } else { -d };
@@ -543,7 +641,11 @@ impl NlpApp {
                         ],
                         egui::Stroke::new(1.5, c),
                     );
-                    let tip = if self.editor.filmstrip { "Hide filmstrip (F)" } else { "Show filmstrip (F)" };
+                    let tip = if self.editor.filmstrip {
+                        "Hide filmstrip (F)"
+                    } else {
+                        "Show filmstrip (F)"
+                    };
                     if resp.on_hover_text(tip).clicked() {
                         self.editor.filmstrip = !self.editor.filmstrip;
                     }
@@ -599,7 +701,11 @@ impl NlpApp {
                                     .paint_at(ui, rect);
                             }
                             None => {
-                                ui.painter().rect_filled(rect, 2.0, egui::Color32::from_white_alpha(8));
+                                ui.painter().rect_filled(
+                                    rect,
+                                    2.0,
+                                    egui::Color32::from_white_alpha(8),
+                                );
                             }
                         }
                         if j == i {
@@ -610,7 +716,11 @@ impl NlpApp {
                                 egui::StrokeKind::Outside,
                             );
                         } else if resp.hovered() {
-                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_white_alpha(20));
+                            ui.painter().rect_filled(
+                                rect,
+                                2.0,
+                                egui::Color32::from_white_alpha(20),
+                            );
                         }
                         if resp.on_hover_text(&f.name).clicked() && j != i {
                             open = Some(j);
@@ -888,15 +998,6 @@ impl NlpApp {
             {
                 self.history_step(false);
             }
-            ui.add_space(6.0);
-            if ui
-                .add_enabled(self.editor.crop.is_none(), widgets::ghost("Reset"))
-                .on_hover_text("Reset all edits to the defaults (undo with the arrow)")
-                .clicked()
-            {
-                self.reset_edits(i, s);
-            }
-
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if widgets::icon_button_tinted(
@@ -923,7 +1024,10 @@ impl NlpApp {
                 let ctx = ui.ctx().clone();
                 let key = |m, k| widgets::shortcut(&ctx, m, k);
                 let cmd = egui::Modifiers::COMMAND;
-                let flip_tip = format!("Flip horizontally ({})", key(egui::Modifiers::NONE, egui::Key::H));
+                let flip_tip = format!(
+                    "Flip horizontally ({})",
+                    key(egui::Modifiers::NONE, egui::Key::H)
+                );
                 let right_tip = format!("Rotate right ({})", key(cmd, egui::Key::CloseBracket));
                 let left_tip = format!("Rotate left ({})", key(cmd, egui::Key::OpenBracket));
                 if icon_button(ui, Icon::Flip, &flip_tip, s.flip_h, !cropping).clicked() {
@@ -1057,16 +1161,52 @@ impl NlpApp {
                 self.editor.dirty = true;
             }
         }
+        if let Some(c) = &mut self.editor.crop {
+            let free = c.aspect == CropAspect::Free;
+            let mut changed = false;
+            ui.label(RichText::new("Aspect ratio").small().color(theme::MUTED));
+            ui.horizontal(|ui| {
+                let tip = if free {
+                    "Unlocked: free-form crop. Click to lock the aspect ratio."
+                } else {
+                    "Locked to the aspect ratio. Click to crop free-form."
+                };
+                let icon = if free { Icon::Unlock } else { Icon::Lock };
+                if icon_button(ui, icon, tip, !free, true).clicked() {
+                    c.aspect = if free { c.locked_aspect } else { CropAspect::Free };
+                    changed = true;
+                }
+                egui::ComboBox::from_id_salt("crop_aspect")
+                    .width((ui.available_width() - 4.0).max(60.0))
+                    .height(400.0)
+                    .selected_text(c.locked_aspect.label())
+                    .show_ui(ui, |ui| {
+                        for &o in CropAspect::ALL.iter().filter(|o| **o != CropAspect::Free) {
+                            if ui.selectable_label(c.locked_aspect == o && !free, o.label()).clicked() {
+                                c.locked_aspect = o;
+                                c.aspect = o;
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            ui.add_space(4.0);
+            if changed {
+                self.fit_pending_crop();
+                self.editor.dirty = true;
+            }
+        }
         ui.horizontal(|ui| {
             if ui.add(widgets::ghost("Reset")).clicked() {
                 if let Some(c) = &mut self.editor.crop {
                     c.insets = [0.0; 4];
                     c.angle = 0.0;
-                    self.editor.dirty = true;
                 }
+                self.fit_pending_crop();
+                self.editor.dirty = true;
             }
             if ui
-                .add(widgets::ghost("Detect"))
+                .add(widgets::ghost("Auto"))
                 .on_hover_text("Find the frame inside the film rebate and holder")
                 .clicked()
             {
@@ -1150,12 +1290,40 @@ impl NlpApp {
         });
     }
 
-    /// Convert / Re-convert with the ⋯ menu beside it.
+    /// Convert (unconverted or stale frames) or Reset / Copy settings, with
+    /// the ⋯ menu beside it. Re-convert lives in the menu.
     fn conversion_header(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
+        let f = &self.frames[i];
+        let needs_convert = !f.sc.is_converted()
+            || f.sc
+                .analysis
+                .as_ref()
+                .map(|a| a.key != s.analysis_key())
+                .unwrap_or(false);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let w = ui.available_width() - 36.0;
-            ui.allocate_ui(vec2(w, 28.0), |ui| self.convert_button(ui, i, s));
+            if needs_convert {
+                ui.allocate_ui(vec2(w, 28.0), |ui| self.convert_button(ui, i, s));
+            } else {
+                let bw = (w - 4.0) / 2.0;
+                if ui
+                    .add_enabled(
+                        self.editor.crop.is_none(),
+                        widgets::ghost("Reset settings").min_size(vec2(bw, 32.0)),
+                    )
+                    .on_hover_text("Reset all edits to the defaults (undo with the arrow)")
+                    .clicked()
+                {
+                    self.reset_edits(i, s);
+                }
+                if ui
+                    .add(widgets::ghost("Copy settings").min_size(vec2(bw, 32.0)))
+                    .clicked()
+                {
+                    self.copy_settings();
+                }
+            }
             let more = icon_button(ui, Icon::More, "Defaults and more", false, true);
             egui::Popup::menu(&more).show(|ui| self.defaults_menu(ui, i, s));
         });
@@ -1448,13 +1616,15 @@ impl NlpApp {
                         // double-click to zero it.
                         let r = ui
                             .add(
-                                egui::Label::new(RichText::new(format!("{name} {v}")).monospace().color(
-                                    if clicks[k] == 0 {
-                                        theme::MUTED
-                                    } else {
-                                        theme::TEXT
-                                    },
-                                ))
+                                egui::Label::new(
+                                    RichText::new(format!("{name} {v}")).monospace().color(
+                                        if clicks[k] == 0 {
+                                            theme::MUTED
+                                        } else {
+                                            theme::TEXT
+                                        },
+                                    ),
+                                )
                                 .sense(Sense::click_and_drag()),
                             )
                             .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
@@ -1639,14 +1809,21 @@ impl NlpApp {
         let cmd = egui::Modifiers::COMMAND;
         let key = |m, k| RichText::new(widgets::shortcut(&ctx, m, k)).color(theme::FAINT);
         if ui
-            .add(egui::Button::new("Copy settings").shortcut_text(key(cmd, egui::Key::C)))
+            .button("Re-convert")
+            .on_hover_text("Analyse this frame on its own (convert rolls from the folder view)")
             .clicked()
         {
-            self.copy_settings();
+            self.frames[i].sc.settings = s.clone();
+            self.convert(vec![i], false);
+            ui.close();
         }
+        ui.separator();
         let paste = self.clipboard.is_some();
         if ui
-            .add_enabled(paste, egui::Button::new("Paste settings").shortcut_text(key(cmd, egui::Key::V)))
+            .add_enabled(
+                paste,
+                egui::Button::new("Paste settings").shortcut_text(key(cmd, egui::Key::V)),
+            )
             .clicked()
         {
             self.paste_settings_to(vec![i]);
@@ -1841,7 +2018,10 @@ impl NlpApp {
         // Zoom with ⌘/Ctrl + scroll or pinch (about the cursor); scroll pans
         // when zoomed. Applied before the geometry below so it takes effect
         // in the same frame.
-        if let Some(hover) = ui.input(|inp| inp.pointer.hover_pos()).filter(|h| avail.contains(*h)) {
+        if let Some(hover) = ui
+            .input(|inp| inp.pointer.hover_pos())
+            .filter(|h| avail.contains(*h))
+        {
             let (zoom_delta, scroll) = ui.input(|inp| (inp.zoom_delta(), inp.smooth_scroll_delta));
             if zoom_delta != 1.0 {
                 self.zoom_by(zoom_delta, fit, hover - center);
@@ -1901,7 +2081,9 @@ impl NlpApp {
                 &self.editor.gpu_before,
                 &self.editor.before_tex,
             ) {
-                (Some(n), Some(b), _) => gpu_paint_clipped(&p, left, avail, 1, n, b, [0.0, 0.0, k, 1.0]),
+                (Some(n), Some(b), _) => {
+                    gpu_paint_clipped(&p, left, avail, 1, n, b, [0.0, 0.0, k, 1.0])
+                }
                 (_, _, Some(t)) => {
                     p.image(
                         t.id(),
@@ -2086,7 +2268,7 @@ impl NlpApp {
         let mut s = before.clone();
         let converted = self.frames[i].sc.is_converted();
         if ui
-            .button("Auto crop")
+            .button("Auto")
             .on_hover_text("Detect the frame and open it in Crop & straighten")
             .clicked()
         {
@@ -2229,6 +2411,10 @@ impl NlpApp {
             let (dx, dy) = (d.x / img.width() * 100.0, d.y / img.height() * 100.0);
             let ins = &mut c.insets;
             let (l, t, rr, b) = (ins[0], ins[1], ins[2], ins[3]);
+            let k = c
+                .aspect
+                .ratio(img.width() / img.height())
+                .map(|r| r / (img.width() / img.height()));
             match h {
                 Handle::Move => {
                     let mx = dx.clamp(-l, rr);
@@ -2248,6 +2434,9 @@ impl NlpApp {
                     }
                     if matches!(h, Handle::B | Handle::BL | Handle::BR) {
                         ins[3] = (b - dy).clamp(0.0, 95.0 - t);
+                    }
+                    if let Some(k) = k {
+                        lock_aspect(ins, h, k);
                     }
                 }
             }
@@ -2491,4 +2680,27 @@ fn gpu_paint_clipped(
         lerp(part[1], part[3], fy(vis.bottom())),
     ];
     gpu::paint(painter, vis, slot, neg, view, uv);
+}
+
+#[cfg(test)]
+mod crop_lock_tests {
+    use super::*;
+
+    #[test]
+    fn dragging_keeps_the_ratio_and_the_anchor() {
+        let k = 1.5;
+        for h in [Handle::TL, Handle::BR, Handle::L, Handle::R, Handle::T, Handle::B] {
+            let mut ins = [10.0, 12.0, 30.0, 8.0];
+            match h {
+                Handle::TL | Handle::L => ins[0] = 3.0,
+                Handle::BR | Handle::R => ins[2] = 20.0,
+                Handle::T => ins[1] = 4.0,
+                _ => ins[3] = 2.0,
+            }
+            lock_aspect(&mut ins, h, k);
+            let (w, hh) = (100.0 - ins[0] - ins[2], 100.0 - ins[1] - ins[3]);
+            assert!((w / hh - k).abs() < 1e-3, "{h:?} {ins:?}");
+            assert!(ins.iter().all(|v| *v >= -1e-3), "{h:?} {ins:?}");
+        }
+    }
 }

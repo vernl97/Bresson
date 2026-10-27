@@ -19,7 +19,12 @@ const BORDER: usize = 4;
 
 /// Demosaic `m` (`w` × `h`, one sample per pixel) where `color(row, col)`
 /// gives each site's colour: 0 red, 1 green, 2 blue.
-pub fn rcd(m: &[f32], w: usize, h: usize, color: impl Fn(usize, usize) -> usize + Sync) -> Vec<[f32; 3]> {
+pub fn rcd(
+    m: &[f32],
+    w: usize,
+    h: usize,
+    color: impl Fn(usize, usize) -> usize + Sync,
+) -> Vec<[f32; 3]> {
     let n = w * h;
     let col: Vec<u8> = (0..n).map(|i| color(i / w, i % w) as u8).collect();
     if w < 2 * BORDER + 2 || h < 2 * BORDER + 2 {
@@ -107,7 +112,8 @@ pub fn rcd(m: &[f32], w: usize, h: usize, color: impl Fn(usize, usize) -> usize 
                     + (m[i] - at(i, 2 * d)).abs()
                     + (at(i, d) - at(i, 3 * d)).abs()
                     + (at(i, 2 * d) - at(i, 4 * d)).abs();
-                let val = at(i, d) * 2.0 * lpf[i] / (EPS + lpf[i] + lpf[(i as isize + 2 * d) as usize]);
+                let val =
+                    at(i, d) * 2.0 * lpf[i] / (EPS + lpf[i] + lpf[(i as isize + 2 * d) as usize]);
                 (val, grad)
             };
             let pair = |d: isize| {
@@ -235,7 +241,12 @@ mod tests {
                 } else if fy < 0.66 {
                     // Neutral and coloured squares with hard edges.
                     let tile = ((x / 12.0) as usize + (y / 12.0) as usize) % 4;
-                    [[0.8, 0.8, 0.8], [0.1, 0.1, 0.1], [0.7, 0.2, 0.1], [0.1, 0.3, 0.7]][tile]
+                    [
+                        [0.8, 0.8, 0.8],
+                        [0.1, 0.1, 0.1],
+                        [0.7, 0.2, 0.1],
+                        [0.1, 0.3, 0.7],
+                    ][tile]
                 } else {
                     // Grating: neutral stripes getting finer to the right.
                     let f = 0.05 + 0.3 * fx;
@@ -268,7 +279,8 @@ mod tests {
                 if (t[0] - t[1]).abs() < 1e-6 && (t[1] - t[2]).abs() < 1e-6 {
                     let o = out[i];
                     fc += (o.iter().fold(f32::MIN, |a, &b| a.max(b))
-                        - o.iter().fold(f32::MAX, |a, &b| a.min(b))) as f64;
+                        - o.iter().fold(f32::MAX, |a, &b| a.min(b)))
+                        as f64;
                     nf += 1.0;
                 }
             }
@@ -315,6 +327,11 @@ mod tests {
             q_ours.0, q_ours.1, q_ppg.0, q_ppg.1, q_avg.0, q_avg.1
         );
         assert!(q_ours.0 > q_ppg.0, "PSNR {} vs PPG {}", q_ours.0, q_ppg.0);
-        assert!(q_ours.1 < q_ppg.1, "false colour {} vs PPG {}", q_ours.1, q_ppg.1);
+        assert!(
+            q_ours.1 < q_ppg.1,
+            "false colour {} vs PPG {}",
+            q_ours.1,
+            q_ppg.1
+        );
     }
 }

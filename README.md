@@ -14,12 +14,12 @@ cargo run --release -- help
 
 ```bash
 cargo run --release -- convert [--roll] [--roll-process NAME] [--tone NAME] [--wb NAME] \
-    [--lut NAME] [--border PCT] [--auto-crop] [--flat FILE] [--jpg] [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
+    [--lut NAME] [--border PCT] [--auto-crop] [--aspect NAME] [--flat FILE] [--jpg] [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
 cargo run --release -- scan-prep FILES              # gamma-encode linear TIF scans (no longer needed: set the source to Linear Scan)
 cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorChecker negative (ev = stops over)
 ```
 
-`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Lab (each frame's own colour and density, default) or Darkroom (one setting for the roll). `--auto-crop` crops and straightens each frame to its detected frame before analysis. `--flat` divides out uneven light with a flat-field frame. `--tone` and `--roll-process` also accept the last or first word of a name (`--tone Standard`, `--roll-process Darkroom`). `--name` takes the export file name template (see Export below).
+`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Lab (each frame's own colour and density, default) or Darkroom (one setting for the roll). `--auto-crop` crops and straightens each frame to its detected frame before analysis, in the shape given by `--aspect` (Original by default, Free, 1:1, 1:2, 2:3, 3:4, 4:5, 5:7, 8.5:11, 9:16). `--flat` divides out uneven light with a flat-field frame. `--tone` and `--roll-process` also accept the last or first word of a name (`--tone Standard`, `--roll-process Darkroom`). `--name` takes the export file name template (see Export below).
 
 ## GUI
 
@@ -27,6 +27,7 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
 - Browse a folder of RAW and TIFF files as a thumbnail grid. Select with click, ⌘/Ctrl-click, Shift-click or ⌘A; double-click (or Enter) opens the editor.
 - The top bar acts on the selection:
   - **Convert** / **Convert as roll** (2+ frames) open a dialog with the conversion inputs: source, colour model, film base, flat field, pre-saturation, border buffer, white balance, *Auto-crop frames* and, for rolls, the roll process (Lab: each frame's own colour and density, or Darkroom: one setting for the roll).
+  - **Copy settings** / **Paste settings**: copy the edit from the selected frame and paste it onto the selection (⌘C / ⌘V).
   - **Export**: positive copies as TIF (8/16-bit, ZIP) or JPG, in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile and EXIF.
     - Presets: *Lab JPEG M/L* (3000/6000 px) and *Archive TIFF*, plus your own (*Save as…*).
     - Size: full or a long edge of 2000–6000 px.
@@ -43,16 +44,16 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
 - Lab correction keys, like a Frontier/Noritsu keyboard (number row or numpad): 7 8 9 add cyan, magenta, yellow; 1 2 3 take them away; 4 / 6 print denser (darker) / lighter in 1/6 EV steps; 0 resets. They move the print exposure and the printing filtration (2.5 CC per click).
 - J shows clipping: red where a channel is blown, blue where the shadows are blocked. The histogram marks clipped channels in its corners.
 - Hovering the image shows the output RGB and the negative's density above the film base.
-- Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. Detect finds the frame inside the film rebate and holder. Reset Crop / Cancel (Esc) / Apply (Enter).
+- Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. The lock next to the aspect ratio dropdown keeps the crop at the chosen ratio (Original by default; 1:1, 1:2, 2:3, 3:4, 4:5, 5:7, 8.5:11, 9:16); unlock it for a free-form crop. Auto finds the frame inside the film rebate and holder and crops it to the same shape. Reset Crop / Cancel (Esc) / Apply (Enter).
 - A single-column sidebar with a histogram on top:
-  - Before conversion it shows the conversion inputs (Source, Analysis). Dragging the border buffer slider outlines the analysed area on the canvas. Afterwards they fold into a one-line **Conversion** summary with Re-convert.
+  - Before conversion it shows the conversion inputs (Source, Analysis). Dragging the border buffer slider outlines the analysed area on the canvas. Afterwards they fold into a one-line **Conversion** summary, headed by **Reset settings** and **Copy settings** side by side (Convert returns in their place when the frame is unconverted or its conversion settings changed).
   - **Tone**: tone profile, Exposure, Brightness, Contrast, Lights, Darks, Whites, Blacks; *Hyper Tone* holds Burn highlights / Dodge shadows (local dodging and burning, off by default); *Glow, fade & clipping* holds Lab Glow/Fade and White/Black clip.
   - **White balance**: presets, a neutral eyedropper and Temp/Tint (yellow and magenta filtration in CC).
   - **Colour toning**: mids, highs and shadows.
   - **Look**: Natural, Frontier, Crystal or Pakon with amount and saturation (skin tones keep their saturation), sharpening (Lab or Scanner; applied on export).
   - **Film** (collapsed): film stock, ISO, developer and camera details for the EXIF and the file name tokens; *Apply to roll/folder* copies them.
   - **Analysis** (collapsed): the print curves and each channel's analysed densities. Roll frames get *Use roll analysis* and the roll process.
-  - The ⋯ menu beside Re-convert: save/apply default, reset edits and unconvert.
+  - The ⋯ menu beside them: Re-convert, paste settings, save/apply default and unconvert.
 - Film-base eyedropper for sampling the unexposed border.
 
 Settings are saved inside the `NLP/` subfolder as `<file>.nlp.json`.

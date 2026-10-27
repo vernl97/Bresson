@@ -45,7 +45,12 @@ impl NlpApp {
     pub fn record(&mut self, idx: &[usize]) {
         let step = idx
             .iter()
-            .map(|&i| (self.frames[i].path.clone(), self.frames[i].sc.settings.clone()))
+            .map(|&i| {
+                (
+                    self.frames[i].path.clone(),
+                    self.frames[i].sc.settings.clone(),
+                )
+            })
             .collect();
         self.history.push(step);
     }
@@ -69,7 +74,8 @@ impl NlpApp {
             inverse.push((path, cur));
             self.mark_changed(i);
             if self.editor.path.as_ref() == Some(&self.frames[i].path) {
-                self.editor.set_committed(self.frames[i].sc.settings.clone());
+                self.editor
+                    .set_committed(self.frames[i].sc.settings.clone());
             }
         }
         if undo {

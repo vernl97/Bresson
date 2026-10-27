@@ -357,6 +357,8 @@ pub enum Icon {
     RotateRight,
     Flip,
     Crop,
+    Lock,
+    Unlock,
     Export,
     Eyedropper,
     Folder,
@@ -438,6 +440,18 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 color,
                 Stroke::NONE,
             ));
+        }
+        Icon::Lock | Icon::Unlock => {
+            let locked = icon == Icon::Lock;
+            let body = Rect::from_min_max(q(-6.0, -1.0), q(6.0, 8.0));
+            p.rect_stroke(body, 1.5, st, egui::StrokeKind::Middle);
+            let lift = if locked { 0.0 } else { -3.0 };
+            let mut pts = arc(q(0.0, -1.0 + lift), 4.0 * s, std::f32::consts::PI, std::f32::consts::TAU, 10);
+            if locked {
+                pts.push(q(4.0, -1.0));
+            }
+            pts.insert(0, q(-4.0, -1.0));
+            p.add(line(pts));
         }
         Icon::Crop => {
             p.add(line(vec![q(-4.0, -8.0), q(-4.0, 4.0), q(8.0, 4.0)]));

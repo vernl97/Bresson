@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::engine::settings::{
-    ExportFormat, ExportSettings, FilmBase, Lut, RollMode, ToneProfile, WbMode,
+    CropAspect, ExportFormat, ExportSettings, FilmBase, Lut, RollMode, ToneProfile, WbMode,
 };
 use crate::engine::sidecar::{self, RollData, Sidecar};
 use crate::engine::{decode, export, frame, pipeline};
@@ -25,6 +25,7 @@ CONVERT OPTIONS:
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
   --border PCT         Border buffer percent (default 5)
   --auto-crop          Crop and straighten each frame to its detected frame
+  --aspect NAME        Crop shape for --auto-crop: Original (default), Free, 1:1, 2:3, 4:5, ...
   --flat FILE          Flat-field frame (bare light or clear film leader, shot like the negatives)
   --jpg                Write JPEG instead of 16-bit TIFF
   --long-edge PX       Resize so the long edge is at most PX (default: full size)
@@ -96,6 +97,7 @@ fn convert(args: Vec<String>) -> Result<()> {
             "--lut" => s.lut = find(Lut::ALL, Lut::label, &val()?)?,
             "--border" => s.border_buffer = val()?.parse()?,
             "--auto-crop" => s.auto_crop = true,
+            "--aspect" => s.crop_aspect = find(CropAspect::ALL, CropAspect::label, &val()?)?,
             "--flat" => s.flat_field = Some(PathBuf::from(val()?)),
             "--jpg" => ex.format = ExportFormat::Jpeg,
             "--long-edge" => ex.long_edge = val()?.parse()?,

@@ -40,7 +40,15 @@ impl NlpApp {
     pub fn source_chip(&mut self, ui: &mut egui::Ui) {
         let mut counts: Vec<(Source, usize)> = Source::ALL
             .iter()
-            .map(|&s| (s, self.frames.iter().filter(|f| f.sc.settings.source == s).count()))
+            .map(|&s| {
+                (
+                    s,
+                    self.frames
+                        .iter()
+                        .filter(|f| f.sc.settings.source == s)
+                        .count(),
+                )
+            })
             .filter(|c| c.1 > 0)
             .collect();
         counts.sort_by(|a, b| b.1.cmp(&a.1));
@@ -57,7 +65,9 @@ impl NlpApp {
                     .corner_radius(10.0)
                     .min_size(vec2(0.0, 20.0)),
             )
-            .on_hover_text("Scan source, detected from the files. Click to change it for the roll.");
+            .on_hover_text(
+                "Scan source, detected from the files. Click to change it for the roll.",
+            );
         egui::Popup::menu(&r).show(|ui| {
             ui.set_width(270.0);
             ui.label(RichText::new("Scan source").small().color(theme::MUTED));
@@ -65,7 +75,11 @@ impl NlpApp {
                 ui.label(format!("{n} × {}", s.label()));
             }
             ui.separator();
-            ui.label(RichText::new("Set for the whole roll").small().color(theme::MUTED));
+            ui.label(
+                RichText::new("Set for the whole roll")
+                    .small()
+                    .color(theme::MUTED),
+            );
             for &s in Source::ALL {
                 let only = counts.len() == 1 && main == s;
                 if ui.selectable_label(only, s.label()).clicked() && !only {
@@ -73,7 +87,11 @@ impl NlpApp {
                 }
             }
             ui.add_space(4.0);
-            ui.label(RichText::new(source_instructions(main)).small().color(theme::FAINT));
+            ui.label(
+                RichText::new(source_instructions(main))
+                    .small()
+                    .color(theme::FAINT),
+            );
         });
     }
 }
@@ -400,6 +418,31 @@ impl NlpApp {
                             self.open_convert_dialog(targets.clone(), false);
                         }
                         ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        let ctx = ui.ctx().clone();
+                        let cmd = egui::Modifiers::COMMAND;
+                        if ui
+                            .add_enabled(self.clipboard.is_some() && n > 0, widgets::ghost("Paste settings"))
+                            .on_hover_text(format!(
+                                "Paste copied settings to the selection ({})",
+                                widgets::shortcut(&ctx, cmd, egui::Key::V)
+                            ))
+                            .clicked()
+                        {
+                            self.paste_settings();
+                        }
+                        if ui
+                            .add_enabled(n > 0, widgets::ghost("Copy settings"))
+                            .on_hover_text(format!(
+                                "Copy settings from the selected frame ({})",
+                                widgets::shortcut(&ctx, cmd, egui::Key::C)
+                            ))
+                            .clicked()
+                        {
+                            self.copy_settings();
+                        }
                         if n > 0 {
                             ui.add_space(6.0);
                             ui.separator();
@@ -464,7 +507,8 @@ impl NlpApp {
                         let (done, total) = (self.auto.convert_done, self.auto.convert_total);
                         if self.auto.busy() || done < total {
                             ui.add_space(12.0);
-                            let auto = !self.auto.queue.is_empty() || self.auto.roll_pass == super::auto::RollPass::Running;
+                            let auto = !self.auto.queue.is_empty()
+                                || self.auto.roll_pass == super::auto::RollPass::Running;
                             if auto
                                 && ui
                                     .add(egui::Button::new(tiny("Stop")).frame(false))
@@ -567,8 +611,11 @@ impl NlpApp {
         }
         if let Some(key) = super::lab_key(ctx).filter(|_| self.export_targets.is_none()) {
             let sel = self.sel_vec();
-            let converted: Vec<usize> =
-                sel.iter().copied().filter(|&i| self.frames[i].sc.is_converted()).collect();
+            let converted: Vec<usize> = sel
+                .iter()
+                .copied()
+                .filter(|&i| self.frames[i].sc.is_converted())
+                .collect();
             self.record(&converted);
             let n = sel.iter().filter(|&&i| self.apply_lab_key(i, key)).count();
             if n < sel.len() {
@@ -580,7 +627,10 @@ impl NlpApp {
     /// Arrow keys move the selection through the grid; Shift extends it
     /// from the anchor.
     fn grid_arrows(&mut self, ctx: &egui::Context) {
-        let cols: usize = ctx.data(|d| d.get_temp(egui::Id::new(GRID_COLS))).unwrap_or(1).max(1);
+        let cols: usize = ctx
+            .data(|d| d.get_temp(egui::Id::new(GRID_COLS)))
+            .unwrap_or(1)
+            .max(1);
         let (step, shift) = ctx.input(|i| {
             let step = [
                 (egui::Key::ArrowLeft, -1),
@@ -599,7 +649,10 @@ impl NlpApp {
         if n == 0 || self.export_targets.is_some() {
             return;
         }
-        let cur = self.active.filter(|i| self.selected.contains(i)).or(self.selected.last().copied());
+        let cur = self
+            .active
+            .filter(|i| self.selected.contains(i))
+            .or(self.selected.last().copied());
         let next = match cur {
             Some(c) => (c as i64 + step).clamp(0, n as i64 - 1) as usize,
             None => 0,
@@ -670,7 +723,8 @@ impl NlpApp {
             }
             self.mark_changed(i);
             if self.editor.path.as_ref() == Some(&self.frames[i].path) {
-                self.editor.set_committed(self.frames[i].sc.settings.clone());
+                self.editor
+                    .set_committed(self.frames[i].sc.settings.clone());
             }
         }
         self.editor.invalidate();
@@ -698,7 +752,9 @@ impl NlpApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let cols = ((ui.available_width() + 14.0) / (cell + 14.0)).floor().max(1.0) as usize;
+                let cols = ((ui.available_width() + 14.0) / (cell + 14.0))
+                    .floor()
+                    .max(1.0) as usize;
                 let scroll_to: Option<usize> =
                     ctx.data_mut(|d| d.remove_temp(egui::Id::new(GRID_SCROLL_TO)));
                 ctx.data_mut(|d| d.insert_temp(egui::Id::new(GRID_COLS), cols));
@@ -806,7 +862,11 @@ impl NlpApp {
                         if converting {
                             // Pulsing while its conversion runs.
                             let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
-                            p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::MUTED.gamma_multiply(a));
+                            p.circle_filled(
+                                pos2(x - 3.0, row_y),
+                                3.0,
+                                theme::MUTED.gamma_multiply(a),
+                            );
                             x -= 12.0;
                             ui.ctx().request_repaint();
                         } else if !f.sc.is_converted() {

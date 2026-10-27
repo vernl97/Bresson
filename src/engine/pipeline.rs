@@ -1066,9 +1066,7 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
         .filter(|i| !excluded.contains(i))
         .collect();
     let balance = RollBalance {
-        offset: std::array::from_fn(|c| {
-            median(balanced.iter().map(|&i| offsets[i][c]).collect())
-        }),
+        offset: std::array::from_fn(|c| median(balanced.iter().map(|&i| offsets[i][c]).collect())),
         ..shape
     };
     let green = |f: fn(&ChannelLevels) -> f64| {
@@ -1433,7 +1431,11 @@ mod tests {
         assert!(excluded.is_empty(), "{excluded:?}");
         assert!((r.balance.slope[0] - 0.9).abs() < 1e-6, "{:?}", r.balance);
         assert!((r.balance.slope[2] - 1.1).abs() < 1e-6, "{:?}", r.balance);
-        assert!((r.balance.offset[0] + 0.035).abs() < 1e-6, "{:?}", r.balance);
+        assert!(
+            (r.balance.offset[0] + 0.035).abs() < 1e-6,
+            "{:?}",
+            r.balance
+        );
     }
 
     #[test]
@@ -1462,7 +1464,10 @@ mod tests {
         let mut own = frames[1].clone();
         own.auto_wb.confidence = 1.0;
         assert_eq!(levels_for(&s, Some(&own), Some(&roll)).unwrap(), own.levels);
-        assert_eq!(auto_wb_for(&s, Some(&own), Some(&roll)).unwrap(), own.auto_wb);
+        assert_eq!(
+            auto_wb_for(&s, Some(&own), Some(&roll)).unwrap(),
+            own.auto_wb
+        );
         // Half trusted: halfway between the roll's balance and its own.
         own.auto_wb.confidence = (LOW_CONFIDENCE + HIGH_CONFIDENCE) / 2.0;
         let half = levels_for(&s, Some(&own), Some(&roll)).unwrap();

@@ -75,7 +75,10 @@ impl NlpApp {
             let idx: Vec<usize> = paths.iter().filter_map(|p| self.index_of(p)).collect();
             self.spawn_auto_convert(idx, false);
         }
-        if self.auto.roll_pass != RollPass::Waiting || self.auto.busy() || self.defaults.manual_convert {
+        if self.auto.roll_pass != RollPass::Waiting
+            || self.auto.busy()
+            || self.defaults.manual_convert
+        {
             return;
         }
         let loading = self
@@ -140,9 +143,15 @@ impl NlpApp {
 
     /// A roll pass found exposures more than 1 EV apart: balance by the
     /// images instead of asking, and say so in the folder banner.
-    pub fn auto_exposure_variance(&mut self, items: Vec<ConvertItem>, spread: f64) -> Option<Vec<ConvertItem>> {
+    pub fn auto_exposure_variance(
+        &mut self,
+        items: Vec<ConvertItem>,
+        spread: f64,
+    ) -> Option<Vec<ConvertItem>> {
         if self.auto.roll_pass != RollPass::Running
-            || !items.iter().all(|it| self.auto.in_flight.contains(&it.path))
+            || !items
+                .iter()
+                .all(|it| self.auto.in_flight.contains(&it.path))
         {
             return Some(items);
         }
