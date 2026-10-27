@@ -530,6 +530,8 @@ pub struct ExportSettings {
     pub placement: Placement,
     pub subfolder: String,
     pub suffix: String,
+    /// File name, see `export::file_name` for the tokens.
+    pub name_template: String,
     /// 0 = full resolution.
     pub long_edge: u32,
     pub output_dir: Option<PathBuf>,
@@ -546,9 +548,78 @@ impl Default for ExportSettings {
             placement: Placement::Subfolder,
             subfolder: "Positives".into(),
             suffix: "-positive".into(),
+            name_template: "{name}{suffix}".into(),
             long_edge: 0,
             output_dir: None,
         }
+    }
+}
+
+/// A named set of export settings. The destination is not part of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportPreset {
+    pub name: String,
+    pub export: ExportSettings,
+}
+
+impl ExportPreset {
+    /// Presets that ship with the app: lab-style JPEG sizes and an archive TIFF.
+    pub fn builtin() -> Vec<ExportPreset> {
+        let jpeg = |name: &str, long_edge| ExportPreset {
+            name: name.into(),
+            export: ExportSettings {
+                format: ExportFormat::Jpeg,
+                jpeg_quality: 95,
+                space: OutputSpace::Srgb,
+                long_edge,
+                ..Default::default()
+            },
+        };
+        vec![
+            jpeg("Lab JPEG M (3000 px)", 3000),
+            jpeg("Lab JPEG L (6000 px)", 6000),
+            ExportPreset {
+                name: "Archive TIFF (16-bit ProPhoto)".into(),
+                export: ExportSettings {
+                    format: ExportFormat::Tiff,
+                    sixteen_bit: true,
+                    zip_compression: true,
+                    space: OutputSpace::ProPhoto,
+                    ..Default::default()
+                },
+            },
+        ]
+    }
+
+    fn without_destination(ex: &ExportSettings) -> ExportSettings {
+        let d = ExportSettings::default();
+        ExportSettings {
+            placement: d.placement,
+            subfolder: d.subfolder,
+            output_dir: None,
+            ..ex.clone()
+        }
+    }
+
+    pub fn new(name: &str, ex: &ExportSettings) -> Self {
+        Self {
+            name: name.trim().into(),
+            export: Self::without_destination(ex),
+        }
+    }
+
+    pub fn matches(&self, ex: &ExportSettings) -> bool {
+        Self::without_destination(ex) == self.export
+    }
+
+    /// Apply to `ex`, keeping its destination.
+    pub fn apply_to(&self, ex: &mut ExportSettings) {
+        *ex = ExportSettings {
+            placement: ex.placement,
+            subfolder: ex.subfolder.clone(),
+            output_dir: ex.output_dir.clone(),
+            ..self.export.clone()
+        };
     }
 }
 
@@ -662,6 +733,25 @@ mod tests {
         assert_eq!(dst.brightness, 12.0);
         assert_eq!(dst.analysis_key(), before);
         assert_eq!(dst.crop, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn export_presets_keep_the_destination() {
+        let mut ex = ExportSettings {
+            output_dir: Some("/out".into()),
+            ..Default::default()
+        };
+        let l = &ExportPreset::builtin()[1];
+        assert!(!l.matches(&ex));
+        l.apply_to(&mut ex);
+        assert!(l.matches(&ex));
+        assert_eq!(ex.long_edge, 6000);
+        assert_eq!(ex.output_dir, Some("/out".into()));
+        ex.jpeg_quality = 80;
+        let mine = ExportPreset::new(" Web ", &ex);
+        assert_eq!(mine.name, "Web");
+        assert_eq!(mine.export.output_dir, None);
+        assert!(mine.matches(&ex) && !l.matches(&ex));
     }
 
         #[test]

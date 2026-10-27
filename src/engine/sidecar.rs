@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::curve::Origins;
 use super::pipeline::{Analysis, AutoWb};
-use super::settings::{ExportSettings, FilmMetadata, Settings};
+use super::settings::{ExportPreset, ExportSettings, FilmMetadata, Settings};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RollData {
@@ -119,6 +119,8 @@ fn config_dir() -> Option<PathBuf> {
 pub struct Defaults {
     pub settings: Settings,
     pub export: ExportSettings,
+    /// The user's own export presets (`ExportPreset::builtin` ship with the app).
+    pub export_presets: Vec<ExportPreset>,
     pub last_folder: Option<PathBuf>,
 }
 

@@ -768,9 +768,80 @@ impl NlpApp {
                 } else {
                     self.conversion_settings(ui, s);
                 }
+                self.film_section(ui, i);
                 self.engine_section(ui, i, s);
                 ui.add_space(16.0);
             });
+    }
+
+    /// Film and capture details: written to the exported EXIF and used by
+    /// the export file name tokens.
+    fn film_section(&mut self, ui: &mut egui::Ui, i: usize) {
+        if !widgets::fold_with(ui, "Film", false) {
+            return;
+        }
+        let mut changed = false;
+        let m = &mut self.frames[i].sc.metadata;
+        let fields: [(&str, &mut String, &str); 10] = [
+            ("Film stock", &mut m.film_stock, "Portra 400"),
+            ("Film ISO", &mut m.film_iso, "400"),
+            ("Shot at ISO", &mut m.shot_at_iso, "800 (push)"),
+            ("Developer", &mut m.developer, "C-41 lab"),
+            ("Camera make", &mut m.camera_make, "Nikon"),
+            ("Camera model", &mut m.camera_model, "FM2"),
+            ("Lens", &mut m.lens, "50mm f/1.8"),
+            ("Shutter", &mut m.shutter_speed, "1/125"),
+            ("Aperture", &mut m.aperture, "f/8"),
+            ("Notes", &mut m.development_notes, ""),
+        ];
+        egui::Grid::new("film_meta")
+            .num_columns(2)
+            .spacing(vec2(8.0, 4.0))
+            .show(ui, |ui| {
+                for (label, v, hint) in fields {
+                    ui.label(RichText::new(label).small().color(theme::MUTED));
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(v)
+                                .hint_text(hint)
+                                .desired_width(ui.available_width()),
+                        )
+                        .changed();
+                    ui.end_row();
+                }
+            });
+        if changed {
+            self.frames[i].dirty_since = Some(self.time);
+        }
+        // Copy to the frame's roll, or to the whole folder.
+        let roll = self.frames[i].sc.roll.as_ref().map(|r| r.id.clone());
+        let others: Vec<usize> = (0..self.frames.len())
+            .filter(|&k| k != i)
+            .filter(|&k| {
+                roll.is_none() || self.frames[k].sc.roll.as_ref().map(|r| &r.id) == roll.as_ref()
+            })
+            .collect();
+        if !others.is_empty() {
+            ui.add_space(4.0);
+            let label = if roll.is_some() {
+                "Apply to roll"
+            } else {
+                "Apply to folder"
+            };
+            if ui
+                .add(widgets::ghost(label))
+                .on_hover_text(format!("Copy these details to {} other frame(s)", others.len()))
+                .clicked()
+            {
+                let m = self.frames[i].sc.metadata.clone();
+                for &k in &others {
+                    self.frames[k].sc.metadata = m.clone();
+                    self.frames[k].dirty_since = Some(self.time);
+                }
+                self.toast(format!("Film details copied to {} frame(s)", others.len()), false);
+            }
+        }
+        ui.add_space(8.0);
     }
 
     fn crop_panel(&mut self, ui: &mut egui::Ui, i: usize) {

@@ -8,7 +8,7 @@ use crate::engine::settings::{
     ExportFormat, ExportSettings, FilmBase, Lut, RollMode, ToneProfile, WbMode,
 };
 use crate::engine::sidecar::{self, RollData, Sidecar};
-use crate::engine::{decode, export, pipeline};
+use crate::engine::{decode, export, frame, pipeline};
 
 const HELP: &str = "NLP Studio — negative conversion
 
@@ -24,7 +24,11 @@ CONVERT OPTIONS:
   --wb NAME            White balance (Auto-Neutral, Kodak, Fuji, ...)
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
   --border PCT         Border buffer percent (default 5)
+  --auto-crop          Crop and straighten each frame to its detected frame
   --jpg                Write JPEG instead of 16-bit TIFF
+  --long-edge PX       Resize so the long edge is at most PX (default: full size)
+  --name TEMPLATE      File name: {name} {suffix} {n} {n:03} {stock} {iso} {date}
+                       (default \"{name}{suffix}\")
   --out DIR            Output folder (default: <source>/Positives)
 ";
 
@@ -84,7 +88,10 @@ fn convert(args: Vec<String>) -> Result<()> {
             "--wb" => s.wb_mode = find(WbMode::ALL, WbMode::label, &val()?)?,
             "--lut" => s.lut = find(Lut::ALL, Lut::label, &val()?)?,
             "--border" => s.border_buffer = val()?.parse()?,
+            "--auto-crop" => s.auto_crop = true,
             "--jpg" => ex.format = ExportFormat::Jpeg,
+            "--long-edge" => ex.long_edge = val()?.parse()?,
+            "--name" => ex.name_template = val()?,
             "--out" => out = Some(PathBuf::from(val()?)),
             f if f.starts_with("--") => bail!("unknown option {f}\n{HELP}"),
             f => files.push(PathBuf::from(f)),
@@ -101,7 +108,14 @@ fn convert(args: Vec<String>) -> Result<()> {
     for f in &files {
         let src = decode::load(f, Some(1200)).with_context(|| format!("load {}", f.display()))?;
         let base = pipeline::resolve_base(&src, &s, None);
-        frames.push((f.clone(), src, base));
+        let mut fs = s.clone();
+        if fs.auto_crop {
+            match frame::detect(&src, &fs, base) {
+                Some(d) => (fs.crop, fs.straighten) = (d.crop, d.straighten),
+                None => eprintln!("warning: no frame edge found in {}", f.display()),
+            }
+        }
+        frames.push((f.clone(), src, base, fs));
     }
     let roll_base = (roll && s.film_base == FilmBase::Auto).then(|| {
         let mut b = [0.0f32; 3];
@@ -113,12 +127,12 @@ fn convert(args: Vec<String>) -> Result<()> {
         b
     });
     let mut analyses = Vec::new();
-    for (_, src, base) in &frames {
+    for (_, src, base, fs) in &frames {
         let base = roll_base.unwrap_or(*base);
-        let neg = pipeline::prepare_negative(src, &s, base);
+        let neg = pipeline::prepare_negative(src, fs, base);
         analyses.push(pipeline::analyze(
             &neg,
-            &s,
+            fs,
             base,
             pipeline::frame_ev(&src.info),
         ));
@@ -157,8 +171,22 @@ fn convert(args: Vec<String>) -> Result<()> {
             println!("roll outliers excluded from aggregate: {:?}", r.excluded);
         }
     }
-    for ((f, _, _), a) in frames.iter().zip(analyses) {
-        let mut fs = s.clone();
+    if let Some(o) = &out {
+        std::fs::create_dir_all(o)?;
+        ex.output_dir = Some(o.clone());
+    }
+    // Keep film metadata already entered for each scan.
+    let metas: Vec<_> = files
+        .iter()
+        .map(|f| sidecar::load(f).map(|sc| sc.metadata).unwrap_or_default())
+        .collect();
+    let items: Vec<_> = files.iter().map(PathBuf::as_path).zip(&metas).collect();
+    let targets = export::batch_paths(&items, &ex);
+    for ((((f, _, _, fs), a), meta), target) in
+        frames.iter().zip(analyses).zip(&metas).zip(&targets)
+    {
+        let mut fs = fs.clone();
+        fs.use_roll = s.use_roll;
         let wb = roll_data
             .as_ref()
             .and_then(|r| r.auto_wb)
@@ -167,24 +195,21 @@ fn convert(args: Vec<String>) -> Result<()> {
             fs.wb_temp = t;
             fs.wb_tint = n;
         }
-        let mut exs = ex.clone();
-        if let Some(o) = &out {
-            std::fs::create_dir_all(o)?;
-            exs.output_dir = Some(o.clone());
-        }
         let target = export::export_frame(
             f,
             &fs,
             Some(&a),
             roll_data.as_ref(),
-            &Default::default(),
-            &exs,
+            meta,
+            &ex,
+            target,
         )?;
         println!("{} -> {}", f.display(), target.display());
         let sc = Sidecar {
             settings: fs,
             analysis: Some(a),
             roll: roll_data.clone(),
+            metadata: meta.clone(),
             ..Default::default()
         };
         sidecar::save(f, &sc)?;
