@@ -595,71 +595,6 @@ impl NlpApp {
                 ui.add_space(16.0);
 
                 let ex = &mut self.defaults.export;
-                let current = presets.iter().position(|p| p.matches(ex));
-                ui.label(egui::RichText::new("Preset").small().color(theme::MUTED));
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("export_preset")
-                        .width(ui.available_width() - 120.0)
-                        .selected_text(current.map(|k| presets[k].name.as_str()).unwrap_or("Custom"))
-                        .show_ui(ui, |ui| {
-                            for (k, p) in presets.iter().enumerate() {
-                                if k == n_builtin {
-                                    ui.separator();
-                                }
-                                if ui.selectable_label(current == Some(k), &p.name).clicked() {
-                                    p.apply_to(ex);
-                                    save = true;
-                                }
-                            }
-                        });
-                    match (&mut self.preset_draft, current) {
-                        (Some(_), _) => {}
-                        (None, Some(k)) if k >= n_builtin => {
-                            if ui.add(widgets::ghost("Delete")).clicked() {
-                                self.defaults.export_presets.remove(k - n_builtin);
-                                save = true;
-                            }
-                        }
-                        (None, _) => {
-                            if ui.add(widgets::ghost("Save as…")).clicked() {
-                                self.preset_draft = Some(String::new());
-                            }
-                        }
-                    }
-                });
-                let mut close_draft = false;
-                if let Some(draft) = &mut self.preset_draft {
-                    ui.horizontal(|ui| {
-                        let r = ui.add(
-                            egui::TextEdit::singleline(draft)
-                                .hint_text("Preset name")
-                                .desired_width(ui.available_width() - 150.0),
-                        );
-                        if draft.is_empty() && !r.has_focus() {
-                            r.request_focus();
-                        }
-                        let name = draft.trim().to_string();
-                        let ok = !name.is_empty();
-                        if ui.add_enabled(ok, widgets::primary("Save")).clicked()
-                            || (ok && r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                        {
-                            let p = ExportPreset::new(&name, ex);
-                            let list = &mut self.defaults.export_presets;
-                            match list.iter_mut().find(|q| q.name == p.name) {
-                                Some(q) => *q = p,
-                                None => list.push(p),
-                            }
-                            close_draft = true;
-                            save = true;
-                        } else if ui.add(widgets::ghost("Cancel")).clicked() {
-                            close_draft = true;
-                        }
-                    });
-                }
-                if close_draft {
-                    self.preset_draft = None;
-                }
-                ui.add_space(8.0);
                 ui.columns(2, |cols| {
                     save |= widgets::fl_combo(
                         &mut cols[0],
@@ -692,56 +627,6 @@ impl NlpApp {
                     );
                 }
 
-                ui.add_space(6.0);
-                ui.columns(2, |cols| {
-                    let ui = &mut cols[0];
-                    ui.label(egui::RichText::new("Size").small().color(theme::MUTED));
-                    let size_name = |v: u32| match v {
-                        0 => "Full size".to_string(),
-                        3000 => "3000 px (lab M)".to_string(),
-                        6000 => "6000 px (lab L)".to_string(),
-                        v => format!("{v} px"),
-                    };
-                    egui::ComboBox::from_id_salt("export_size")
-                        .width(ui.available_width() - 4.0)
-                        .selected_text(size_name(ex.long_edge))
-                        .show_ui(ui, |ui| {
-                            for v in [0, 2000, 3000, 4500, 6000] {
-                                if ui.selectable_label(ex.long_edge == v, size_name(v)).clicked() {
-                                    ex.long_edge = v;
-                                    save = true;
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text("Long edge of the exported image");
-                    let ui = &mut cols[1];
-                    ui.label(egui::RichText::new("File name").small().color(theme::MUTED))
-                        .on_hover_text(
-                            "Tokens: {name} source name · {suffix} · {n} or {n:03} position in the export · {stock} · {iso} · {date} scan date",
-                        );
-                    save |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut ex.name_template)
-                                .desired_width(ui.available_width() - 4.0),
-                        )
-                        .changed();
-                });
-                let preview = crate::engine::export::file_name(
-                    &first_path,
-                    ex,
-                    &crate::engine::export::NameCtx { n: 1, meta: &first_meta },
-                );
-                ui.label(
-                    egui::RichText::new(if count > 1 {
-                        format!("{preview}, …")
-                    } else {
-                        preview
-                    })
-                    .small()
-                    .color(theme::FAINT),
-                );
-
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new("Destination")
@@ -758,6 +643,129 @@ impl NlpApp {
                         picked_dir = Some(picked);
                     }
                 }
+
+                ui.add_space(10.0);
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("Size, file name and presets").small().color(theme::MUTED),
+                )
+                .id_salt("export_more")
+                .default_open(false)
+                .show(ui, |ui| {
+                    let current = presets.iter().position(|p| p.matches(ex));
+                    ui.label(egui::RichText::new("Preset").small().color(theme::MUTED));
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("export_preset")
+                            .width(ui.available_width() - 120.0)
+                            .selected_text(current.map(|k| presets[k].name.as_str()).unwrap_or("Custom"))
+                            .show_ui(ui, |ui| {
+                                for (k, p) in presets.iter().enumerate() {
+                                    if k == n_builtin {
+                                        ui.separator();
+                                    }
+                                    if ui.selectable_label(current == Some(k), &p.name).clicked() {
+                                        p.apply_to(ex);
+                                        save = true;
+                                    }
+                                }
+                            });
+                        match (&mut self.preset_draft, current) {
+                            (Some(_), _) => {}
+                            (None, Some(k)) if k >= n_builtin => {
+                                if ui.add(widgets::ghost("Delete")).clicked() {
+                                    self.defaults.export_presets.remove(k - n_builtin);
+                                    save = true;
+                                }
+                            }
+                            (None, _) => {
+                                if ui.add(widgets::ghost("Save as…")).clicked() {
+                                    self.preset_draft = Some(String::new());
+                                }
+                            }
+                        }
+                    });
+                    let mut close_draft = false;
+                    if let Some(draft) = &mut self.preset_draft {
+                        ui.horizontal(|ui| {
+                            let r = ui.add(
+                                egui::TextEdit::singleline(draft)
+                                    .hint_text("Preset name")
+                                    .desired_width(ui.available_width() - 150.0),
+                            );
+                            if draft.is_empty() && !r.has_focus() {
+                                r.request_focus();
+                            }
+                            let name = draft.trim().to_string();
+                            let ok = !name.is_empty();
+                            if ui.add_enabled(ok, widgets::primary("Save")).clicked()
+                                || (ok && r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                            {
+                                let p = ExportPreset::new(&name, ex);
+                                let list = &mut self.defaults.export_presets;
+                                match list.iter_mut().find(|q| q.name == p.name) {
+                                    Some(q) => *q = p,
+                                    None => list.push(p),
+                                }
+                                close_draft = true;
+                                save = true;
+                            } else if ui.add(widgets::ghost("Cancel")).clicked() {
+                                close_draft = true;
+                            }
+                        });
+                    }
+                    if close_draft {
+                        self.preset_draft = None;
+                    }
+                    ui.add_space(6.0);
+                    ui.columns(2, |cols| {
+                        let ui = &mut cols[0];
+                        ui.label(egui::RichText::new("Size").small().color(theme::MUTED));
+                        let size_name = |v: u32| match v {
+                            0 => "Full size".to_string(),
+                            3000 => "3000 px (lab M)".to_string(),
+                            6000 => "6000 px (lab L)".to_string(),
+                            v => format!("{v} px"),
+                        };
+                        egui::ComboBox::from_id_salt("export_size")
+                            .width(ui.available_width() - 4.0)
+                            .selected_text(size_name(ex.long_edge))
+                            .show_ui(ui, |ui| {
+                                for v in [0, 2000, 3000, 4500, 6000] {
+                                    if ui.selectable_label(ex.long_edge == v, size_name(v)).clicked() {
+                                        ex.long_edge = v;
+                                        save = true;
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text("Long edge of the exported image");
+                        let ui = &mut cols[1];
+                        ui.label(egui::RichText::new("File name").small().color(theme::MUTED))
+                            .on_hover_text(
+                                "Tokens: {name} source name · {suffix} · {n} or {n:03} position in the export · {stock} · {iso} · {date} scan date",
+                            );
+                        save |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut ex.name_template)
+                                    .desired_width(ui.available_width() - 4.0),
+                            )
+                            .changed();
+                    });
+                    let preview = crate::engine::export::file_name(
+                        &first_path,
+                        ex,
+                        &crate::engine::export::NameCtx { n: 1, meta: &first_meta },
+                    );
+                    ui.label(
+                        egui::RichText::new(if count > 1 {
+                            format!("{preview}, …")
+                        } else {
+                            preview
+                        })
+                        .small()
+                        .color(theme::FAINT),
+                    );
+
+                });
 
                 ui.add_space(22.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
