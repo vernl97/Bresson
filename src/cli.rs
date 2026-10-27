@@ -195,15 +195,7 @@ fn convert(args: Vec<String>) -> Result<()> {
             fs.wb_temp = t;
             fs.wb_tint = n;
         }
-        let target = export::export_frame(
-            f,
-            &fs,
-            Some(&a),
-            roll_data.as_ref(),
-            meta,
-            &ex,
-            target,
-        )?;
+        let target = export::export_frame(f, &fs, Some(&a), roll_data.as_ref(), meta, &ex, target)?;
         println!("{} -> {}", f.display(), target.display());
         let sc = Sidecar {
             settings: fs,

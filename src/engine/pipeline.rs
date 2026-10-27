@@ -20,7 +20,11 @@ const BASE_LEVEL: f32 = 0.97;
 /// Per-channel density above the film base of a prepared negative pixel,
 /// like a lab scanner's densitometer readout.
 pub fn density_above_base(p: [f32; 3]) -> [f32; 3] {
-    p.map(|v| (BASE_LEVEL / color::srgb_decode(v).max(1e-4)).log10().max(0.0))
+    p.map(|v| {
+        (BASE_LEVEL / color::srgb_decode(v).max(1e-4))
+            .log10()
+            .max(0.0)
+    })
 }
 
 /// The prepared negative: encoded MelissaRGB (0..1), i.e. the pixels the

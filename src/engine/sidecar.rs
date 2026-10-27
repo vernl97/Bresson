@@ -298,8 +298,14 @@ mod tests {
         assert_eq!(loaded.version, 1);
 
         let new_path = tmp.join("NLP").join("test.tif.nlp.json");
-        assert!(new_path.exists(), "Migrated sidecar must now exist in NLP/ folder");
-        assert!(!legacy_path.exists(), "Legacy sidecar in root should be removed");
+        assert!(
+            new_path.exists(),
+            "Migrated sidecar must now exist in NLP/ folder"
+        );
+        assert!(
+            !legacy_path.exists(),
+            "Legacy sidecar in root should be removed"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -100,7 +100,13 @@ fn is_border(p: [f32; 3], base: [f32; 3]) -> bool {
 /// are mostly rebate-coloured, flat like real rebate.
 fn line_border(px: &[Px], w: usize, h: usize, horizontal: bool, y: usize) -> bool {
     let n = if horizontal { w } else { h };
-    let at = |x: usize| if horizontal { px[y * w + x] } else { px[x * w + y] };
+    let at = |x: usize| {
+        if horizontal {
+            px[y * w + x]
+        } else {
+            px[x * w + y]
+        }
+    };
     let (a, b) = (n / 4, n * 3 / 4);
     let (mut border, mut rebate, mut sum, mut sum2) = (0usize, 0usize, 0.0f32, 0.0f32);
     let len = (b - a).max(1) as f32;
@@ -133,7 +139,12 @@ fn line_border(px: &[Px], w: usize, h: usize, horizontal: bool, y: usize) -> boo
 /// Insets in percent [left, top, right, bottom].
 fn insets(px: &[Px], w: usize, h: usize) -> Option<[f32; 4]> {
     // (line count, horizontal lines?, scan from the far side?)
-    let sides = [(w, false, false), (h, true, false), (w, false, true), (h, true, true)];
+    let sides = [
+        (w, false, false),
+        (h, true, false),
+        (w, false, true),
+        (h, true, true),
+    ];
     let mut out = [0.0f32; 4];
     for (k, &(n, horizontal, rev)) in sides.iter().enumerate() {
         let line = |i: usize| {
@@ -267,10 +278,19 @@ mod tests {
     /// frame kept.
     fn leftover(src: &SourceImage, d: Detected) -> (f32, f32) {
         let (px, w, h) = decode::geometry(
-            &src.data, src.width, src.height, 0, false, d.straighten, d.crop,
+            &src.data,
+            src.width,
+            src.height,
+            0,
+            false,
+            d.straighten,
+            d.crop,
         );
         let b = px.iter().filter(|p| is_border(**p, BASE)).count();
-        (b as f32 / px.len() as f32, (w * h) as f32 / (src.width * src.height) as f32)
+        (
+            b as f32 / px.len() as f32,
+            (w * h) as f32 / (src.width * src.height) as f32,
+        )
     }
 
     #[test]
@@ -335,7 +355,3 @@ mod tests {
         assert_eq!(detect(&src, &Settings::default(), BASE), None);
     }
 }
-
-
-
-

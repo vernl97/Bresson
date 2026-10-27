@@ -98,8 +98,14 @@ pub fn batch_paths(items: &[(&Path, &FilmMetadata)], ex: &ExportSettings) -> Vec
         .map(|(i, (src, meta))| {
             let p = output_path(src, ex, &NameCtx { n: i + 1, meta });
             let (stem, ext) = (
-                p.file_stem().and_then(|s| s.to_str()).unwrap_or("image").to_string(),
-                p.extension().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("image")
+                    .to_string(),
+                p.extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string(),
             );
             let mut q = p.clone();
             let mut k = 2;
@@ -511,14 +517,21 @@ mod tests {
         assert_eq!(name("{stock}_{n:03}"), "Portra 400_007.jpg");
         assert_eq!(name("roll {n} iso{iso}"), "roll 7 iso400.jpg");
         assert_eq!(name("{name}/{what}"), "raw0070-{what}.jpg");
-        assert_eq!(name("{name"), "{name.jpg", "unterminated tokens stay as typed");
+        assert_eq!(
+            name("{name"),
+            "{name.jpg",
+            "unterminated tokens stay as typed"
+        );
         // Empty tokens fall back to the source name.
         let none = FilmMetadata::default();
         let ex = ExportSettings {
             name_template: "{stock}_".into(),
             ..Default::default()
         };
-        assert_eq!(file_name(src, &ex, &NameCtx { n: 1, meta: &none }), "raw0070.jpg");
+        assert_eq!(
+            file_name(src, &ex, &NameCtx { n: 1, meta: &none }),
+            "raw0070.jpg"
+        );
     }
 
     #[test]
@@ -529,15 +542,27 @@ mod tests {
             output_dir: Some(PathBuf::from("/out")),
             ..Default::default()
         };
-        let (a, b, c) = (Path::new("/s/a.dng"), Path::new("/s/b.dng"), Path::new("/s/c.dng"));
+        let (a, b, c) = (
+            Path::new("/s/a.dng"),
+            Path::new("/s/b.dng"),
+            Path::new("/s/c.dng"),
+        );
         let p = batch_paths(&[(a, &meta), (b, &meta), (c, &meta)], &ex);
-        let names: Vec<_> = p.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
+        let names: Vec<_> = p
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
         assert_eq!(names, ["roll.jpg", "roll-2.jpg", "roll-3.jpg"]);
     }
 
     #[test]
     fn file_date_is_a_calendar_date() {
-        let d = file_date(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml").as_path()).unwrap();
+        let d = file_date(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("Cargo.toml")
+                .as_path(),
+        )
+        .unwrap();
         assert_eq!(d.len(), 10);
         assert!(d.starts_with("20"), "{d}");
     }
