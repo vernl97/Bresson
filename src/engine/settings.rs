@@ -704,7 +704,13 @@ pub mod lab {
             v if v > 0 => format!("+{v}"),
             v => format!("−{}", -v),
         };
-        Some(format!("D{} C{} M{} Y{}", f(c[0]), f(c[1]), f(c[2]), f(c[3])))
+        Some(format!(
+            "D{} C{} M{} Y{}",
+            f(c[0]),
+            f(c[1]),
+            f(c[2]),
+            f(c[3])
+        ))
     }
 }
 
@@ -754,7 +760,7 @@ mod tests {
         assert!(mine.matches(&ex) && !l.matches(&ex));
     }
 
-        #[test]
+    #[test]
     fn lab_keys_step_and_read_out() {
         let mut s = Settings::default();
         assert_eq!(lab::readout(&s), None);

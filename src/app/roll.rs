@@ -96,14 +96,21 @@ impl NlpApp {
             self.toast(format!("Could not save roll info: {e}"), true);
             return;
         }
-        let old = self.roll.info.as_ref().map(|r| r.metadata.clone()).unwrap_or_default();
+        let old = self
+            .roll
+            .info
+            .as_ref()
+            .map(|r| r.metadata.clone())
+            .unwrap_or_default();
         for f in &mut self.frames {
             if f.sc.metadata == FilmMetadata::default() || f.sc.metadata == old {
                 f.sc.metadata = info.metadata.clone();
                 f.dirty_since = Some(self.time);
             }
         }
-        self.roll.cache.insert(dir.to_path_buf(), Some(info.clone()));
+        self.roll
+            .cache
+            .insert(dir.to_path_buf(), Some(info.clone()));
         self.roll.info = Some(info);
     }
 
@@ -168,7 +175,10 @@ impl NlpApp {
                     if ui.add(widgets::primary("Save")).clicked() {
                         save = true;
                     }
-                    if ui.add(widgets::ghost(if d.new { "Skip" } else { "Cancel" })).clicked() {
+                    if ui
+                        .add(widgets::ghost(if d.new { "Skip" } else { "Cancel" }))
+                        .clicked()
+                    {
                         close = true;
                     }
                 });
