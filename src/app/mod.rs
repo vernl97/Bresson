@@ -1236,6 +1236,42 @@ mod ui_tests {
         }
         settle(&mut h, 30.0);
         shot(&mut h, &out, "6_editor_crop");
+        {
+            use egui_kittest::kittest::Queryable;
+            h.get_by_label("Detect").click();
+        }
+        settle(&mut h, 30.0);
+        shot(&mut h, &out, "7_editor_detect_frame");
+        h.key_press(egui::Key::Enter);
+        settle(&mut h, 30.0);
+        for k in [egui::Key::Num4, egui::Key::Num4, egui::Key::Num7, egui::Key::Num9] {
+            h.key_press(k);
+            h.run_steps(2);
+        }
+        settle(&mut h, 30.0);
+        shot(&mut h, &out, "8_editor_lab_keys");
+        h.key_press(egui::Key::J);
+        settle(&mut h, 30.0);
+        h.hover_at(egui::pos2(520.0, 460.0));
+        h.run_steps(3);
+        shot(&mut h, &out, "9_editor_clipping_readout");
+        h.key_press(egui::Key::J);
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::B);
+        settle(&mut h, 30.0);
+        shot(&mut h, &out, "10_editor_split");
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::B);
+        {
+            let app = h.state_mut();
+            let i = app.active.unwrap();
+            app.open_export_dialog(vec![i]);
+        }
+        settle(&mut h, 30.0);
+        shot(&mut h, &out, "11_export_dialog");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        h.key_press(egui::Key::Space);
+        settle(&mut h, 30.0);
+        shot(&mut h, &out, "12_folder_lab_badge");
     }
 
     /// Regression: hovering the sidebars must not make them grow.

@@ -17,6 +17,12 @@ pub const ANALYSIS_SIZE: usize = 600;
 /// Film base is mapped to this linear level after neutralisation.
 const BASE_LEVEL: f32 = 0.97;
 
+/// Per-channel density above the film base of a prepared negative pixel,
+/// like a lab scanner's densitometer readout.
+pub fn density_above_base(p: [f32; 3]) -> [f32; 3] {
+    p.map(|v| (BASE_LEVEL / color::srgb_decode(v).max(1e-4)).log10().max(0.0))
+}
+
 /// The prepared negative: encoded MelissaRGB (0..1), i.e. the pixels the
 /// plugin's tone curves operate on.
 #[derive(Clone)]
@@ -1160,6 +1166,14 @@ mod tests {
             "auto WB {:?}: cast {before} -> {after}",
             (t, n)
         );
+    }
+
+    #[test]
+    fn density_reads_zero_at_the_base() {
+        let base = color::srgb_encode(BASE_LEVEL);
+        assert!(density_above_base([base; 3]).iter().all(|d| d.abs() < 1e-4));
+        let d = density_above_base([color::srgb_encode(BASE_LEVEL / 10.0); 3]);
+        assert!((d[0] - 1.0).abs() < 1e-3, "{d:?}");
     }
 
     #[test]

@@ -104,6 +104,17 @@ pub struct Editor {
     zoom_anim: Option<ZoomAnim>,
     /// The Border buffer slider is held: outline the analysis area.
     border_preview: bool,
+    /// The rendered preview (display sRGB, 0..1) and its size, for the
+    /// pixel readout.
+    px: Vec<[f32; 3]>,
+    px_size: [usize; 2],
+    /// Paint clipped highlights red and blocked shadows blue (J).
+    pub clip_view: bool,
+    clip_tex: Option<egui::TextureHandle>,
+    /// Before/after split view (⇧B), the divider at `split_pos` (0..1).
+    pub split: bool,
+    split_pos: f32,
+    before_tex: Option<egui::TextureHandle>,
 }
 
 impl Editor {
@@ -145,6 +156,13 @@ impl Default for Editor {
             zoom_req: None,
             zoom_anim: None,
             border_preview: false,
+            px: Vec::new(),
+            px_size: [0, 0],
+            clip_view: false,
+            clip_tex: None,
+            split: false,
+            split_pos: 0.5,
+            before_tex: None,
         }
     }
 }
@@ -364,13 +382,25 @@ impl NlpApp {
         self.editor.curves = r.curve_lut().map(|l| l.sample(96)).unwrap_or_default();
         self.editor.uses_table = r.uses_lut_table();
         let img = to_color_image(&px, neg.width, neg.height);
-        match &mut self.editor.tex {
-            Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-            None => {
-                self.editor.tex =
-                    Some(ctx.load_texture("editor-preview", img, egui::TextureOptions::LINEAR))
-            }
+        set_texture(ctx, &mut self.editor.tex, "editor-preview", img);
+        let cropping = self.editor.crop.is_some();
+        if self.editor.clip_view && !self.editor.before && !cropping {
+            let img = clip_image(&px, neg.width, neg.height);
+            set_texture(ctx, &mut self.editor.clip_tex, "editor-clipping", img);
+        } else {
+            self.editor.clip_tex = None;
         }
+        if self.editor.split && !self.editor.before && !cropping {
+            let before = Renderer::new(&s, None, OutputSpace::Srgb)
+                .with_megapixels(mp)
+                .render(neg, scale.min(1.0));
+            let img = to_color_image(&before, neg.width, neg.height);
+            set_texture(ctx, &mut self.editor.before_tex, "editor-before", img);
+        } else {
+            self.editor.before_tex = None;
+        }
+        self.editor.px = px;
+        self.editor.px_size = [neg.width, neg.height];
         self.editor.dirty = use_small;
     }
 
@@ -505,7 +535,7 @@ impl NlpApp {
         let k = ctx.input(|inp| {
             let cmd = inp.modifiers.command;
             [
-                inp.key_pressed(egui::Key::B),
+                inp.key_pressed(egui::Key::B) && !inp.modifiers.shift,
                 cmd && !inp.modifiers.shift && inp.key_pressed(egui::Key::Z),
                 (cmd && inp.modifiers.shift && inp.key_pressed(egui::Key::Z))
                     || (cmd && !mac && inp.key_pressed(egui::Key::Y)),
@@ -518,6 +548,8 @@ impl NlpApp {
                 inp.key_pressed(egui::Key::Minus),
                 inp.key_pressed(egui::Key::Enter),
                 inp.key_pressed(egui::Key::C) && !cmd,
+                inp.key_pressed(egui::Key::B) && inp.modifiers.shift,
+                inp.key_pressed(egui::Key::J) && !cmd,
             ]
         });
         let [
@@ -533,9 +565,21 @@ impl NlpApp {
             minus,
             enter,
             c,
+            shift_b,
+            j,
         ] = k;
         if b {
             self.editor.before = !self.editor.before;
+            self.editor.split = false;
+            self.editor.dirty = true;
+        }
+        if shift_b {
+            self.editor.split = !self.editor.split;
+            self.editor.before = false;
+            self.editor.dirty = true;
+        }
+        if j {
+            self.editor.clip_view = !self.editor.clip_view;
             self.editor.dirty = true;
         }
         if let Some(key) = super::lab_key(ctx).filter(|_| self.editor.crop.is_none()) {
@@ -1648,6 +1692,51 @@ impl NlpApp {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
+        if let Some(t) = self.editor.clip_tex.as_ref().filter(|_| !cropping) {
+            p.image(
+                t.id(),
+                rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        let split = self.editor.before_tex.clone().filter(|_| !cropping);
+        if let Some(t) = &split {
+            let k = self.editor.split_pos;
+            let x = rect.left() + rect.width() * k;
+            let left = Rect::from_min_max(rect.min, pos2(x, rect.bottom()));
+            p.image(
+                t.id(),
+                left,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(k, 1.0)),
+                Color32::WHITE,
+            );
+            let shown = rect.intersect(avail);
+            p.line_segment(
+                [pos2(x, shown.top()), pos2(x, shown.bottom())],
+                Stroke::new(1.5, Color32::WHITE),
+            );
+            let knob = pos2(x, shown.center().y);
+            p.circle_filled(knob, 9.0, Color32::WHITE);
+            p.text(
+                knob,
+                egui::Align2::CENTER_CENTER,
+                "↔",
+                egui::FontId::proportional(11.0),
+                theme::CANVAS,
+            );
+            let handle = Rect::from_center_size(pos2(x, shown.center().y), vec2(24.0, shown.height()));
+            let h = ui.interact(handle, ui.id().with("split_handle"), Sense::drag());
+            if h.hovered() || h.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if h.dragged() {
+                if let Some(pos) = h.interact_pointer_pos() {
+                    self.editor.split_pos =
+                        ((pos.x - rect.left()) / rect.width()).clamp(0.02, 0.98);
+                }
+            }
+        }
 
         if self.editor.border_preview && !cropping {
             // Mirror `pipeline::analysis_buffer`: equal % insets per side.
@@ -1724,8 +1813,28 @@ impl NlpApp {
         if self.editor.before && !cropping {
             pill(&p, pos2(avail.left() + 44.0, avail.top() + 22.0), "Before");
         }
+        if split.is_some() {
+            pill(&p, pos2(avail.left() + 44.0, avail.top() + 22.0), "Before");
+            pill(&p, pos2(avail.right() - 40.0, avail.top() + 22.0), "After");
+        }
+        if self.editor.clip_tex.is_some() && !cropping {
+            pill(
+                &p,
+                pos2(avail.center().x, avail.top() + 22.0),
+                "Clipping · red: blown highlights · blue: blocked shadows · J",
+            );
+        }
         if cropping {
             return;
+        }
+        // Pixel readout: output RGB and the negative's density above base.
+        if let Some(pos) = resp.hover_pos().filter(|p| rect.contains(*p)) {
+            let u = (pos.x - rect.left()) / rect.width();
+            let v = (pos.y - rect.top()) / rect.height();
+            if let Some(text) = self.readout(u, v) {
+                let w = p.layout_no_wrap(text.clone(), theme::medium(12.0), theme::TEXT).size().x;
+                pill(&p, pos2(avail.left() + 16.0 + (w + 22.0) / 2.0, avail.bottom() - 22.0), &text);
+            }
         }
         // Zoom chip: click to toggle between fit and 100 %.
         let full = self
@@ -1938,6 +2047,21 @@ impl NlpApp {
         );
     }
 
+    /// "RGB 231 220 198 · D 0.42 0.51 0.63" at (u, v) of the preview.
+    fn readout(&self, u: f32, v: f32) -> Option<String> {
+        let [w, h] = self.editor.px_size;
+        if self.editor.px.len() != w * h || w == 0 {
+            return None;
+        }
+        let rgb = sample(&self.editor.px, w, h, u, v, 1).map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
+        let mut text = format!("RGB {} {} {}", rgb[0], rgb[1], rgb[2]);
+        if let Some(neg) = &self.editor.neg {
+            let d = pipeline::density_above_base(sample(&neg.data, neg.width, neg.height, u, v, 1));
+            text += &format!("  ·  D {:.2} {:.2} {:.2}", d[0], d[1], d[2]);
+        }
+        Some(text)
+    }
+
     fn do_pick(&mut self, i: usize, pick: Pick, u: f32, v: f32) {
         let before = self.frames[i].sc.settings.clone();
         let mut s = before.clone();
@@ -1989,6 +2113,36 @@ impl NlpApp {
 }
 
 /// Average a (2r+1)² neighbourhood at normalised coordinates.
+fn set_texture(
+    ctx: &egui::Context,
+    slot: &mut Option<egui::TextureHandle>,
+    name: &str,
+    img: egui::ColorImage,
+) {
+    match slot {
+        Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+        None => *slot = Some(ctx.load_texture(name, img, egui::TextureOptions::LINEAR)),
+    }
+}
+
+/// Overlay marking clipped pixels: red where a channel is blown, blue where
+/// every channel is blocked.
+fn clip_image(px: &[[f32; 3]], w: usize, h: usize) -> egui::ColorImage {
+    let pixels = px
+        .iter()
+        .map(|p| {
+            if p.iter().any(|v| *v >= 0.999) {
+                Color32::from_rgb(255, 40, 40)
+            } else if p.iter().all(|v| *v <= 0.002) {
+                Color32::from_rgb(40, 110, 255)
+            } else {
+                Color32::TRANSPARENT
+            }
+        })
+        .collect();
+    egui::ColorImage::new([w, h], pixels)
+}
+
 fn sample(d: &[[f32; 3]], w: usize, h: usize, u: f32, v: f32, r: isize) -> [f32; 3] {
     let cx = (u.clamp(0.0, 1.0) * (w as f32 - 1.0)).round() as isize;
     let cy = (v.clamp(0.0, 1.0) * (h as f32 - 1.0)).round() as isize;
