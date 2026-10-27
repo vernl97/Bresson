@@ -231,6 +231,8 @@ pub struct Settings {
     pub film_base: FilmBase,
     /// Linear camera-space multipliers when `film_base == Sampled`.
     pub film_base_sample: [f32; 3],
+    /// Detect the frame (crop and straighten) when converting an uncropped frame.
+    pub auto_crop: bool,
 
     // ---- Geometry (Lightroom would provide these) ---------------------------
     /// Quarter turns clockwise.
@@ -315,6 +317,7 @@ impl Default for Settings {
             border_buffer: 5.0,
             film_base: FilmBase::Auto,
             film_base_sample: [1.0, 1.0, 1.0],
+            auto_crop: false,
             rotation: 0,
             flip_h: false,
             straighten: 0.0,
@@ -474,6 +477,7 @@ impl Settings {
             self.border_buffer,
             self.film_base,
             self.film_base_sample,
+            self.auto_crop,
             self.use_roll,
         ) = (
             k.source,
@@ -483,6 +487,7 @@ impl Settings {
             k.border_buffer,
             k.film_base,
             k.film_base_sample,
+            k.auto_crop,
             k.use_roll,
         );
         (self.rotation, self.flip_h, self.straighten, self.crop) =
@@ -525,6 +530,8 @@ pub struct ExportSettings {
     pub placement: Placement,
     pub subfolder: String,
     pub suffix: String,
+    /// File name, see `export::file_name` for the tokens.
+    pub name_template: String,
     /// 0 = full resolution.
     pub long_edge: u32,
     pub output_dir: Option<PathBuf>,
@@ -541,9 +548,78 @@ impl Default for ExportSettings {
             placement: Placement::Subfolder,
             subfolder: "Positives".into(),
             suffix: "-positive".into(),
+            name_template: "{name}{suffix}".into(),
             long_edge: 0,
             output_dir: None,
         }
+    }
+}
+
+/// A named set of export settings. The destination is not part of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportPreset {
+    pub name: String,
+    pub export: ExportSettings,
+}
+
+impl ExportPreset {
+    /// Presets that ship with the app: lab-style JPEG sizes and an archive TIFF.
+    pub fn builtin() -> Vec<ExportPreset> {
+        let jpeg = |name: &str, long_edge| ExportPreset {
+            name: name.into(),
+            export: ExportSettings {
+                format: ExportFormat::Jpeg,
+                jpeg_quality: 95,
+                space: OutputSpace::Srgb,
+                long_edge,
+                ..Default::default()
+            },
+        };
+        vec![
+            jpeg("Lab JPEG M (3000 px)", 3000),
+            jpeg("Lab JPEG L (6000 px)", 6000),
+            ExportPreset {
+                name: "Archive TIFF (16-bit ProPhoto)".into(),
+                export: ExportSettings {
+                    format: ExportFormat::Tiff,
+                    sixteen_bit: true,
+                    zip_compression: true,
+                    space: OutputSpace::ProPhoto,
+                    ..Default::default()
+                },
+            },
+        ]
+    }
+
+    fn without_destination(ex: &ExportSettings) -> ExportSettings {
+        let d = ExportSettings::default();
+        ExportSettings {
+            placement: d.placement,
+            subfolder: d.subfolder,
+            output_dir: None,
+            ..ex.clone()
+        }
+    }
+
+    pub fn new(name: &str, ex: &ExportSettings) -> Self {
+        Self {
+            name: name.trim().into(),
+            export: Self::without_destination(ex),
+        }
+    }
+
+    pub fn matches(&self, ex: &ExportSettings) -> bool {
+        Self::without_destination(ex) == self.export
+    }
+
+    /// Apply to `ex`, keeping its destination.
+    pub fn apply_to(&self, ex: &mut ExportSettings) {
+        *ex = ExportSettings {
+            placement: ex.placement,
+            subfolder: ex.subfolder.clone(),
+            output_dir: ex.output_dir.clone(),
+            ..self.export.clone()
+        };
     }
 }
 
@@ -564,6 +640,73 @@ pub struct FilmMetadata {
 }
 
 impl FilmMetadata {}
+
+/// Lab-scanner corrections: the Frontier/Noritsu D·C·M·Y keys, in fixed
+/// steps on top of the existing print exposure and mid-tone colour sliders.
+pub mod lab {
+    use super::Settings;
+
+    /// One density click: 1/6 EV, about 0.05 D.
+    pub const D_STEP: f32 = 1.0 / 6.0;
+    /// One colour click, in mid-tone slider units.
+    pub const C_STEP: f32 = 2.0;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Channel {
+        /// Print density: + is darker.
+        D,
+        C,
+        M,
+        Y,
+    }
+
+    fn value(s: &mut Settings, ch: Channel) -> (&mut f32, f32, f32) {
+        match ch {
+            // Density runs against print exposure (+ EV = lighter).
+            Channel::D => (&mut s.print_exposure, -D_STEP, 5.0),
+            Channel::C => (&mut s.mid_cyan, C_STEP, 75.0),
+            Channel::M => (&mut s.mid_tint, C_STEP, 75.0),
+            Channel::Y => (&mut s.mid_temp, C_STEP, 75.0),
+        }
+    }
+
+    /// Move `ch` by `clicks` steps.
+    pub fn nudge(s: &mut Settings, ch: Channel, clicks: i32) {
+        let (v, step, max) = value(s, ch);
+        *v = (*v + step * clicks as f32).clamp(-max, max);
+    }
+
+    /// Current offsets in clicks: D, C, M, Y.
+    pub fn clicks(s: &Settings) -> [i32; 4] {
+        let mut s = s.clone();
+        [Channel::D, Channel::C, Channel::M, Channel::Y].map(|ch| {
+            let (v, step, _) = value(&mut s, ch);
+            (*v / step).round() as i32
+        })
+    }
+
+    /// Zero density and the mid-tone colour.
+    pub fn reset(s: &mut Settings) {
+        s.print_exposure = 0.0;
+        s.mid_cyan = 0.0;
+        s.mid_tint = 0.0;
+        s.mid_temp = 0.0;
+    }
+
+    /// "D+2 C−1 M0 Y+1", or `None` when every offset is zero.
+    pub fn readout(s: &Settings) -> Option<String> {
+        let c = clicks(s);
+        if c == [0; 4] {
+            return None;
+        }
+        let f = |v: i32| match v {
+            0 => "0".to_string(),
+            v if v > 0 => format!("+{v}"),
+            v => format!("−{}", -v),
+        };
+        Some(format!("D{} C{} M{} Y{}", f(c[0]), f(c[1]), f(c[2]), f(c[3])))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -590,6 +733,45 @@ mod tests {
         assert_eq!(dst.brightness, 12.0);
         assert_eq!(dst.analysis_key(), before);
         assert_eq!(dst.crop, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn export_presets_keep_the_destination() {
+        let mut ex = ExportSettings {
+            output_dir: Some("/out".into()),
+            ..Default::default()
+        };
+        let l = &ExportPreset::builtin()[1];
+        assert!(!l.matches(&ex));
+        l.apply_to(&mut ex);
+        assert!(l.matches(&ex));
+        assert_eq!(ex.long_edge, 6000);
+        assert_eq!(ex.output_dir, Some("/out".into()));
+        ex.jpeg_quality = 80;
+        let mine = ExportPreset::new(" Web ", &ex);
+        assert_eq!(mine.name, "Web");
+        assert_eq!(mine.export.output_dir, None);
+        assert!(mine.matches(&ex) && !l.matches(&ex));
+    }
+
+        #[test]
+    fn lab_keys_step_and_read_out() {
+        let mut s = Settings::default();
+        assert_eq!(lab::readout(&s), None);
+        lab::nudge(&mut s, lab::Channel::D, 2);
+        lab::nudge(&mut s, lab::Channel::C, -1);
+        lab::nudge(&mut s, lab::Channel::Y, 3);
+        assert!(s.print_exposure < 0.0, "denser prints are darker");
+        assert_eq!(lab::clicks(&s), [2, -1, 0, 3]);
+        assert_eq!(lab::readout(&s).unwrap(), "D+2 C−1 M0 Y+3");
+        let key = s.analysis_key();
+        lab::reset(&mut s);
+        assert_eq!(lab::readout(&s), None);
+        assert_eq!(s.analysis_key(), key);
+        for _ in 0..100 {
+            lab::nudge(&mut s, lab::Channel::M, 1);
+        }
+        assert_eq!(s.mid_tint, 75.0);
     }
 
     #[test]

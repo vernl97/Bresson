@@ -18,7 +18,101 @@ use super::sidecar::RollData;
 
 pub const SOFTWARE: &str = concat!("NLP Studio ", env!("CARGO_PKG_VERSION"));
 
-pub fn output_path(src: &Path, ex: &ExportSettings) -> PathBuf {
+/// One frame of an export batch, for the name template.
+pub struct NameCtx<'a> {
+    /// 1-based position in the batch.
+    pub n: usize,
+    pub meta: &'a FilmMetadata,
+}
+
+/// Output file name from `ex.name_template`. Tokens: `{name}` (source file
+/// stem), `{suffix}`, `{n}` or `{n:03}` (position in the batch), `{stock}`,
+/// `{iso}` and `{date}` (the scan's file date, YYYY-MM-DD). Unknown tokens
+/// stay as typed.
+pub fn file_name(src: &Path, ex: &ExportSettings, ctx: &NameCtx) -> String {
+    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+    let mut out = String::new();
+    let mut rest = ex.name_template.as_str();
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(len) = rest[open..].find('}') else {
+            break;
+        };
+        let token = &rest[open + 1..open + len];
+        match token {
+            "name" => out.push_str(stem),
+            "suffix" => out.push_str(&ex.suffix),
+            "stock" => out.push_str(ctx.meta.film_stock.trim()),
+            "iso" => out.push_str(ctx.meta.film_iso.trim()),
+            "date" => out.push_str(&file_date(src).unwrap_or_default()),
+            "n" => out.push_str(&ctx.n.to_string()),
+            t => match t.strip_prefix("n:").and_then(|w| w.parse::<usize>().ok()) {
+                Some(w) => out.push_str(&format!("{:0w$}", ctx.n)),
+                None => out.push_str(&rest[open..=open + len]),
+            },
+        }
+        rest = &rest[open + len + 1..];
+    }
+    out.push_str(rest);
+    let out: String = out
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    let out = out.trim_matches(|c: char| c.is_whitespace() || c == '_' || c == '-' || c == '.');
+    let name = if out.is_empty() { stem } else { out };
+    let ext = match ex.format {
+        ExportFormat::Tiff => "tif",
+        ExportFormat::Jpeg => "jpg",
+    };
+    format!("{name}.{ext}")
+}
+
+/// The source file's modification date (the scan date), YYYY-MM-DD.
+fn file_date(src: &Path) -> Option<String> {
+    let t = std::fs::metadata(src).ok()?.modified().ok()?;
+    let days = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64 / 86_400;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
+/// Output paths for an export batch. When the template gives two frames the
+/// same name, the later ones get `-2`, `-3`, … so none overwrites another.
+pub fn batch_paths(items: &[(&Path, &FilmMetadata)], ex: &ExportSettings) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, (src, meta))| {
+            let p = output_path(src, ex, &NameCtx { n: i + 1, meta });
+            let (stem, ext) = (
+                p.file_stem().and_then(|s| s.to_str()).unwrap_or("image").to_string(),
+                p.extension().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+            );
+            let mut q = p.clone();
+            let mut k = 2;
+            while !seen.insert(q.clone()) {
+                q = p.with_file_name(format!("{stem}-{k}.{ext}"));
+                k += 1;
+            }
+            q
+        })
+        .collect()
+}
+
+pub fn output_path(src: &Path, ex: &ExportSettings, ctx: &NameCtx) -> PathBuf {
     let dir = if let Some(ref out_dir) = ex.output_dir {
         if !out_dir.as_os_str().is_empty() {
             out_dir.clone()
@@ -28,12 +122,7 @@ pub fn output_path(src: &Path, ex: &ExportSettings) -> PathBuf {
     } else {
         default_dir(src, ex)
     };
-    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
-    let ext = match ex.format {
-        ExportFormat::Tiff => "tif",
-        ExportFormat::Jpeg => "jpg",
-    };
-    dir.join(format!("{stem}{}.{ext}", ex.suffix))
+    dir.join(file_name(src, ex, ctx))
 }
 
 fn default_dir(src: &Path, ex: &ExportSettings) -> PathBuf {
@@ -48,7 +137,8 @@ fn default_dir(src: &Path, ex: &ExportSettings) -> PathBuf {
     }
 }
 
-/// Render a frame at full resolution and write the positive copy.
+/// Render a frame at full resolution and write the positive copy to `out`
+/// (`output_path` / `batch_paths`).
 pub fn export_frame(
     src_path: &Path,
     s: &Settings,
@@ -56,6 +146,7 @@ pub fn export_frame(
     roll: Option<&RollData>,
     meta: &FilmMetadata,
     ex: &ExportSettings,
+    out: &Path,
 ) -> Result<PathBuf> {
     let src = decode::load(src_path, None)?;
     let base = analysis
@@ -76,7 +167,7 @@ pub fn export_frame(
     let mp = (src.info.full_width * src.info.full_height) as f32 / 1e6;
     let r = Renderer::new(s, origins.as_ref(), ex.space).with_megapixels(mp);
     let px = r.render(&neg, scale);
-    let out = output_path(src_path, ex);
+    let out = out.to_path_buf();
     if let Some(p) = out.parent() {
         std::fs::create_dir_all(p).with_context(|| format!("create {}", p.display()))?;
     }
@@ -401,6 +492,57 @@ mod tests {
     }
 
     #[test]
+    fn name_template_tokens() {
+        let src = Path::new("/scans/roll7/raw0070.dng");
+        let meta = FilmMetadata {
+            film_stock: "Portra 400".into(),
+            film_iso: "400".into(),
+            ..Default::default()
+        };
+        let ctx = NameCtx { n: 7, meta: &meta };
+        let name = |t: &str| {
+            let ex = ExportSettings {
+                name_template: t.into(),
+                ..Default::default()
+            };
+            file_name(src, &ex, &ctx)
+        };
+        assert_eq!(name("{name}{suffix}"), "raw0070-positive.jpg");
+        assert_eq!(name("{stock}_{n:03}"), "Portra 400_007.jpg");
+        assert_eq!(name("roll {n} iso{iso}"), "roll 7 iso400.jpg");
+        assert_eq!(name("{name}/{what}"), "raw0070-{what}.jpg");
+        assert_eq!(name("{name"), "{name.jpg", "unterminated tokens stay as typed");
+        // Empty tokens fall back to the source name.
+        let none = FilmMetadata::default();
+        let ex = ExportSettings {
+            name_template: "{stock}_".into(),
+            ..Default::default()
+        };
+        assert_eq!(file_name(src, &ex, &NameCtx { n: 1, meta: &none }), "raw0070.jpg");
+    }
+
+    #[test]
+    fn batch_names_never_collide() {
+        let meta = FilmMetadata::default();
+        let ex = ExportSettings {
+            name_template: "roll".into(),
+            output_dir: Some(PathBuf::from("/out")),
+            ..Default::default()
+        };
+        let (a, b, c) = (Path::new("/s/a.dng"), Path::new("/s/b.dng"), Path::new("/s/c.dng"));
+        let p = batch_paths(&[(a, &meta), (b, &meta), (c, &meta)], &ex);
+        let names: Vec<_> = p.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
+        assert_eq!(names, ["roll.jpg", "roll-2.jpg", "roll-3.jpg"]);
+    }
+
+    #[test]
+    fn file_date_is_a_calendar_date() {
+        let d = file_date(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml").as_path()).unwrap();
+        assert_eq!(d.len(), 10);
+        assert!(d.starts_with("20"), "{d}");
+    }
+
+    #[test]
     fn output_path_uses_custom_output_dir() {
         let src = Path::new("/path/to/scans/test-01.nef");
         let mut ex = ExportSettings::default();
@@ -408,7 +550,8 @@ mod tests {
         ex.suffix = "-positive".into();
         ex.output_dir = Some(PathBuf::from("/Users/abe/Pictures/ExportDir"));
 
-        let p = output_path(src, &ex);
+        let meta = FilmMetadata::default();
+        let p = output_path(src, &ex, &NameCtx { n: 1, meta: &meta });
         assert_eq!(
             p,
             PathBuf::from("/Users/abe/Pictures/ExportDir/test-01-positive.jpg")
@@ -425,7 +568,8 @@ mod tests {
         ex.suffix = "-positive".into();
         ex.output_dir = None;
 
-        let p = output_path(src, &ex);
+        let meta = FilmMetadata::default();
+        let p = output_path(src, &ex, &NameCtx { n: 1, meta: &meta });
         assert_eq!(
             p,
             PathBuf::from("/path/to/scans/Positives/test-01-positive.tif")

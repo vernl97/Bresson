@@ -248,6 +248,40 @@ pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2) {
             ),
         ));
     }
+    // Clipping warnings: a corner triangle in the clipped channels' colour
+    // when more than 0.1 % of the pixels sit at 0 or 255.
+    let total = h[0].iter().sum::<u32>().max(1) as f32;
+    for (end, left) in [(0usize, true), (255, false)] {
+        let mut col = [0u8; 3];
+        for c in 0..3 {
+            if h[c][end] as f32 / total > 0.001 {
+                col[c] = 255;
+            }
+        }
+        if col == [0; 3] {
+            continue;
+        }
+        let fill = if col == [255; 3] {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(col[0].max(60), col[1].max(60), col[2].max(60))
+        };
+        let (x0, dx) = if left {
+            (rect.left() + 3.0, 7.0)
+        } else {
+            (rect.right() - 3.0, -7.0)
+        };
+        let y0 = rect.top() + 3.0;
+        p.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(x0, y0),
+                egui::pos2(x0 + dx, y0),
+                egui::pos2(x0, y0 + 7.0),
+            ],
+            fill,
+            egui::Stroke::NONE,
+        ));
+    }
 }
 
 /// Plot the three channel curves (x = negative input, y = positive output).
@@ -572,7 +606,28 @@ pub fn fl_slider_origin(
     tip: &str,
     gradient: Option<(Color32, Color32)>,
 ) -> bool {
+    fl_slider_active(
+        ui, label, v, range, default, origin, decimals, tip, gradient,
+    )
+    .0
+}
+
+/// `fl_slider_origin` that also reports whether the slider is being held
+/// (track drag or value drag): `(changed, active)`.
+#[allow(clippy::too_many_arguments)]
+pub fn fl_slider_active(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    origin: Option<f32>,
+    decimals: usize,
+    tip: &str,
+    gradient: Option<(Color32, Color32)>,
+) -> (bool, bool) {
     let mut changed = false;
+    let mut active = false;
     let (lo, hi) = (*range.start(), *range.end());
     let modified = (*v - default).abs() > 1e-6;
     ui.horizontal(|ui| {
@@ -614,9 +669,11 @@ pub fn fl_slider_origin(
                 .speed((hi - lo) as f64 / 400.0)
                 .max_decimals(decimals)
                 .custom_formatter(fmt);
-            if ui.add(dv.update_while_editing(false)).changed() {
+            let r = ui.add(dv.update_while_editing(false));
+            if r.changed() {
                 changed = true;
             }
+            active |= r.dragged() || r.is_pointer_button_down_on();
         });
     });
     let w = ui.available_width() - 6.0;
@@ -677,7 +734,10 @@ pub fn fl_slider_origin(
         egui::Stroke::new(2.0, theme::PANEL),
     );
     ui.add_space(4.0);
-    changed
+    (
+        changed,
+        active || resp.dragged() || resp.is_pointer_button_down_on(),
+    )
 }
 
 pub fn fl_slider(

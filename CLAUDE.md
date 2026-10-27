@@ -37,8 +37,9 @@ NLP_UI_TEST_DIR=<scans> NLP_UI_OUT=<dir> cargo test --release ui_screens -- --ig
 Key data types live in `settings.rs`: `Settings` holds the per-image edit state, `ExportSettings`, `FilmMetadata` and `AnalysisKey`. `AnalysisKey` is the subset of settings the analysis depends on. If you change one of those fields, the frame needs re-analysis ("Convert"). Any other edit only rebuilds the `Renderer`. A new setting that affects analysis must go into `AnalysisKey`.
 
 Persistence (`sidecar.rs`):
-- `<image>.nlp.json` next to each scan holds settings, analysis and roll data.
-- App defaults and last folder: `dirs::config_dir()/nlp-studio/defaults.json`.
+- `<image>.nlp.json` in the `NLP/` subfolder of each scan folder holds settings, analysis and roll data.
+- `NLP/roll.json` holds the roll info (`RollInfo`: name, date, film metadata, notes). It is asked for the first time a folder is opened (`app/roll.rs`), and frames without their own film details inherit it.
+- App defaults, last folder and the Projects list (`projects`): `dirs::config_dir()/nlp-studio/defaults.json`.
 - Decoded proxy cache: `dirs::cache_dir()/nlp-studio/proxies/`, keyed by path, size and mtime.
 
 New `Settings` fields need `#[serde(default)]` compatibility so existing sidecars still load.

@@ -10,6 +10,7 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::decode::{self, SourceImage, SourceInfo};
+use crate::engine::frame::{self, Detected};
 use crate::engine::pipeline::{self, Analysis};
 use crate::engine::settings::Settings;
 use crate::engine::sidecar::{self, RollData};
@@ -29,13 +30,20 @@ pub enum JobResult {
         result: Result<Arc<SourceImage>, String>,
     },
     Converted {
-        frames: Vec<(PathBuf, Arc<SourceImage>, Analysis)>,
+        /// The frame geometry, for frames converted with auto-crop.
+        frames: Vec<(PathBuf, Arc<SourceImage>, Analysis, Option<Detected>)>,
         roll: Option<RollData>,
         errors: Vec<String>,
     },
     Exported {
         path: PathBuf,
         result: Result<PathBuf, String>,
+    },
+    /// The roll's frames differ by more than 1 EV in their exposure
+    /// metadata; ask before converting without it (`L22_1`).
+    ExposureVariance {
+        items: Vec<ConvertItem>,
+        spread: f64,
     },
     Message(String),
 }
@@ -89,7 +97,7 @@ struct ProxyHeader {
     info: SourceInfo,
 }
 
-const MAGIC: &[u8; 8] = b"NLPPRX02";
+const MAGIC: &[u8; 8] = b"NLPPRX03";
 
 fn read_cache(p: &Path) -> Option<SourceImage> {
     let mut f = std::fs::File::open(p).ok()?;
@@ -162,14 +170,24 @@ pub fn load_proxy(path: &Path) -> anyhow::Result<SourceImage> {
 
 // ---- conversion ------------------------------------------------------------------
 
+/// Frame detection for a frame converted with `auto_crop` that has no crop
+/// or straighten of its own yet.
+pub fn auto_crop(src: &SourceImage, s: &Settings) -> Option<Detected> {
+    if !s.auto_crop || s.crop != [0.0; 4] || s.straighten != 0.0 {
+        return None;
+    }
+    frame::detect(src, s, pipeline::resolve_base(src, s, None))
+}
+
 pub struct ConvertItem {
     pub path: PathBuf,
     pub proxy: Option<Arc<SourceImage>>,
     pub settings: Settings,
 }
 
-/// Analyse frames individually or as a roll.
-pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
+/// Analyse frames individually or as a roll. `use_exposure` matches the
+/// roll's frames by their EXIF exposure (`commonEV`).
+pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> JobResult {
     use rayon::prelude::*;
     let loaded: Vec<Result<(PathBuf, Arc<SourceImage>, Settings), String>> = items
         .into_par_iter()
@@ -184,7 +202,7 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
         })
         .collect();
     let mut errors = Vec::new();
-    let ok: Vec<(PathBuf, Arc<SourceImage>, Settings)> = loaded
+    let mut ok: Vec<(PathBuf, Arc<SourceImage>, Settings)> = loaded
         .into_iter()
         .filter_map(|r| r.map_err(|e| errors.push(e)).ok())
         .collect();
@@ -195,6 +213,21 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
             errors,
         };
     }
+    // Crop before analysing, so the analysis sees only the image.
+    let detected: Vec<Option<Detected>> = ok
+        .par_iter_mut()
+        .map(|(_, src, s)| {
+            if let Some(found) = auto_crop(src, s) {
+                (s.crop, s.straighten) = (found.crop, found.straighten);
+            }
+            // Also report geometry detected by an earlier pass (the exposure
+            // variance prompt re-runs the conversion with it).
+            s.auto_crop.then_some(Detected {
+                crop: s.crop,
+                straighten: s.straighten,
+            })
+        })
+        .collect();
     // `createRoll` only runs for more than one frame.
     let as_roll = as_roll && ok.len() > 1;
     let bases: Vec<[f32; 3]> = ok
@@ -220,11 +253,28 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
                 *base
             };
             let neg = pipeline::prepare_negative(src, s, base);
-            pipeline::analyze(&neg, s, base)
+            pipeline::analyze(&neg, s, base, pipeline::frame_ev(&src.info))
         })
         .collect();
+    let common_ev = (as_roll && use_exposure)
+        .then(|| pipeline::common_ev(&analyses))
+        .flatten();
+    if let Some(c) = common_ev {
+        let spread = pipeline::ev_spread(&analyses, c);
+        if spread > 1.0 {
+            let items = ok
+                .into_iter()
+                .map(|(path, src, settings)| ConvertItem {
+                    path,
+                    proxy: Some(src),
+                    settings,
+                })
+                .collect();
+            return JobResult::ExposureVariance { items, spread };
+        }
+    }
     let roll = as_roll.then(|| {
-        let (agg, excluded) = pipeline::aggregate_roll(&analyses);
+        let (agg, excluded) = pipeline::aggregate_roll(&analyses, common_ev);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -232,6 +282,7 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
         RollData {
             auto_wb: Some(agg.auto_wb),
             multipliers: Some(agg.multipliers),
+            common_ev: agg.common_ev,
             id: format!("roll-{stamp}"),
             origins: agg.origins,
             base: roll_base.unwrap(),
@@ -251,7 +302,8 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool) -> JobResult {
     let frames = ok
         .into_iter()
         .zip(analyses)
-        .map(|((p, src, _), a)| (p, src, a))
+        .zip(detected)
+        .map(|(((p, src, _), a), d)| (p, src, a, d))
         .collect();
     JobResult::Converted {
         frames,

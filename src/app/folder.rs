@@ -30,6 +30,7 @@ enum CellAction {
     Copy,
     Paste,
     Unconvert,
+    DetectFrame,
 }
 
 impl NlpApp {
@@ -37,10 +38,21 @@ impl NlpApp {
         self.selected.iter().copied().collect()
     }
 
-    /// Start screen shown before anything is opened.
+    /// Save and close the open folder, then show the Projects (rolls) list.
+    fn close_to_projects(&mut self) {
+        self.save_all();
+        self.frames.clear();
+        self.selected.clear();
+        self.active = None;
+        self.anchor = None;
+        self.single_mode = false;
+        self.editor = super::editor::Editor::default();
+        self.show_projects();
+    }
+
+    /// Start screen shown when there are no projects yet.
     fn welcome_ui(&mut self, ui: &mut egui::Ui) {
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
-        let last = self.defaults.last_folder.clone().filter(|p| p.is_dir());
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG))
             .show(ui, |ui| {
@@ -113,25 +125,6 @@ impl NlpApp {
                     }
 
                     ui.add_space(18.0);
-                    if let Some(dir) = last {
-                        let name = dir
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| dir.display().to_string());
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(format!("Reopen {name}")).color(theme::ACCENT),
-                                )
-                                .frame(false),
-                            )
-                            .on_hover_text(dir.display().to_string())
-                            .clicked()
-                        {
-                            self.open_folder(&dir);
-                        }
-                    }
-                    ui.add_space(6.0);
                     ui.label(
                         RichText::new("Camera RAW · TIFF · JPEG · PNG")
                             .small()
@@ -143,13 +136,19 @@ impl NlpApp {
 
     pub fn folder_ui(&mut self, ui: &mut egui::Ui) {
         if self.frames.is_empty() {
-            self.welcome_ui(ui);
+            if self.roll.projects_open && !self.defaults.projects.is_empty() {
+                self.projects_ui(ui);
+            } else {
+                self.welcome_ui(ui);
+            }
             return;
         }
         let ctx = ui.ctx().clone();
         self.folder_shortcuts(&ctx);
         let cmd = egui::Modifiers::COMMAND;
         let export_key = widgets::shortcut(&ctx, cmd, egui::Key::E);
+        let select_key = widgets::shortcut(&ctx, cmd, egui::Key::A);
+        let paste_key = widgets::shortcut(&ctx, cmd, egui::Key::V);
         egui::Panel::top("folder_top")
             .exact_size(44.0)
             .frame(
@@ -160,23 +159,72 @@ impl NlpApp {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    let r = icon_button(ui, Icon::Folder, "Open…", false, true);
+                    // Breadcrumb: Rolls / <roll name>.
+                    let back = icon_button(ui, Icon::Back, "Back to all rolls", false, true);
+                    let rolls = ui
+                        .add(
+                            egui::Label::new(RichText::new("Rolls").color(theme::MUTED))
+                                .sense(Sense::click()),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if back.clicked() || rolls.clicked() {
+                        self.close_to_projects();
+                    }
+                    if let Some(f) = self.folder.clone() {
+                        ui.label(RichText::new("/").color(theme::FAINT));
+                        let name = f
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| f.display().to_string());
+                        let label = egui::Label::new(RichText::new(name).font(theme::medium(13.5)))
+                            .truncate();
+                        if self.single_mode {
+                            ui.add(label).on_hover_text(f.display().to_string());
+                        } else if ui
+                            .add(label.sense(Sense::click()))
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(format!(
+                                "{}\nClick for roll info: film, camera, notes",
+                                f.display()
+                            ))
+                            .clicked()
+                        {
+                            self.open_roll_dialog(&f, false);
+                        }
+                    }
+                    ui.add_space(2.0);
+                    let r = icon_button(ui, Icon::More, "More", false, true);
                     egui::Popup::menu(&r).show(|ui| {
+                        let key = |k: &str| RichText::new(k.to_owned()).color(theme::FAINT);
                         if ui.button("Open folder…").clicked() {
                             self.choose_folder();
                         }
                         if ui.button("Open images…").clicked() {
                             self.choose_files();
                         }
+                        ui.separator();
+                        if !self.single_mode {
+                            if let Some(f) = self.folder.clone() {
+                                if ui.button("Roll info…").clicked() {
+                                    self.open_roll_dialog(&f, false);
+                                }
+                            }
+                        }
+                        if ui
+                            .add(egui::Button::new("Select all").shortcut_text(key(&select_key)))
+                            .clicked()
+                        {
+                            self.selected = (0..self.frames.len()).collect();
+                        }
+                        let paste = egui::Button::new("Paste settings").shortcut_text(key(&paste_key));
+                        if ui
+                            .add_enabled(self.clipboard.is_some() && !self.selected.is_empty(), paste)
+                            .clicked()
+                        {
+                            self.paste_settings();
+                        }
                     });
-                    if let Some(f) = &self.folder {
-                        let name = f
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| f.display().to_string());
-                        ui.label(RichText::new(name).font(theme::medium(13.5)))
-                            .on_hover_text(f.display().to_string());
-                    }
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let n = self.selected.len();
                         if n > 0 {
@@ -187,16 +235,31 @@ impl NlpApp {
                             {
                                 self.open_export_dialog(self.sel_vec());
                             }
-                            if n >= 2
-                                && ui
-                                    .add(widgets::ghost("Convert as roll"))
+                            // Split Convert button: main action + ▾ for roll mode.
+                            ui.spacing_mut().item_spacing.x = 1.0;
+                            let more = ui
+                                .add(widgets::ghost("").min_size(vec2(22.0, 28.0)))
+                                .on_hover_text("Convert options");
+                            let c = more.rect.center();
+                            ui.painter().line(
+                                vec![pos2(c.x - 4.0, c.y - 2.0), pos2(c.x, c.y + 2.0), pos2(c.x + 4.0, c.y - 2.0)],
+                                egui::Stroke::new(1.5, theme::MUTED),
+                            );
+                            egui::Popup::menu(&more).show(|ui| {
+                                if ui.button("Convert each frame").clicked() {
+                                    self.open_convert_dialog(self.sel_vec(), false);
+                                }
+                                if ui
+                                    .add_enabled(n >= 2, egui::Button::new("Convert as roll"))
                                     .on_hover_text(
                                         "Analyse the selection together for one consistent roll balance",
                                     )
+                                    .on_disabled_hover_text("Select two or more frames")
                                     .clicked()
-                            {
-                                self.open_convert_dialog(self.sel_vec(), true);
-                            }
+                                {
+                                    self.open_convert_dialog(self.sel_vec(), true);
+                                }
+                            });
                             if ui
                                 .add(widgets::ghost("Convert"))
                                 .on_hover_text("Analyse each selected frame on its own")
@@ -204,17 +267,29 @@ impl NlpApp {
                             {
                                 self.open_convert_dialog(self.sel_vec(), false);
                             }
-                        }
-                        if n == 0 {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("Clear").small().color(theme::MUTED))
+                                        .frame(false),
+                                )
+                                .on_hover_text("Clear selection (Esc)")
+                                .clicked()
+                            {
+                                self.selected.clear();
+                            }
                             ui.label(
-                                RichText::new("Select frames to convert or export · double-click to edit")
-                                    .small()
-                                    .color(theme::FAINT),
-                            );
+                                RichText::new(format!("{n} selected")).small().color(theme::MUTED),
+                            ).on_hover_text(super::LAB_KEYS_HELP);
                         }
+                        // Fixed slot so the buttons don't shift when jobs start/finish.
+                        ui.add_space(4.0);
+                        let (slot, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                         if self.jobs.busy() > 0 {
-                            ui.add_space(4.0);
-                            ui.add(egui::Spinner::new().size(14.0).color(theme::MUTED));
+                            ui.put(slot, egui::Spinner::new().size(14.0).color(theme::MUTED));
                         }
                     });
                 });
@@ -230,18 +305,27 @@ impl NlpApp {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let conv = self.frames.iter().filter(|f| f.sc.is_converted()).count();
-                    let mut status = format!("{} frames · {} converted", self.frames.len(), conv);
-                    if !self.selected.is_empty() {
-                        status += &format!(" · {} selected", self.selected.len());
-                    }
+                    let status = format!("{} frames · {} converted", self.frames.len(), conv);
                     ui.label(RichText::new(status).small().color(theme::MUTED));
+                    if self.selected.is_empty() {
+                        ui.label(
+                            RichText::new("· Click to select · double-click to edit")
+                                .small()
+                                .color(theme::FAINT),
+                        );
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
                         ui.spacing_mut().slider_width = 90.0;
+                        let tiny =
+                            |t: &str| RichText::new(t.to_owned()).small().color(theme::FAINT);
+                        ui.label(tiny("Large"));
                         ui.add(
                             egui::Slider::new(&mut self.thumb_size, 110.0..=340.0)
                                 .show_value(false),
                         )
                         .on_hover_text("Thumbnail size");
+                        ui.label(tiny("Small"));
                         if self.export_total > 0 && self.export_done < self.export_total {
                             ui.add_space(12.0);
                             ui.add(
@@ -308,6 +392,37 @@ impl NlpApp {
         if export {
             self.open_export_dialog(self.sel_vec());
         }
+        if let Some(key) = super::lab_key(ctx).filter(|_| self.export_targets.is_none()) {
+            let sel = self.sel_vec();
+            let n = sel.iter().filter(|&&i| self.apply_lab_key(i, key)).count();
+            if n < sel.len() {
+                self.toast("Only converted frames can be corrected", false);
+            }
+        }
+    }
+
+    /// Crop and straighten each frame to its detected frame.
+    pub fn detect_frames(&mut self, idx: &[usize]) {
+        let mut missed = 0;
+        for &i in idx {
+            let f = &self.frames[i];
+            let Some(src) = f.proxy() else {
+                missed += 1;
+                continue;
+            };
+            match crate::engine::frame::detect(&src, &f.sc.settings, f.base_for(&src)) {
+                Some(d) => {
+                    let s = &mut self.frames[i].sc.settings;
+                    (s.crop, s.straighten) = (d.crop, d.straighten);
+                    self.mark_changed(i);
+                }
+                None => missed += 1,
+            }
+        }
+        self.editor.invalidate();
+        if missed > 0 {
+            self.toast(format!("No frame edge found in {missed} frame(s)"), false);
+        }
     }
 
     pub fn copy_settings(&mut self) {
@@ -353,6 +468,7 @@ impl NlpApp {
         let mut clicked: Option<(usize, egui::Modifiers)> = None;
         let mut double: Option<usize> = None;
         let mut ctx_action: Option<(usize, CellAction)> = None;
+        let mut bg_click = false;
         let multi = self.selected.len() >= 2;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -456,6 +572,19 @@ impl NlpApp {
                         if f.sc.is_converted() {
                             p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::OK);
                             x -= 12.0;
+                            if let Some(r) = lab::readout(&f.sc.settings) {
+                                let g =
+                                    p.layout_no_wrap(r, egui::FontId::monospace(9.5), theme::MUTED);
+                                let sz = g.size();
+                                let r = egui::Rect::from_min_size(
+                                    pos2(x - sz.x, row_y - sz.y / 2.0),
+                                    sz,
+                                );
+                                ui.interact(r, ui.id().with(("lab_readout", i)), Sense::hover())
+                                    .on_hover_text(super::LAB_KEYS_HELP);
+                                p.galley(r.min, g, theme::MUTED);
+                                x -= sz.x + 6.0;
+                            }
                         }
                         let name_x = rect.left() + 6.0;
                         let mut job = egui::text::LayoutJob::simple_singleline(
@@ -492,6 +621,8 @@ impl NlpApp {
                             }
                             item(ui, "Export…", &keys[1], CellAction::Export, true);
                             ui.separator();
+                            item(ui, "Detect frame", "", CellAction::DetectFrame, true);
+                            ui.separator();
                             item(ui, "Copy settings", &keys[2], CellAction::Copy, true);
                             item(ui, "Paste settings", &keys[3], CellAction::Paste, has_clip);
                             ui.separator();
@@ -499,7 +630,15 @@ impl NlpApp {
                         });
                     }
                 });
+                // Clicking empty space below the grid clears the selection.
+                let rest = ui.available_rect_before_wrap();
+                if rest.height() > 0.0 && ui.allocate_rect(rest, Sense::click()).clicked() {
+                    bg_click = true;
+                }
             });
+        if bg_click && clicked.is_none() {
+            self.selected.clear();
+        }
         if let Some((i, m)) = clicked {
             if m.shift {
                 let a = self.anchor.unwrap_or(i);
@@ -537,6 +676,7 @@ impl NlpApp {
                 CellAction::Copy => self.copy_settings(),
                 CellAction::Paste => self.paste_settings(),
                 CellAction::Unconvert => self.unconvert(&self.sel_vec()),
+                CellAction::DetectFrame => self.detect_frames(&self.sel_vec()),
             }
         }
     }
@@ -681,6 +821,10 @@ impl NlpApp {
                     None,
                 );
                 widgets::fl_combo(ui, "White balance", &mut s.wb_mode, WbMode::ALL, WbMode::label, "");
+                ui.add_space(6.0);
+                ui.checkbox(&mut s.auto_crop, "Auto-crop frames").on_hover_text(
+                    "Find each uncropped frame inside the film rebate and holder, and straighten it",
+                );
                 if count > 1 {
                     ui.add_space(6.0);
                     ui.checkbox(&mut d.as_roll, "Convert as roll")
@@ -718,8 +862,19 @@ impl NlpApp {
                 let (was_type, was_model) = (s.image_type, s.color_model);
                 (s.image_type, s.source, s.color_model, s.film_base) =
                     (o.image_type, o.source, o.color_model, o.film_base);
-                (s.pre_saturation, s.border_buffer, s.wb_mode, s.roll_mode) =
-                    (o.pre_saturation, o.border_buffer, o.wb_mode, o.roll_mode);
+                (
+                    s.pre_saturation,
+                    s.border_buffer,
+                    s.wb_mode,
+                    s.roll_mode,
+                    s.auto_crop,
+                ) = (
+                    o.pre_saturation,
+                    o.border_buffer,
+                    o.wb_mode,
+                    o.roll_mode,
+                    o.auto_crop,
+                );
                 if s.image_type != was_type && s.image_type != ImageType::Negative {
                     s.apply_positive_defaults();
                     s.wb_mode = o.wb_mode;
@@ -733,6 +888,69 @@ impl NlpApp {
             self.convert(d.targets, d.as_roll);
         } else if !(cancel || r.should_close()) {
             self.convert_dialog = Some(d);
+        }
+    }
+}
+
+impl NlpApp {
+    /// The plugin's "Large Exposure Variance Detected" prompt (`L22_1`).
+    pub fn exposure_prompt_ui(&mut self, ctx: &egui::Context) {
+        let Some((items, spread)) = self.exposure_prompt.take() else {
+            return;
+        };
+        let (mut go, mut cancel) = (false, false);
+        let frame = egui::Frame::new()
+            .fill(theme::PANEL)
+            .stroke(egui::Stroke::new(1.0, theme::LINE))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::same(22))
+            .shadow(ctx.global_style().visuals.window_shadow);
+        let r = egui::Modal::new(egui::Id::new("exposure_variance_modal"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.label(
+                    RichText::new("Large exposure variance detected")
+                        .font(theme::medium(16.0))
+                        .color(theme::TEXT),
+                );
+                ui.add_space(12.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "The exposure metadata of these frames differs by up to {spread:.1} EV. \
+                             This happens when exposure wasn't fixed during digital capture, or when \
+                             other tools overwrote the scans' EXIF exposure data.\n\n\
+                             You can continue without adjusting for exposure, but the results may \
+                             not be as accurate."
+                        ))
+                        .color(theme::MUTED),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(22.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(widgets::primary("Continue without exposure data"))
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if ui
+                        .add(widgets::ghost("Cancel").min_size(vec2(80.0, 30.0)))
+                        .clicked()
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+        if go {
+            self.jobs
+                .spawn(move || super::jobs::convert(items, true, false));
+        } else if !(cancel || r.should_close()) {
+            self.exposure_prompt = Some((items, spread));
         }
     }
 }

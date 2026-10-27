@@ -7,43 +7,61 @@ A standalone Rust port of the **Negative Conversion Plugin** for Lightroom (see 
 ```bash
 cargo run --release                     # GUI, reopens the last folder
 cargo run --release -- /path/to/scans   # GUI on a folder (or a single file)
-cargo run --release -- convert --roll *.dng   # headless batch conversion
 cargo run --release -- help
 ```
 
-## Windows
+### Command line
+
+```bash
+cargo run --release -- convert [--roll] [--roll-process NAME] [--tone NAME] [--wb NAME] \
+    [--lut NAME] [--border PCT] [--auto-crop] [--jpg] [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
+cargo run --release -- scan-prep FILES              # level + gamma 2.2 encode linear (gamma 1.0) TIF scans
+cargo run --release -- synth [out.tif] [variant]    # write a synthetic colour negative for testing
+```
+
+`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Pro Lab, Basic Lab or Darkroom Paper. `--auto-crop` crops and straightens each frame to its detected frame before analysis. `--name` takes the export file name template (see Export below).
+
+## GUI
 
 **Folder View**
-- Browse a folder as a thumbnail grid. Select with click, ⌘/Ctrl-click, Shift-click or ⌘A.
-- The right panel works on the whole selection:
-  - **Convert**: set the conversion options, convert frames individually or *as a roll*, or unconvert.
-  - **Edit**: batch-edit tone, white balance and LUT; copy, paste or sync settings; save defaults.
-  - **Export**: positive copies as TIF (8/16-bit, ZIP) or JPG, in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile.
-  - **Metadata**: film camera, lens, stock, ISO, shutter, aperture and developer. These go into EXIF / TIFF tags.
-  - **Tools**: TIF Scan Prep for gamma-1.0 flatbed scans, and the LUT folder location.
+- Browse a folder of RAW and TIFF files as a thumbnail grid. Select with click, ⌘/Ctrl-click, Shift-click or ⌘A; double-click (or Enter) opens the editor.
+- The top bar acts on the selection:
+  - **Convert** / **Convert as roll** (2+ frames) open a dialog with the conversion inputs: source, colour model, film base, pre-saturation, border buffer, white balance, *Auto-crop frames* and, for rolls, the roll process (Pro Lab, Basic Lab or Darkroom Paper).
+  - **Export**: positive copies as TIF (8/16-bit, ZIP) or JPG, in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile and EXIF.
+    - Presets: *Lab JPEG M/L* (3000/6000 px) and *Archive TIFF*, plus your own (*Save as…*).
+    - Size: full or a long edge of 2000–6000 px.
+    - File name template: `{name}`, `{suffix}`, `{n}` / `{n:03}` (position in the export), `{stock}`, `{iso}`, `{date}` (scan date). Clashing names get `-2`, `-3`, ….
+- Right-click a frame for open, convert, export, detect frame, copy/paste settings and unconvert.
+- Lab correction keys act on the selected converted frames; the offsets show under each thumbnail (see below).
 
-**Editor View** (double-click a frame, or press Enter)
-- Light toolbar:
-  - Left: back (Space), previous/next (←/→, wraps; skips unconverted frames when the current one is converted), zoom (+/−, ⌘-scroll or double-click), undo/redo.
-  - Centre: file name and tone profile.
-  - Right: before/after (B), rotate, flip, crop/straighten (C), export.
-- Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. Reset Crop / Cancel (Esc) / Apply (Enter).
-- **Convert / Edit / Advanced** tabs follow the manual's layout:
-  - Tone profiles; Exposure, Brightness, Contrast, Lights, Darks, Whites, Blacks, Lab Glow and Lab Fade; Soft Highs/Lows; WhiteClip and BlackClip.
-  - White balance: presets, a neutral eyedropper and Temp/Tint.
-  - Mids, highs and shadows toning; LUT with amount and saturation; sharpening.
-  - Advanced: engine presets v2.1 to v3.1, curve points, processing order, WB density and WB type, toning, clipping, plus a curve and analysis readout. Frames converted as a roll get *Use roll analysis* and the *Roll process*: Pro Lab, Basic Lab or Darkroom Paper.
-- Film-base eyedropper, rotate, flip and crop.
-- Histogram, export dialog, undo/redo (⌘Z / ⇧⌘Z).
+**Editor View**
+- Toolbar:
+  - Left: back (Space), previous/next (←/→, wraps; skips unconverted frames when the current one is converted), zoom (+/−, ⌘-scroll or double-click), undo/redo (⌘Z / ⇧⌘Z).
+  - Centre: file name, tone profile and the lab correction offsets (`D+2 C−1 M0 Y+1`).
+  - Right: before/after (B; ⇧B for a split view with a draggable divider), rotate, flip, crop/straighten (C), export.
+- Lab correction keys, like a Frontier/Noritsu keyboard (number row or numpad): 7 8 9 add cyan, magenta, yellow; 1 2 3 take them away; 4 / 6 print denser (darker) / lighter in 1/6 EV steps; 0 resets. They move the Exposure and mid-tone colour sliders.
+- J shows clipping: red where a channel is blown, blue where the shadows are blocked. The histogram marks clipped channels in its corners.
+- Hovering the image shows the output RGB and the negative's density above the film base.
+- Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. Detect finds the frame inside the film rebate and holder. Reset Crop / Cancel (Esc) / Apply (Enter).
+- A single-column sidebar with a histogram on top:
+  - Before conversion it shows the conversion inputs (Source, Analysis). Dragging the border buffer slider outlines the analysed area on the canvas. Afterwards they fold into a one-line **Conversion** summary with Re-convert.
+  - **Tone**: tone profile, Exposure, Brightness, Contrast, Lights, Darks, Whites, Blacks; *Glow, fade & clipping* holds Lab Glow/Fade, Soft Highs/Lows and White/Black clip.
+  - **White balance**: presets, a neutral eyedropper and Temp/Tint.
+  - **Colour toning**: mids, highs and shadows.
+  - **Look**: LUT with amount and saturation, sharpening.
+  - **Film** (collapsed): film stock, ISO, developer and camera details for the EXIF and the file name tokens; *Apply to roll/folder* copies them.
+  - **Engine** (collapsed): engine presets v2.1 to v3.1, curve points, processing order, WB density and type, plus a curve and analysis readout. Roll frames get *Use roll analysis* and the roll process.
+  - The ⋯ menu beside Re-convert: save/apply default, reset edits, unconvert and the LUT folder.
+- Film-base eyedropper for sampling the unexposed border.
 
-Settings are saved next to each scan as `<file>.nlp.json`.
+Settings are saved inside the `NLP/` subfolder as `<file>.nlp.json`.
 
 ## Engine (`src/engine`)
 
 | Module | Ported from |
 |---|---|
 | `curve.rs` | `CurveEngineV3.lua`: tanh sigmoids, auto-tone gamma, every tone and colour layer, colour-protected and linear clipping, node inversion, single- and multi-pass curves |
-| `pipeline.rs` | `NLPImageProcessorV3.lua`: 600 px analysis, border buffer, σ=2 blur, CDF clipping (0.01 % / 0.05 %), HSB-zone auto WB; `NLPRolls.lua`: roll aggregation (min/max origins, 2.2 power-mean means, 2σ colour-ratio outliers) and the Pro Lab / Basic Lab / Darkroom Paper roll processes |
+| `pipeline.rs` | `NLPImageProcessorV3.lua`: 600 px analysis, border buffer, σ=2 blur, CDF clipping (0.01 % / 0.05 %), HSB-zone auto WB; `NLPRolls.lua`: roll aggregation (min/max origins, 2.2 power-mean means, 2σ colour-ratio outliers) exposure matching by EXIF shutter/aperture/ISO (`commonEV`), and the Pro Lab / Basic Lab / Darkroom Paper roll processes |
 | `presets.rs` | `NegativePresets.lua`: tone profiles, colour models, pre-saturation, film WB presets, engine presets |
 | `lut.rs` | Reads the plugin's real 3D LUTs from `LR Files/CameraRaw/Settings/NLP Enhanced Settings/*.xmp` (Adobe base85 + zlib RGB tables, 32³) |
 | `color.rs` | `NLPColorV3.lua`: MelissaRGB working space, output spaces, generated ICC profiles |
@@ -58,7 +76,6 @@ Settings are saved next to each scan as `<file>.nlp.json`.
   - Adobe's own raw processing (demosaic, highlight handling) still differs from `rawler`'s, so results are close to Lightroom but not identical.
 - **Film base.** Lightroom's border-eyedropper white balance becomes the **Film base** option. *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper.
 - **Exposure.** The plugin's Exposure slider (±50 curve units, applied in node space before the other tone layers) is replaced by a print exposure in EV (±5). It models paper density and is applied to the finished curve. Sidecars from older versions are converted at `exposure / 10`.
-- **Roll exposure normalisation.** The plugin reads each frame's aperture, shutter and ISO and offsets frames that were digitised at a different exposure; this isn't ported, so digitise a roll with fixed settings.
 - **LUT folder.** The app finds the LUTs automatically in `../NLP Lightroom Plugin/...` or in Lightroom's CameraRaw settings folder. If they are missing, it uses built-in approximations of each look.
 - **Not ported:** licensing and the Lightroom catalog/DNG-profile plumbing, which a standalone app doesn't need.
 

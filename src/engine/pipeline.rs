@@ -17,6 +17,12 @@ pub const ANALYSIS_SIZE: usize = 600;
 /// Film base is mapped to this linear level after neutralisation.
 const BASE_LEVEL: f32 = 0.97;
 
+/// Per-channel density above the film base of a prepared negative pixel,
+/// like a lab scanner's densitometer readout.
+pub fn density_above_base(p: [f32; 3]) -> [f32; 3] {
+    p.map(|v| (BASE_LEVEL / color::srgb_decode(v).max(1e-4)).log10().max(0.0))
+}
+
 /// The prepared negative: encoded MelissaRGB (0..1), i.e. the pixels the
 /// plugin's tone curves operate on.
 #[derive(Clone)]
@@ -47,6 +53,9 @@ pub struct Analysis {
     /// Film base colour (source space) used for neutralisation.
     pub base: [f32; 3],
     pub key: AnalysisKey,
+    /// Exposure value of the capture (`L19_1`), when the EXIF has it.
+    #[serde(default)]
+    pub ev: Option<f64>,
 }
 
 // ---- film base -------------------------------------------------------------------
@@ -488,7 +497,7 @@ pub fn edit_only_origins() -> Origins {
 
 /// Full conversion analysis of a prepared negative. Edit Only frames skip
 /// the analysis, as `processPhotos` hands them straight to `L56_1`.
-pub fn analyze(neg: &Negative, s: &Settings, base: [f32; 3]) -> Analysis {
+pub fn analyze(neg: &Negative, s: &Settings, base: [f32; 3], ev: Option<f64>) -> Analysis {
     let (origins, auto_wb) = if s.image_type == ImageType::EditOnly {
         (edit_only_origins(), AutoWb::default())
     } else {
@@ -502,6 +511,7 @@ pub fn analyze(neg: &Negative, s: &Settings, base: [f32; 3]) -> Analysis {
         auto_wb,
         base,
         key: s.analysis_key(),
+        ev,
     }
 }
 
@@ -550,6 +560,78 @@ pub struct RollAggregate {
     /// Roll colour ratios `[green, blue]` relative to red (`L23_1`).
     pub multipliers: [f64; 2],
     pub auto_wb: AutoWb,
+    /// The roll's most common exposure (`commonEV`); `None` without exposure data.
+    pub common_ev: Option<f64>,
+}
+
+// ---- roll exposure ---------------------------------------------------------------
+
+/// `UtilV3.roundEV`: snap to thirds of a stop.
+fn round_ev(ev: f64) -> f64 {
+    let base = ev.floor();
+    let f = ev - base;
+    if f <= 1.0 / 6.0 {
+        base
+    } else if f <= 0.5 {
+        base + 1.0 / 3.0
+    } else if f <= 5.0 / 6.0 {
+        base + 2.0 / 3.0
+    } else {
+        base + 1.0
+    }
+}
+
+/// `UtilV3.exposureValue(shutter, aperture, iso)`: `log2(N²/t) + log2(iso/100)`,
+/// rounded to thirds.
+pub fn exposure_value(t: f64, n: f64, iso: f64) -> f64 {
+    round_ev((n * n / t).log2() + (iso / 100.0).log2())
+}
+
+/// The frame's exposure value from its EXIF (`L19_1`).
+pub fn frame_ev(info: &decode::SourceInfo) -> Option<f64> {
+    info.exposure.map(|[t, n, iso]| exposure_value(t, n, iso))
+}
+
+/// `UtilV3.adjustExposure`: scale an 8-bit level by `ev` stops in gamma 2.2,
+/// clipped at 255.
+pub fn adjust_exposure(v: f64, ev: f64) -> f64 {
+    (v / 255.0 * 2f64.powf(ev / 2.2)).min(1.0) * 255.0
+}
+
+/// `UtilV3.mode(evs)[1]`: the most frequent exposure (ties go to the first frame).
+pub fn common_ev(frames: &[Analysis]) -> Option<f64> {
+    let evs: Vec<f64> = frames.iter().filter_map(|a| a.ev).collect();
+    let count = |e: f64| evs.iter().filter(|&&x| (x - e).abs() < 1e-9).count();
+    evs.iter()
+        .copied()
+        .fold(None, |best: Option<f64>, e| match best {
+            Some(b) if count(b) >= count(e) => Some(b),
+            _ => Some(e),
+        })
+}
+
+/// Largest exposure difference from the common one (`L22_1`); above 1 EV
+/// the plugin asks whether to continue without exposure data.
+pub fn ev_spread(frames: &[Analysis], common: f64) -> f64 {
+    frames
+        .iter()
+        .filter_map(|a| a.ev)
+        .map(|e| (e - common).abs())
+        .fold(0.0, f64::max)
+}
+
+/// Origins moved by `ev` stops (`L22_1`): white and black points, and the
+/// mean on the 8-bit scale.
+fn exposure_adjusted(o: &Origins, ev: f64, means: bool) -> Origins {
+    o.map(|c| ChannelOrigin {
+        white: adjust_exposure(c.white, ev),
+        black: adjust_exposure(c.black, ev),
+        mean: if means {
+            adjust_exposure(c.mean * 255.0, ev) / 255.0
+        } else {
+            c.mean
+        },
+    })
 }
 
 /// `UtilV3.rgbAvg`: power mean with exponent 2.2.
@@ -577,29 +659,31 @@ fn std_dev(v: &[f64]) -> (f64, f64) {
     ((ss / (n - 1) as f64).sqrt(), mean)
 }
 
-/// Roll aggregation (`createRoll`, NLPRolls.lua). The origins use every
-/// frame; the colour multipliers (`L23_1`) drop frames whose green or blue
-/// ratio is more than 2σ above the mean. Returns the roll and the indices of
-/// the frames left out of the multipliers.
-pub fn aggregate_roll(frames: &[Analysis]) -> (RollAggregate, Vec<usize>) {
-    let mut origins = frames[0].origins;
+/// Roll aggregation (`createRoll`, NLPRolls.lua). With a `common_ev`, each
+/// frame's origins are first moved onto that exposure (`L22_1`). The origins
+/// use every frame; the colour multipliers (`L23_1`) drop frames whose green
+/// or blue ratio is more than 2σ above the mean. Returns the roll and the
+/// indices of the frames left out of the multipliers.
+pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggregate, Vec<usize>) {
+    let adj: Vec<Origins> = frames
+        .iter()
+        .map(|a| match (common_ev, a.ev) {
+            (Some(c), Some(e)) if e != c => exposure_adjusted(&a.origins, e - c, true),
+            _ => a.origins,
+        })
+        .collect();
+    let mut origins = adj[0];
     for c in 0..3 {
-        origins[c].white = frames
-            .iter()
-            .map(|a| a.origins[c].white)
-            .fold(f64::MAX, f64::min);
-        origins[c].black = frames
-            .iter()
-            .map(|a| a.origins[c].black)
-            .fold(f64::MIN, f64::max);
-        origins[c].mean = rgb_avg(frames.iter().map(|a| a.origins[c].mean));
+        origins[c].white = adj.iter().map(|o| o[c].white).fold(f64::MAX, f64::min);
+        origins[c].black = adj.iter().map(|o| o[c].black).fold(f64::MIN, f64::max);
+        origins[c].mean = rgb_avg(adj.iter().map(|o| o[c].mean));
     }
-    let ratio = |a: &Analysis, c: usize| {
-        let r = origins[0].black - a.origins[0].white;
-        (origins[c].black - a.origins[c].white) / if r.abs() < 1e-9 { 1e-9 } else { r }
+    let ratio = |o: &Origins, c: usize| {
+        let r = origins[0].black - o[0].white;
+        (origins[c].black - o[c].white) / if r.abs() < 1e-9 { 1e-9 } else { r }
     };
-    let g: Vec<f64> = frames.iter().map(|a| ratio(a, 1)).collect();
-    let b: Vec<f64> = frames.iter().map(|a| ratio(a, 2)).collect();
+    let g: Vec<f64> = adj.iter().map(|o| ratio(o, 1)).collect();
+    let b: Vec<f64> = adj.iter().map(|o| ratio(o, 2)).collect();
     let ((g_sd, g_mean), (b_sd, b_mean)) = (std_dev(&g), std_dev(&b));
     let excluded: Vec<usize> = (0..frames.len())
         .filter(|&i| b[i] > b_mean + 2.0 * b_sd || g[i] > g_mean + 2.0 * g_sd)
@@ -616,11 +700,12 @@ pub fn aggregate_roll(frames: &[Analysis]) -> (RollAggregate, Vec<usize>) {
         }
     };
     let multipliers = [kept(&g), kept(&b)];
-    // `L24_1`: average each zone's colour over the roll, then round to HSB.
+    // `L24_1`: average each zone's colour over the roll (2.2 power mean).
+    // Unlike the per-frame samples, the roll's HSB is stored unrounded.
     let colors = std::array::from_fn(|z| {
-        round_hsb(std::array::from_fn(|c| {
+        std::array::from_fn(|c| {
             rgb_avg(frames.iter().map(|a| a.auto_wb.colors[z][c] as f64)) as f32
-        }))
+        })
     });
     let auto_wb = auto_wb_from(colors, &origins);
     (
@@ -628,6 +713,7 @@ pub fn aggregate_roll(frames: &[Analysis]) -> (RollAggregate, Vec<usize>) {
             origins,
             multipliers,
             auto_wb,
+            common_ev,
         },
         excluded,
     )
@@ -783,16 +869,21 @@ pub fn origins_for(
     let Some(roll) = roll.filter(|_| s.use_roll) else {
         return frame.map(|a| a.origins.into());
     };
+    // Move the roll onto this frame's exposure (white and black points only).
+    let roll_origins = match (roll.common_ev, frame.and_then(|a| a.ev)) {
+        (Some(c), Some(e)) if c != 0.0 && e != c => exposure_adjusted(&roll.origins, c - e, false),
+        _ => roll.origins,
+    };
     let lab = match (s.roll_mode, roll.multipliers, frame) {
         (RollMode::DarkroomPaper, _, _) | (_, None, _) | (_, _, None) => {
-            return Some(roll.origins.into());
+            return Some(roll_origins.into());
         }
-        (_, Some(m), Some(a)) => lab_origins(&roll.origins, m, &a.origins),
+        (_, Some(m), Some(a)) => lab_origins(&roll_origins, m, &a.origins),
     };
     let roll_clip = if s.roll_mode == RollMode::BasicLab {
         RollClip {
-            white: (roll.origins[0].white - lab[0].white) / 2.0,
-            black: (lab[0].black - roll.origins[0].black) / 2.0,
+            white: (roll_origins[0].white - lab[0].white) / 2.0,
+            black: (lab[0].black - roll_origins[0].black) / 2.0,
         }
     } else {
         RollClip::default()
@@ -859,16 +950,20 @@ mod tests {
             auto_wb: AutoWb::default(),
             base: [1.0; 3],
             key: Settings::default().analysis_key(),
+            ev: None,
         }
     }
 
     #[test]
     fn roll_aggregation_extremes() {
-        let (r, _) = aggregate_roll(&[
-            frame([40.0; 3], [200.0; 3]),
-            frame([35.0; 3], [210.0; 3]),
-            frame([45.0; 3], [190.0; 3]),
-        ]);
+        let (r, _) = aggregate_roll(
+            &[
+                frame([40.0; 3], [200.0; 3]),
+                frame([35.0; 3], [210.0; 3]),
+                frame([45.0; 3], [190.0; 3]),
+            ],
+            None,
+        );
         assert_eq!(r.origins[0].white, 35.0);
         assert_eq!(r.origins[0].black, 210.0);
         // rgbAvg of equal means is the mean itself.
@@ -881,7 +976,7 @@ mod tests {
             frame([40.0, 60.0, 80.0], [200.0, 210.0, 220.0]),
             frame([50.0, 70.0, 90.0], [190.0, 200.0, 210.0]),
         ];
-        let (r, _) = aggregate_roll(&frames);
+        let (r, _) = aggregate_roll(&frames, None);
         let f = &frames[1].origins;
         let o = lab_origins(&r.origins, r.multipliers, f);
         let [gm, bm] = r.multipliers;
@@ -900,7 +995,7 @@ mod tests {
             frame([40.0, 60.0, 80.0], [200.0, 210.0, 220.0]),
             frame([50.0, 70.0, 90.0], [190.0, 200.0, 210.0]),
         ];
-        let (agg, _) = aggregate_roll(&frames);
+        let (agg, _) = aggregate_roll(&frames, None);
         let roll = RollData {
             id: "r".into(),
             origins: agg.origins,
@@ -909,6 +1004,7 @@ mod tests {
             excluded: vec![],
             auto_wb: Some(agg.auto_wb),
             multipliers: Some(agg.multipliers),
+            common_ev: None,
         };
         let mut s = Settings::default();
         s.use_roll = true;
@@ -926,6 +1022,64 @@ mod tests {
         assert_eq!(basic.roll_clip.black, (190.0 - 200.0) / 2.0);
         s.use_roll = false;
         assert_eq!(get(&s), FrameOrigins::from(frames[1].origins));
+    }
+
+    #[test]
+    fn exposure_value_rounds_to_thirds() {
+        // f/8, 1/125 s, ISO 100: log2(64 · 125) = 12.97 → 13.
+        assert_eq!(exposure_value(1.0 / 125.0, 8.0, 100.0), 13.0);
+        assert_eq!(round_ev(10.1), 10.0);
+        assert!((round_ev(10.3) - (10.0 + 1.0 / 3.0)).abs() < 1e-12);
+        assert!((round_ev(10.7) - (10.0 + 2.0 / 3.0)).abs() < 1e-12);
+        assert_eq!(round_ev(10.9), 11.0);
+        assert!((adjust_exposure(100.0, 2.2) - 200.0).abs() < 1e-9);
+        assert_eq!(adjust_exposure(200.0, 2.2), 255.0);
+    }
+
+    #[test]
+    fn roll_exposure_matching() {
+        let mut frames = [
+            frame([40.0; 3], [200.0; 3]),
+            frame([40.0; 3], [200.0; 3]),
+            frame([40.0; 3], [200.0; 3]),
+        ];
+        frames[0].ev = Some(12.0);
+        frames[1].ev = Some(12.0);
+        frames[2].ev = Some(12.0 + 1.0 / 3.0);
+        let c = common_ev(&frames).unwrap();
+        assert_eq!(c, 12.0);
+        assert!(ev_spread(&frames, c) < 1.0);
+        let (agg, _) = aggregate_roll(&frames, Some(c));
+        let shifted = adjust_exposure(40.0, 1.0 / 3.0);
+        // The +1/3 EV frame is moved onto the common exposure first.
+        assert_eq!(agg.origins[0].white, 40.0);
+        assert!((agg.origins[0].black - adjust_exposure(200.0, 1.0 / 3.0)).abs() < 1e-9);
+        assert!(shifted > 40.0);
+        let roll = RollData {
+            id: "r".into(),
+            origins: agg.origins,
+            base: [1.0; 3],
+            frames: 3,
+            excluded: vec![],
+            auto_wb: Some(agg.auto_wb),
+            multipliers: Some(agg.multipliers),
+            common_ev: agg.common_ev,
+        };
+        let s = Settings {
+            use_roll: true,
+            roll_mode: RollMode::DarkroomPaper,
+            ..Settings::default()
+        };
+        // Rendering that frame moves the roll back onto its own exposure.
+        let o = origins_for(&s, Some(&frames[2]), Some(&roll)).unwrap();
+        let back = adjust_exposure(agg.origins[0].black, -1.0 / 3.0);
+        assert!((o.origins[0].black - back).abs() < 1e-9);
+        assert_eq!(o.origins[0].mean, agg.origins[0].mean);
+        let same = origins_for(&s, Some(&frames[0]), Some(&roll)).unwrap();
+        assert_eq!(same.origins, agg.origins);
+        // More than 1 EV apart asks before matching.
+        frames[2].ev = Some(13.5);
+        assert!(ev_spread(&frames, common_ev(&frames).unwrap()) > 1.0);
     }
 
     /// A synthetic colour negative (orange mask, per-channel H&D gamma, so
@@ -994,7 +1148,7 @@ mod tests {
         s.lut = crate::engine::settings::Lut::None;
         let base = resolve_base(&src, &s, None);
         let neg = prepare_negative(&src, &s, base);
-        let a = analyze(&neg, &s, base);
+        let a = analyze(&neg, &s, base, None);
         let render = |s: &Settings| {
             Renderer::new(s, Some(&a.origins.into()), OutputSpace::Srgb).render(&neg, 0.0)
         };
@@ -1015,13 +1169,55 @@ mod tests {
     }
 
     #[test]
+    fn density_reads_zero_at_the_base() {
+        let base = color::srgb_encode(BASE_LEVEL);
+        assert!(density_above_base([base; 3]).iter().all(|d| d.abs() < 1e-4));
+        let d = density_above_base([color::srgb_encode(BASE_LEVEL / 10.0); 3]);
+        assert!((d[0] - 1.0).abs() < 1e-3, "{d:?}");
+    }
+
+    #[test]
+    fn lab_keys_shift_towards_their_colour() {
+        use crate::engine::settings::lab::{self, Channel};
+        let (src, grey) = synthetic_negative();
+        let mut s = Settings::default();
+        s.lut = crate::engine::settings::Lut::None;
+        let base = resolve_base(&src, &s, None);
+        let neg = prepare_negative(&src, &s, base);
+        let a = analyze(&neg, &s, base, None);
+        let mean = |s: &Settings| {
+            let px = Renderer::new(s, Some(&a.origins.into()), OutputSpace::Srgb).render(&neg, 0.0);
+            let mut m = [0.0f32; 3];
+            for &i in &grey {
+                for c in 0..3 {
+                    m[c] += px[i][c] / grey.len() as f32;
+                }
+            }
+            m
+        };
+        let m0 = mean(&s);
+        // +C / +M / +Y take away red / green / blue; +D darkens.
+        for (ch, c) in [(Channel::C, 0), (Channel::M, 1), (Channel::Y, 2)] {
+            let mut t = s.clone();
+            lab::nudge(&mut t, ch, 5);
+            let m = mean(&t);
+            let rel = |m: [f32; 3]| m[c] - (m[0] + m[1] + m[2]) / 3.0;
+            assert!(rel(m) < rel(m0), "{ch:?}: {m0:?} -> {m:?}");
+        }
+        let mut t = s.clone();
+        lab::nudge(&mut t, Channel::D, 3);
+        let m = mean(&t);
+        assert!(m[1] < m0[1], "D+: {m0:?} -> {m:?}");
+    }
+
+    #[test]
     fn edit_only_skips_analysis() {
         let (src, _) = synthetic_negative();
         let mut s = Settings::default();
         s.image_type = ImageType::EditOnly;
         let base = resolve_base(&src, &s, None);
         let neg = prepare_negative(&src, &s, base);
-        let a = analyze(&neg, &s, base);
+        let a = analyze(&neg, &s, base, None);
         assert_eq!(a.origins, edit_only_origins());
         assert_eq!(a.auto_wb, AutoWb::default());
     }

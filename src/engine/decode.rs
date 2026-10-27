@@ -59,6 +59,10 @@ pub struct SourceInfo {
     /// used to find the matching camera profile.
     #[serde(default)]
     pub camera_ids: Vec<String>,
+    /// EXIF exposure of the capture: shutter (s), f-number, ISO. Used to
+    /// match exposure across a roll (NLPRolls `L19_1`).
+    #[serde(default)]
+    pub exposure: Option<[f64; 3]>,
 }
 
 /// Linear source pixels (camera RGB for RAW, linear RGB for bitmaps).
@@ -128,8 +132,27 @@ fn load_bitmap(path: &Path) -> Result<SourceImage> {
             full_width: w,
             full_height: h,
             camera_ids: Vec::new(),
+            exposure: None,
         },
     })
+}
+
+/// Shutter, aperture and ISO from the raw file's EXIF, when all three exist.
+fn raw_exposure(path: &Path) -> Option<[f64; 3]> {
+    let src = rawler::rawsource::RawSource::new(path).ok()?;
+    let dec = rawler::get_decoder(&src).ok()?;
+    let exif = dec
+        .raw_metadata(&src, &rawler::decoders::RawDecodeParams::default())
+        .ok()?
+        .exif;
+    let ratio = |r: rawler::formats::tiff::Rational| (r.d != 0).then(|| r.n as f64 / r.d as f64);
+    let t = exif.exposure_time.and_then(ratio)?;
+    let n = exif.fnumber.and_then(ratio)?;
+    let iso = exif
+        .iso_speed_ratings
+        .map(f64::from)
+        .or(exif.iso_speed.map(f64::from))?;
+    (t > 0.0 && n > 0.0 && iso > 0.0).then_some([t, n, iso])
 }
 
 fn camera_matrix(raw: &rawler::RawImage) -> Mat3 {
@@ -183,6 +206,7 @@ fn load_raw(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
         full_width: raw.width,
         full_height: raw.height,
         camera_ids,
+        exposure: raw_exposure(path),
     };
 
     let fast = matches!(&raw.photometric, RawPhotometricInterpretation::Cfa(c) if c.cfa.is_rgb())
