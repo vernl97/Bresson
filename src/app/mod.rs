@@ -212,6 +212,9 @@ impl NlpApp {
             preset_draft: None,
             roll: Default::default(),
         };
+        if open.is_none() {
+            app.show_projects();
+        }
         if let Some(p) = open {
             if p.is_dir() {
                 app.open_folder(&p);

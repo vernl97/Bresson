@@ -50,10 +50,9 @@ impl NlpApp {
         self.show_projects();
     }
 
-    /// Start screen shown before anything is opened.
+    /// Start screen shown when there are no projects yet.
     fn welcome_ui(&mut self, ui: &mut egui::Ui) {
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
-        let last = self.defaults.last_folder.clone().filter(|p| p.is_dir());
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG))
             .show(ui, |ui| {
@@ -126,35 +125,6 @@ impl NlpApp {
                     }
 
                     ui.add_space(18.0);
-                    if let Some(dir) = last {
-                        let name = dir
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| dir.display().to_string());
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(format!("Reopen {name}")).color(theme::ACCENT),
-                                )
-                                .frame(false),
-                            )
-                            .on_hover_text(dir.display().to_string())
-                            .clicked()
-                        {
-                            self.open_folder(&dir);
-                        }
-                    }
-                    if !self.defaults.projects.is_empty() {
-                        ui.add_space(6.0);
-                        if ui
-                            .add(widgets::ghost("Projects"))
-                            .on_hover_text("All rolls you have opened")
-                            .clicked()
-                        {
-                            self.show_projects();
-                        }
-                    }
-                    ui.add_space(6.0);
                     ui.label(
                         RichText::new("Camera RAW · TIFF · JPEG · PNG")
                             .small()
@@ -166,7 +136,7 @@ impl NlpApp {
 
     pub fn folder_ui(&mut self, ui: &mut egui::Ui) {
         if self.frames.is_empty() {
-            if self.roll.projects_open {
+            if self.roll.projects_open && !self.defaults.projects.is_empty() {
                 self.projects_ui(ui);
             } else {
                 self.welcome_ui(ui);

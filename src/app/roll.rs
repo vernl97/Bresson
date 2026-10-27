@@ -218,20 +218,22 @@ impl NlpApp {
                 ui.vertical_centered(|ui| {
                     ui.set_max_width(w);
                     ui.horizontal(|ui| {
-                        if ui.add(widgets::ghost("‹ Back")).clicked() {
-                            self.roll.projects_open = false;
-                        }
-                        ui.add_space(8.0);
                         ui.label(
                             RichText::new("Projects")
                                 .font(theme::medium(20.0))
                                 .color(theme::TEXT),
                         );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(widgets::primary("Open…"))
+                                .on_hover_text("Open a folder or scans (or drop them here)")
+                                .clicked()
+                            {
+                                self.choose_anything();
+                            }
+                        });
                     });
                     ui.add_space(14.0);
-                    if self.defaults.projects.is_empty() {
-                        ui.label(RichText::new("No rolls opened yet").color(theme::MUTED));
-                    }
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for dir in self.defaults.projects.clone() {
                             let exists = dir.is_dir();
@@ -248,6 +250,10 @@ impl NlpApp {
             });
         if let Some(dir) = remove {
             self.defaults.projects.retain(|p| p != &dir);
+            // Otherwise startup would re-add it from `last_folder`.
+            if self.defaults.last_folder.as_ref() == Some(&dir) {
+                self.defaults.last_folder = None;
+            }
             let _ = sidecar::save_defaults(&self.defaults);
         }
         if let Some(dir) = open {
