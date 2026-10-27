@@ -6,28 +6,32 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use super::curve::Origins;
-use super::pipeline::{Analysis, AutoWb};
+use super::curve::Levels;
+use super::pipeline::{Analysis, AutoWb, RollBalance};
 use super::settings::{ExportPreset, ExportSettings, FilmMetadata, Settings};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RollData {
     pub id: String,
-    pub origins: Origins,
+    /// The roll's levels at one exposure for the whole roll.
+    pub levels: Levels,
+    /// The roll's colour balance (film slopes and filtration).
+    pub balance: RollBalance,
     pub base: [f32; 3],
     pub frames: usize,
     pub excluded: Vec<String>,
-    /// Roll-wide auto WB (from the frames' averaged zone colours).
+    /// Roll-wide auto WB (from the frames' averaged grey densities).
     #[serde(default)]
     pub auto_wb: Option<AutoWb>,
-    /// Roll colour ratios `[green, blue]` for Pro/Basic Lab processing;
-    /// rolls from older versions lack them and render as Darkroom Paper.
-    #[serde(default)]
-    pub multipliers: Option<[f64; 2]>,
-    /// The roll's common exposure value (`commonEV`), when frames had EXIF.
+    /// The roll's common exposure value, when frames had EXIF.
     #[serde(default)]
     pub common_ev: Option<f64>,
 }
+
+/// Sidecar format version. Version 3 holds density analyses and roll
+/// balances; analyses and rolls of older files are dropped when loading
+/// (the frame needs a new Convert), their settings and metadata are kept.
+pub const VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -87,14 +91,26 @@ pub fn load(image: &Path) -> Option<Sidecar> {
         }
         s
     };
-    let mut sc: Sidecar = serde_json::from_str(&s).ok()?;
-    // Migrate the plugin-style Exposure to print exposure in stops.
-    if sc.settings.exposure != 0.0 {
-        sc.settings.print_exposure =
-            (sc.settings.print_exposure + sc.settings.exposure / 10.0).clamp(-5.0, 5.0);
-        sc.settings.exposure = 0.0;
-    }
-    Some(sc)
+    parse(&s)
+}
+
+/// Parse a sidecar, keeping whatever part of an older one still applies.
+fn parse(s: &str) -> Option<Sidecar> {
+    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    let field = |k: &str| v.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let current = version >= VERSION;
+    Some(Sidecar {
+        version,
+        settings: serde_json::from_value(field("settings")).unwrap_or_default(),
+        analysis: current
+            .then(|| serde_json::from_value(field("analysis")).ok())
+            .flatten(),
+        roll: current
+            .then(|| serde_json::from_value(field("roll")).ok())
+            .flatten(),
+        metadata: serde_json::from_value(field("metadata")).unwrap_or_default(),
+    })
 }
 
 pub fn save(image: &Path, sc: &Sidecar) -> Result<()> {
@@ -103,7 +119,7 @@ pub fn save(image: &Path, sc: &Sidecar) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let mut sc = sc.clone();
-    sc.version = 1;
+    sc.version = VERSION;
     std::fs::write(&path, serde_json::to_string_pretty(&sc)?)?;
     Ok(())
 }
@@ -222,6 +238,22 @@ mod tests {
     }
 
     #[test]
+    fn old_sidecars_keep_settings_but_need_a_new_convert() {
+        let old = r#"{"version": 1,
+            "settings": {"contrast": 12, "tone_profile": "LogarithmicRich", "curve_points": "Auto"},
+            "analysis": {"origins": []},
+            "metadata": {"film_stock": "Portra 400"}}"#;
+        let sc = parse(old).unwrap();
+        assert_eq!(sc.settings.contrast, 12.0);
+        assert_eq!(sc.metadata.film_stock, "Portra 400");
+        assert!(sc.analysis.is_none() && sc.roll.is_none());
+        let mut cur = sc.clone();
+        cur.version = VERSION;
+        let back = parse(&serde_json::to_string(&cur).unwrap()).unwrap();
+        assert_eq!(back.settings, sc.settings);
+    }
+
+    #[test]
     fn defaults_without_projects_load() {
         let d: Defaults = serde_json::from_str(r#"{"last_folder":"/x"}"#).unwrap();
         assert!(d.projects.is_empty());
@@ -270,7 +302,7 @@ mod tests {
         assert!(expected_path.exists(), "Sidecar must be in NLP subfolder");
 
         let loaded = load(&img).expect("load sidecar");
-        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.version, VERSION);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

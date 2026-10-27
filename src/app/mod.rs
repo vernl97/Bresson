@@ -3,6 +3,7 @@
 
 mod editor;
 mod folder;
+mod gpu;
 mod jobs;
 mod picker;
 mod roll;
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use eframe::egui;
 
 use crate::engine::decode::{self, SourceImage};
-use crate::engine::pipeline::{self, Renderer};
+use crate::engine::pipeline::{self, AutoWb, Renderer};
 use crate::engine::settings::{
     ExportFormat, ExportPreset, ExportSettings, OutputSpace, Settings, WbMode, lab,
 };
@@ -123,15 +124,21 @@ impl Frame {
         }
     }
 
-    /// Temp / Tint that `s.wb_mode` gives this frame (roll WB when rendering
-    /// from the roll); `None` keeps the current values.
-    pub fn wb_values(&self, s: &Settings) -> Option<(f32, f32)> {
-        let wb = if self.sc.roll.is_some() && s.use_roll {
+    /// The auto WB candidates this frame renders with: the roll's when it
+    /// renders from the roll, otherwise its own analysis.
+    pub fn auto_wb(&self, s: &Settings) -> Option<AutoWb> {
+        let roll = if s.use_roll {
             self.sc.roll.as_ref().and_then(|r| r.auto_wb)
         } else {
             None
         };
-        match wb.or_else(|| self.sc.analysis.as_ref().map(|a| a.auto_wb)) {
+        roll.or_else(|| self.sc.analysis.as_ref().map(|a| a.auto_wb))
+    }
+
+    /// Temp / Tint that `s.wb_mode` gives this frame (roll WB when rendering
+    /// from the roll); `None` keeps the current values.
+    pub fn wb_values(&self, s: &Settings) -> Option<(f32, f32)> {
+        match self.auto_wb(s) {
             Some(w) => pipeline::wb_for_mode(s.wb_mode, &w),
             // Unconverted: film presets apply, the auto modes wait for analysis.
             None => pipeline::wb_for_mode(s.wb_mode, &Default::default()).filter(|_| {
@@ -175,6 +182,8 @@ pub struct NlpApp {
     pub export_targets: Option<Vec<usize>>,
     /// Open "Convert" dialog: the conversion options before analysis runs.
     pub convert_dialog: Option<folder::ConvertDialog>,
+    /// Crop -> settings -> convert guide shown when an unconverted frame opens.
+    pub wizard: folder::WizardState,
     /// A roll conversion paused because its frames' exposures differ by
     /// more than 1 EV: the frames and the spread.
     pub exposure_prompt: Option<(Vec<jobs::ConvertItem>, f64)>,
@@ -182,6 +191,8 @@ pub struct NlpApp {
     pub preset_draft: Option<String>,
     /// Roll info, its dialog and the Projects screen.
     pub roll: roll::RollState,
+    /// The editor preview is drawn on the GPU (wgpu available).
+    pub gpu: bool,
 }
 
 impl NlpApp {
@@ -212,9 +223,11 @@ impl NlpApp {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            wizard: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
+            gpu: gpu::install(cc),
         };
         if open.is_none() {
             app.show_projects();
@@ -373,7 +386,7 @@ impl NlpApp {
     }
 
     /// Set the scan source of a frame without saved settings from its file
-    /// (scanner profile → VueScan / SilverFast DNG, else digital camera).
+    /// (raw → digital camera, bitmap → TIF scan).
     fn auto_source(&mut self, i: usize, src: &SourceImage) {
         use crate::engine::settings::{FilmBase, Source};
         let f = &mut self.frames[i];
@@ -477,6 +490,60 @@ impl NlpApp {
     }
 
     // ---- export -------------------------------------------------------------------
+
+    /// Render the given frames (or all, if empty) onto one JPEG in the
+    /// project folder.
+    pub fn make_contact_sheet(&mut self, idx: Vec<usize>) {
+        let idx: Vec<usize> = if idx.is_empty() { (0..self.frames.len()).collect() } else { idx };
+        let jobs: Vec<_> = idx
+            .iter()
+            .filter_map(|&i| {
+                let f = &self.frames[i];
+                let src = f.thumb_src.clone()?;
+                Some((f.name.clone(), src, f.sc.settings.clone(), f.sc.analysis.clone(), f.sc.roll.clone()))
+            })
+            .collect();
+        let Some(first) = idx.first().map(|&i| self.frames[i].path.clone()) else { return };
+        if jobs.is_empty() {
+            self.toast("Frames are still loading", true);
+            return;
+        }
+        let dir = sidecar::project_dir(&first);
+        let stem = self
+            .folder
+            .as_ref()
+            .and_then(|f| f.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "roll".into());
+        let out = dir.join(format!("{stem}_contact_sheet.jpg"));
+        self.jobs.spawn(move || {
+            use rayon::prelude::*;
+            let tiles: Vec<_> = jobs
+                .into_par_iter()
+                .map(|(name, src, s, a, roll)| {
+                    let base = match &a {
+                        Some(a) => a.base,
+                        None => pipeline::resolve_base(&src, &s, None),
+                    };
+                    let neg = pipeline::prepare_negative(&src, &s, base);
+                    let levels = pipeline::levels_for(&s, a.as_ref(), roll.as_ref());
+                    let r = Renderer::new(&s, levels.as_ref(), OutputSpace::Srgb);
+                    crate::engine::contact::Tile {
+                        name,
+                        w: neg.width,
+                        h: neg.height,
+                        px: r.render(&neg, 0.0),
+                    }
+                })
+                .collect();
+            let res = std::fs::create_dir_all(&dir)
+                .map_err(anyhow::Error::from)
+                .and_then(|_| crate::engine::contact::write_sheet(&out, &tiles))
+                .map(|_| out)
+                .map_err(|e| format!("{e:#}"));
+            JobResult::ContactSheet(res)
+        });
+    }
 
     pub fn open_export_dialog(&mut self, targets: Vec<usize>) {
         if targets.is_empty() {
@@ -939,6 +1006,10 @@ impl NlpApp {
                         Err(e) => self.toast(format!("Export failed: {e}"), true),
                     }
                 }
+                JobResult::ContactSheet(r) => match r {
+                    Ok(p) => self.toast(format!("Saved contact sheet: {}", p.display()), false),
+                    Err(e) => self.toast(format!("Contact sheet failed: {e}"), true),
+                },
                 JobResult::Message(m) => self.toast(m, true),
             }
         }
@@ -961,8 +1032,8 @@ impl NlpApp {
             let s = &f.sc.settings;
             let base = f.base_for(src);
             let neg = pipeline::prepare_negative(src, s, base);
-            let origins = pipeline::origins_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref());
-            let r = Renderer::new(s, origins.as_ref(), OutputSpace::Srgb);
+            let levels = pipeline::levels_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref());
+            let r = Renderer::new(s, levels.as_ref(), OutputSpace::Srgb);
             let px = r.render(&neg, 0.0);
             let img = to_color_image(&px, neg.width, neg.height);
             match &mut f.thumb {
@@ -997,6 +1068,7 @@ impl NlpApp {
         }
         self.request_proxy(i);
         self.view = View::Editor;
+        self.start_wizard(i);
     }
 
     pub fn choose_folder(&mut self) {
@@ -1101,6 +1173,7 @@ impl eframe::App for NlpApp {
         self.toasts_ui(&ctx);
         self.export_dialog(&ctx);
         self.convert_dialog_ui(&ctx);
+        self.wizard_ui(&ctx);
         self.roll_dialog_ui(&ctx);
         self.exposure_prompt_ui(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -1128,7 +1201,7 @@ pub fn run(open: Option<PathBuf>) -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::curve::ChannelOrigin;
+    use crate::engine::curve::ChannelLevels;
     use crate::engine::pipeline::{Analysis, AutoWb};
 
     #[test]
@@ -1139,19 +1212,22 @@ mod tests {
             sc: Sidecar {
                 settings: Settings::default(),
                 analysis: Some(Analysis {
-                    origins: [ChannelOrigin {
-                        white: 10.0,
-                        black: 240.0,
-                        mean: 0.5,
+                    levels: [ChannelLevels {
+                        lo: 0.1,
+                        hi: 1.2,
+                        mid: 0.6,
+                        bow: 0.0,
                     }; 3],
                     auto_wb: AutoWb::default(),
                     base: [0.85, 0.60, 0.40],
                     key: Settings::default().analysis_key(),
                     ev: None,
+                    axis: None,
+                    skin: None,
                 }),
                 roll: None,
                 metadata: Default::default(),
-                version: 1,
+                version: crate::engine::sidecar::VERSION,
             },
             proxy: ProxyState::NotLoaded,
             thumb_src: None,
@@ -1519,9 +1595,11 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            wizard: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
+            gpu: false,
         };
         // (open_folder would also write the user's defaults.json.)
         app.load_frames(vec![img.clone()], &dir);
@@ -1563,9 +1641,11 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            wizard: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
+            gpu: false,
         };
 
         // Empty targets is a no-op
@@ -1600,9 +1680,11 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            wizard: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
+            gpu: false,
         };
         app.open_convert_dialog(vec![], true);
         assert!(app.convert_dialog.is_none());
@@ -1615,6 +1697,12 @@ mod ui_tests {
         let d = app.convert_dialog.as_ref().unwrap();
         assert!(d.as_roll);
         assert_eq!(d.targets, vec![0, 1]);
+    }
+
+    #[test]
+    fn wizard_starts_idle() {
+        let w = folder::WizardState::default();
+        assert!(w.active.is_none() && w.seen.is_empty());
     }
 
     #[test]
@@ -1677,9 +1765,11 @@ mod ui_tests {
             single_mode: false,
             export_targets: None,
             convert_dialog: None,
+            wizard: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
+            gpu: false,
         };
 
         let tmp = std::env::temp_dir().join("test_picker_single.tif");

@@ -39,6 +39,7 @@ pub enum JobResult {
         path: PathBuf,
         result: Result<PathBuf, String>,
     },
+    ContactSheet(Result<PathBuf, String>),
     /// The roll's frames differ by more than 1 EV in their exposure
     /// metadata; ask before converting without it (`L22_1`).
     ExposureVariance {
@@ -281,10 +282,10 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
             .unwrap_or(0);
         RollData {
             auto_wb: Some(agg.auto_wb),
-            multipliers: Some(agg.multipliers),
             common_ev: agg.common_ev,
             id: format!("roll-{stamp}"),
-            origins: agg.origins,
+            levels: agg.levels,
+            balance: agg.balance,
             base: roll_base.unwrap(),
             frames: ok.len(),
             excluded: excluded

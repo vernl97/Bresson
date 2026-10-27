@@ -1,972 +1,463 @@
-//! Port of `CurveEngineV3.lua` — the parametric tone-curve inversion engine.
+//! The print engine: turns film density into a positive the way an enlarger
+//! prints a negative onto paper.
 //!
-//! The engine works on per-channel "node arrays": `N` evenly spaced values in
-//! `[0, 1]` that represent *positive* brightness. Each tonal / colour layer maps
-//! node values to new node values. Finally the nodes are reversed (inverted)
-//! and paired with x positions spread between each channel's white and black
-//! origin (in 8-bit MelissaRGB units of the negative), producing the three
-//! `ToneCurvePV2012{Red,Green,Blue}` curves Lightroom would receive.
+//! The input is per-channel density above the film base (`pipeline::Negative`).
+//! Each channel's analysed density range ([`ChannelLevels`]) is normalised to
+//! 0 (deepest shadow, printed black) … 1 (brightest highlight, printed white).
+//! Normalising every channel to its own range matches the layers' different
+//! H&D slopes, so neutrals stay neutral from shadows to highlights. Tone and
+//! colour controls shape the normalised density. It then becomes a paper log
+//! exposure (plus printing filtration and print time), and the tone profile
+//! (the plugin's, measured) gives the printed value.
+//!
+//! Every channel is a pure function of its own density, so the whole engine
+//! bakes into one density-indexed lookup table per channel ([`CurveLut`]).
 
 use serde::{Deserialize, Serialize};
 
-use super::presets::{TEMP_MULTIPLIER, tone_profile, tone_profile_v3};
-use super::settings::{
-    ClipMethod, CorrectionType, CurvePoints, ImageType, LayerOrder, Settings, ToningMethod,
-    WbMethod, WbTonality,
-};
+use super::color;
+use super::settings::{ImageType, Settings, ToneProfile};
 
-/// Analysis result for one channel (`whitePointOrigin`, `blackPointOrigin`, `meanPoint`).
+/// Analysed density range of one channel (density above the film base).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct ChannelOrigin {
-    pub white: f64,
-    pub black: f64,
-    pub mean: f64,
+pub struct ChannelLevels {
+    /// Shadow end: the thinnest image density, printed black.
+    pub lo: f64,
+    /// Highlight end: the densest image density, printed white.
+    pub hi: f64,
+    /// Median image density (sets the auto midtone placement).
+    pub mid: f64,
+    /// Bow of the channel's neutral curve against green (crossover): a grey
+    /// at normalised green `x` has this channel's density at
+    /// `lo + (hi − lo) · ((1 + bow) · x − bow · x²)`. 0 is a straight axis.
+    #[serde(default)]
+    pub bow: f64,
 }
 
-pub type Origins = [ChannelOrigin; 3];
+/// Largest bow: keeps the neutral curve monotone with slope ≥ ½ of the
+/// straight line's at either end.
+pub const MAX_BOW: f64 = 0.5;
 
-type Nodes = [Vec<f64>; 3];
-
-const L8: f64 = 0.1; // L8_1
-const L9: f64 = 0.8; // L9_1
-
-fn is_positive(s: &Settings) -> bool {
-    matches!(s.image_type, ImageType::Positive | ImageType::EditOnly)
-}
-
-fn clamp01(v: f64) -> f64 {
-    v.clamp(0.0, 1.0)
-}
-
-fn map_nodes(n: &Nodes, f: impl Fn(f64, usize, usize) -> f64) -> Nodes {
-    let mut out: Nodes = Default::default();
-    for c in 0..3 {
-        out[c] = n[c].iter().enumerate().map(|(k, &v)| f(v, c, k)).collect();
+impl ChannelLevels {
+    /// Normalised density of a negative (0 = `lo` … 1 = `hi`) along the
+    /// channel's neutral curve, so a grey has the same value in every
+    /// channel. Straight beyond the ends, with the curve's end slopes.
+    pub fn normalise(&self, d: f64) -> f64 {
+        let y = (d - self.lo) / (self.hi - self.lo).max(1e-6);
+        let q = self.bow.clamp(-MAX_BOW, MAX_BOW);
+        if q.abs() < 1e-9 {
+            y
+        } else if y <= 0.0 {
+            y / (1.0 + q)
+        } else if y >= 1.0 {
+            1.0 + (y - 1.0) / (1.0 - q)
+        } else {
+            // Root of q·x² − (1 + q)·x + y = 0 in 0..1.
+            let b = 1.0 + q;
+            2.0 * y / (b + (b * b - 4.0 * q * y).max(0.0).sqrt())
+        }
     }
-    out
-}
 
-// ---- sigmoid helpers (L13_1, L14_1, L15_1) ---------------------------------------
-
-fn t(a: f64, b: f64, x: f64) -> f64 {
-    (0.5 * a * (x - b)).tanh()
-}
-
-/// Normalised tanh sigmoid.
-pub fn sigmoid(a: f64, b: f64, x: f64, s: f64) -> f64 {
-    let s = if s == 0.0 { 1.0 } else { s };
-    let den = t(a, b, 1.0) - t(a, b, 0.0);
-    if den.abs() < 1e-12 {
-        return x;
+    /// Density at normalised `x` (the inverse of [`Self::normalise`]).
+    pub fn density(&self, x: f64) -> f64 {
+        let q = self.bow.clamp(-MAX_BOW, MAX_BOW);
+        let y = if x <= 0.0 {
+            x * (1.0 + q)
+        } else if x >= 1.0 {
+            1.0 + (x - 1.0) * (1.0 - q)
+        } else {
+            (1.0 + q) * x - q * x * x
+        };
+        self.lo + (self.hi - self.lo) * y
     }
-    (t(a, b, x / s) - t(a, b, 0.0)) / den * s
 }
 
-/// Inverse of [`sigmoid`] using `atanh`.
-pub fn inv_sigmoid(a: f64, b: f64, x: f64, s: f64) -> f64 {
-    let s = if s == 0.0 { 1.0 } else { s };
-    let t0 = t(a, b, 0.0);
-    let t1 = t(a, b, 1.0);
-    let u = ((t1 - t0) * (x / s) + t0).clamp(-0.99999, 0.99999);
-    (b + 2.0 / a * u.atanh()) * s
+pub type Levels = [ChannelLevels; 3];
+
+/// Log exposure range of the paper between printed white and printed black
+/// (ISO R ≈ 105, a grade-2 paper): the span print exposure and filtration
+/// move along.
+pub const PAPER_RANGE: f64 = 1.05;
+/// One CC unit of printing filtration, in log exposure.
+pub const CC: f64 = 0.01;
+
+/// Density range the lookup tables cover.
+pub const LUT_DMIN: f64 = -0.5;
+pub const LUT_DMAX: f64 = 4.5;
+pub const LUT_SIZE: usize = 8192;
+
+/// Number of knots of a tone curve, evenly spaced over normalised density.
+const KNOTS: usize = 21;
+
+/// A tone profile: the encoded output at evenly spaced normalised densities
+/// (0 = black end … 1 = white end), and whether the median density is
+/// auto-placed on the midtone first.
+///
+/// The curves are the Lightroom plugin's tone profiles, which were tuned on
+/// real rolls, measured on the modelled ColorChecker negative: each knot is
+/// the plugin's printed grey (local regression over the chart's 18 neutral
+/// patches at −1, 0 and +1 EV) at that normalised density of this engine.
+fn profile(p: ToneProfile) -> (bool, [f64; KNOTS]) {
+    use ToneProfile::*;
+    match p {
+        Logarithmic => (
+            false,
+            [
+                0.0000, 0.0511, 0.1022, 0.1526, 0.2024, 0.2519, 0.3008, 0.3495, 0.3979, 0.4446,
+                0.4901, 0.5349, 0.5789, 0.6227, 0.6667, 0.7124, 0.7619, 0.8133, 0.8656, 0.9185,
+                0.9713,
+            ],
+        ),
+        LogarithmicRich => (
+            false,
+            [
+                0.0000, 0.0356, 0.0740, 0.1185, 0.1677, 0.2202, 0.2753, 0.3322, 0.3896, 0.4441,
+                0.4962, 0.5464, 0.5937, 0.6394, 0.6850, 0.7313, 0.7796, 0.8285, 0.8775, 0.9259,
+                0.9740,
+            ],
+        ),
+        LogarithmicFlat => (
+            false,
+            [
+                0.0187, 0.0669, 0.1153, 0.1627, 0.2092, 0.2553, 0.3007, 0.3459, 0.3905, 0.4336,
+                0.4756, 0.5168, 0.5567, 0.5958, 0.6347, 0.6740, 0.7155, 0.7585, 0.8027, 0.8486,
+                0.8949,
+            ],
+        ),
+        Standard => (
+            true,
+            [
+                0.0072, 0.0581, 0.1145, 0.1768, 0.2417, 0.3082, 0.3751, 0.4414, 0.5050, 0.5663,
+                0.6252, 0.6789, 0.7269, 0.7725, 0.8155, 0.8519, 0.8846, 0.9153, 0.9427, 0.9674,
+                0.9919,
+            ],
+        ),
+        AllSoft => (
+            true,
+            [
+                0.0389, 0.0966, 0.1569, 0.2186, 0.2795, 0.3389, 0.3966, 0.4517, 0.5040, 0.5544,
+                0.6031, 0.6486, 0.6909, 0.7319, 0.7714, 0.8073, 0.8413, 0.8739, 0.9043, 0.9325,
+                0.9604,
+            ],
+        ),
+        AllHard => (
+            true,
+            [
+                0.0069, 0.0338, 0.0703, 0.1206, 0.1815, 0.2531, 0.3323, 0.4200, 0.5068, 0.5903,
+                0.6690, 0.7358, 0.7888, 0.8360, 0.8782, 0.9076, 0.9308, 0.9508, 0.9668, 0.9796,
+                0.9921,
+            ],
+        ),
+        HighlightHard => (
+            true,
+            [
+                0.0071, 0.0582, 0.1160, 0.1814, 0.2504, 0.3216, 0.3936, 0.4645, 0.5316, 0.5956,
+                0.6563, 0.7101, 0.7566, 0.8000, 0.8405, 0.8731, 0.9018, 0.9282, 0.9513, 0.9718,
+                0.9919,
+            ],
+        ),
+        HighlightSoft => (
+            true,
+            [
+                0.0075, 0.0618, 0.1187, 0.1784, 0.2387, 0.2990, 0.3587, 0.4170, 0.4732, 0.5277,
+                0.5806, 0.6302, 0.6763, 0.7209, 0.7638, 0.8020, 0.8377, 0.8718, 0.9030, 0.9319,
+                0.9604,
+            ],
+        ),
+        ShadowHard => (
+            true,
+            [
+                0.0072, 0.0493, 0.0978, 0.1538, 0.2142, 0.2781, 0.3442, 0.4122, 0.4789, 0.5439,
+                0.6068, 0.6646, 0.7162, 0.7652, 0.8113, 0.8494, 0.8834, 0.9149, 0.9427, 0.9674,
+                0.9919,
+            ],
+        ),
+        ShadowSoft => (
+            true,
+            [
+                0.0348, 0.0948, 0.1583, 0.2245, 0.2906, 0.3553, 0.4185, 0.4786, 0.5351, 0.5892,
+                0.6411, 0.6885, 0.7318, 0.7733, 0.8130, 0.8480, 0.8805, 0.9114, 0.9398, 0.9659,
+                0.9919,
+            ],
+        ),
+        Linear => (
+            false,
+            [
+                0.0001, 0.0720, 0.1434, 0.2118, 0.2768, 0.3394, 0.3989, 0.4562, 0.5105, 0.5610,
+                0.6093, 0.6560, 0.6999, 0.7405, 0.7798, 0.8174, 0.8523, 0.8858, 0.9177, 0.9475,
+                0.9768,
+            ],
+        ),
+        LinearGamma => (
+            false,
+            [
+                0.0000, 0.0257, 0.0569, 0.0995, 0.1482, 0.2000, 0.2539, 0.3094, 0.3666, 0.4232,
+                0.4792, 0.5349, 0.5899, 0.6429, 0.6949, 0.7458, 0.7950, 0.8429, 0.8893, 0.9333,
+                0.9769,
+            ],
+        ),
+        LinearDeep => (
+            false,
+            [
+                0.0000, 0.0584, 0.1181, 0.1796, 0.2413, 0.3027, 0.3632, 0.4230, 0.4812, 0.5363,
+                0.5893, 0.6408, 0.6895, 0.7344, 0.7777, 0.8187, 0.8560, 0.8912, 0.9243, 0.9546,
+                0.9844,
+            ],
+        ),
+        LinearFlat => (
+            false,
+            [
+                0.0257, 0.0911, 0.1560, 0.2176, 0.2759, 0.3320, 0.3855, 0.4367, 0.4851, 0.5305,
+                0.5740, 0.6158, 0.6548, 0.6912, 0.7267, 0.7602, 0.7914, 0.8215, 0.8500, 0.8766,
+                0.9031,
+            ],
+        ),
+    }
 }
 
-/// AutoTone gamma (L16_1): centre the mean of the three channel means at 0.5.
-pub fn auto_tone_gamma(o: &Origins, s: &Settings) -> f64 {
-    let mean = (o[0].mean + o[1].mean + o[2].mean) / 3.0;
-    if !(mean > 0.0 && mean < 1.0) {
+/// Monotone cubic (Fritsch–Carlson) through the knots at `x`, continuing
+/// smoothly towards black below 0 and towards paper white above 1.
+fn tone_curve(k: &[f64; KNOTS], x: f64) -> f64 {
+    let h = 1.0 / (KNOTS - 1) as f64;
+    let d: Vec<f64> = k.windows(2).map(|w| (w[1] - w[0]) / h).collect();
+    let tangent = |i: usize| -> f64 {
+        if i == 0 {
+            d[0]
+        } else if i == KNOTS - 1 {
+            d[KNOTS - 2]
+        } else if d[i - 1] * d[i] <= 0.0 {
+            0.0
+        } else {
+            2.0 / (1.0 / d[i - 1] + 1.0 / d[i])
+        }
+    };
+    if x <= 0.0 {
+        let s = tangent(0).max(1e-6);
+        return if k[0] > 1e-6 {
+            k[0] * (s * x / k[0]).exp()
+        } else {
+            (s * x).max(0.0)
+        };
+    }
+    if x >= 1.0 {
+        let room = (1.0 - k[KNOTS - 1]).max(1e-6);
+        let s = tangent(KNOTS - 1).max(1e-6);
+        return 1.0 - room * (-s * (x - 1.0) / room).exp();
+    }
+    let i = ((x / h) as usize).min(KNOTS - 2);
+    let t = (x - i as f64 * h) / h;
+    let (m0, m1) = (tangent(i) * h, tangent(i + 1) * h);
+    let (t2, t3) = (t * t, t * t * t);
+    (2.0 * t3 - 3.0 * t2 + 1.0) * k[i]
+        + (t3 - 2.0 * t2 + t) * m0
+        + (-2.0 * t3 + 3.0 * t2) * k[i + 1]
+        + (t3 - t2) * m1
+}
+
+/// Power that leaves 0 and 1 in place and continues straight outside them.
+fn pow_ext(x: f64, g: f64) -> f64 {
+    if x <= 0.0 {
+        x
+    } else if x >= 1.0 {
+        1.0 + (x - 1.0) * g
+    } else {
+        x.powf(g)
+    }
+}
+
+/// Smooth bump on 0..1, zero at both ends and 1 at its peak `a / (a + 1)`.
+fn bump(x: f64, a: f64) -> f64 {
+    if x <= 0.0 || x >= 1.0 {
+        return 0.0;
+    }
+    let peak = a / (a + 1.0);
+    let max = peak.powf(a) * (1.0 - peak);
+    x.powf(a) * (1.0 - x) / max
+}
+
+/// Highlight bump; `range` 1..=10 widens it towards the midtones.
+fn highlight_bump(x: f64, range: f64) -> f64 {
+    bump(x, 1.0 + (11.0 - range.clamp(1.0, 10.0)) * 0.4)
+}
+
+fn shadow_bump(x: f64, range: f64) -> f64 {
+    highlight_bump(1.0 - x, range)
+}
+
+/// Auto midtone gamma: moves the mean normalised median density towards
+/// 0.5. Bright (high-key) frames may come down further than dark ones go
+/// up, like a lab printer exposing for the frame's average density.
+pub fn auto_gamma(l: &Levels) -> f64 {
+    let m: f64 = (0..3).map(|c| l[c].normalise(l[c].mid)).sum::<f64>() / 3.0;
+    if !(m > 0.0 && m < 1.0) {
         return 1.0;
     }
-    let logb = 0.5f64.ln() / mean.ln(); // logb(0.5, mean)
-    let g = if is_positive(s) { logb } else { 1.0 / logb };
-    g.clamp(0.8, 1.1)
+    (0.5f64.ln() / m.ln()).clamp(0.8, 1.6)
 }
 
-/// Pre-computed engine values (L10_1).
-struct EngineValues {
-    cyan: f64,
-    tint: f64,
-    temp: f64,
-    brightness: f64,
-    exposure: f64,
-    contrast: f64,
+/// Everything one channel's curve depends on.
+#[derive(Debug, Clone, Copy)]
+struct ChannelCurve {
+    kind: ImageType,
+    /// The analysed density range and neutral curve.
+    levels: ChannelLevels,
+    /// Black and white clip, as fractions of the range.
+    clip: (f64, f64),
+    knots: [f64; KNOTS],
+    gamma: f64,
+    /// Mid-tone colour gamma of this channel.
+    mid_gamma: f64,
+    whites: f64,
+    blacks: f64,
     highlights: f64,
     shadows: f64,
-    blacks: f64,
-    whites: f64,
+    /// Highlight / shadow colour toning amounts and ranges.
+    tone_high: f64,
+    tone_shadow: f64,
+    high_range: f64,
     shadow_range: f64,
+    contrast: f64,
+    /// Paper log exposure added (filtration, white balance, print time).
+    exposure: f64,
 }
 
-fn engine_values(o: &Origins, s: &Settings) -> EngineValues {
-    let p = tone_profile(s.tone_profile);
-    let auto = if p.auto_tone {
-        auto_tone_gamma(o, s)
-    } else {
-        1.0
-    };
-    let f = |v: f32| v as f64;
-    EngineValues {
-        cyan: 1.0 - f(s.mid_cyan) * 0.01,
-        tint: 1.0 - f(s.mid_tint) * 0.01,
-        temp: 1.0 - f(s.mid_temp) * 0.01,
-        brightness: (1.0 / (1.0 + f(s.brightness) * 0.02).max(0.02))
-            * (1.0 / p.default_gamma)
-            * (1.0 / auto),
-        exposure: 1.0 / (1.0 + f(s.exposure) * 0.02).max(0.02),
-        contrast: f(s.contrast) + p.default_contrast,
-        highlights: f(s.highlights) + p.default_highlights + f(s.glow) / 1.5,
-        shadows: f(s.shadows) + p.default_shadows - f(s.fade) / 1.5,
-        blacks: f(s.blacks) + p.default_blacks + f(s.fade),
-        whites: f(s.whites) + p.default_whites - f(s.glow),
-        shadow_range: f(s.shadow_range),
-    }
-}
-
-/// Number of curve points (L11_1).
-fn node_count(min_width: f64, s: &Settings) -> usize {
-    match s.curve_points {
-        CurvePoints::Auto => {
-            if is_positive(s) {
-                7
-            } else if min_width <= 30.0 {
-                3
-            } else if min_width <= 70.0 {
-                5
-            } else if min_width < 128.0 {
-                7
-            } else {
-                9
-            }
-        }
-        CurvePoints::Smooth => 4,
-        CurvePoints::Precise => 14,
-        CurvePoints::Manual => s.curve_resolution.clamp(2, 14) as usize,
-    }
-}
-
-/// `makeNodeArray` (L17_1): `n` evenly spaced values 0..=1 per channel.
-fn make_nodes(n: usize) -> Nodes {
-    let n = n.max(2);
-    let v: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();
-    [v.clone(), v.clone(), v]
-}
-
-// ---- clipping ---------------------------------------------------------------------
-
-/// Extra clipping from Basic Lab roll processing (`rollWhiteClip`,
-/// `rollBlackClip` in NLPRolls), in 8-bit origin units; zero otherwise.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct RollClip {
-    pub white: f64,
-    pub black: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Clip {
-    start: [f64; 3],
-    width: [f64; 3],
-    start_over: [f64; 3],
-    end_over: [f64; 3],
-}
-
-/// L31_1 (with L30_1): move white/black origins by the clip amounts, keeping
-/// green and blue proportional to red and compensating for the WB offsets.
-fn adjust_origins(o: &Origins, s: &Settings, a: f64, b: f64) -> ([f64; 3], [f64; 3]) {
-    let nz = |v: f64| {
-        if v.abs() < 1e-6 {
-            1e-6f64.copysign(if v == 0.0 { 1.0 } else { v })
+impl ChannelCurve {
+    fn new(l: &Levels, s: &Settings, c: usize) -> Self {
+        let (auto_tone, knots) = profile(s.tone_profile);
+        let kind = s.image_type;
+        // Clip moves the black / white end into the range (− recovers).
+        let clip = (s.black_clip as f64 * 0.006, s.white_clip as f64 * 0.006);
+        let auto = if auto_tone && kind == ImageType::Negative {
+            auto_gamma(l)
         } else {
-            v
-        }
-    };
-    let r_origin = nz(o[0].black - o[0].white);
-    let g_origin = nz(o[1].black - o[1].white);
-    let b_origin = nz(o[2].black - o[2].white);
-    let after_white = o[0].black - (o[0].white + a);
-    let after_black = (o[0].black - b) - o[0].white;
-    let (wb_temp, wb_tint) = (s.wb_temp as f64, s.wb_tint as f64);
-    let temp_a = a * (wb_temp / b_origin);
-    let temp_b = b * (wb_temp / (b_origin / 2.0));
-    let tint_a = a * (wb_tint / g_origin);
-    let tint_b = b * (wb_tint / (g_origin / 2.0));
-    let rw = after_white / r_origin;
-    let rb = after_black / r_origin;
-    let start = [
-        o[0].white + a,
-        o[1].black - rw * g_origin - tint_a,
-        o[2].black - rw * b_origin - temp_a,
-    ];
-    let end = [
-        o[0].black - b,
-        o[1].white + rb * g_origin - tint_b,
-        o[2].white + rb * b_origin - temp_b,
-    ];
-    (start, end)
-}
-
-/// Colour-protected clipping (L32_1).
-fn color_protected_clip(o: &Origins, s: &Settings, rc: RollClip) -> Clip {
-    let p = tone_profile_v3(s.tone_profile);
-    let (wc, bc) = (s.white_clip as f64, s.black_clip as f64);
-    let (a, b) = if is_positive(s) {
-        (
-            bc + p.default_soft_low + rc.black,
-            wc + p.default_soft_high + rc.white,
-        )
-    } else {
-        (
-            wc + p.default_soft_high + rc.white,
-            bc + p.default_soft_low + rc.black,
-        )
-    };
-    let (mut start, mut end) = adjust_origins(o, s, a, b);
-    let mut start_over = [0.0; 3];
-    let mut end_over = [0.0; 3];
-    for c in 0..3 {
-        if start[c] < 0.0 {
-            let slope = 255.0 / (start[c] - end[c]);
-            let y = slope * (0.0 - end[c]);
-            start_over[c] = 255.0 - y;
-            start[c] = 0.0;
-        }
-    }
-    for c in 0..3 {
-        if end[c] > 255.0 {
-            let slope = 255.0 / (start[c] - end[c]);
-            end_over[c] = slope * (255.0 - end[c]);
-            end[c] = 255.0;
-        }
-    }
-    let width = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
-    Clip {
-        start,
-        width,
-        start_over,
-        end_over,
-    }
-}
-
-/// Linear clipping (L33_1).
-fn linear_clip(o: &Origins, s: &Settings, rc: RollClip) -> Clip {
-    let p = tone_profile(s.tone_profile);
-    let (wc, bc) = (s.white_clip as f64, s.black_clip as f64);
-    let mut start = [0.0; 3];
-    let mut end = [0.0; 3];
-    for c in 0..3 {
-        if is_positive(s) {
-            start[c] = o[c].white + bc + p.default_soft_low;
-            end[c] = o[c].black - wc - p.default_soft_high;
-        } else {
-            start[c] = o[c].white + wc + p.default_soft_high;
-            end[c] = o[c].black - bc - p.default_soft_low;
-        }
-    }
-    // With roll clip offsets, L33_1 recomputes start/end from the roll
-    // amounts alone (via L31_1), dropping WhiteClip/BlackClip and the soft defaults.
-    if rc.white != 0.0 || rc.black != 0.0 {
-        (start, end) = adjust_origins(o, s, rc.white, rc.black);
-    }
-    let mut start_over = [0.0; 3];
-    let mut end_over = [0.0; 3];
-    for c in 0..3 {
-        if start[c] < 0.0 {
-            start_over[c] = -start[c];
-            start[c] = 0.0;
-        }
-        if end[c] > 255.0 {
-            end_over[c] = end[c] - 255.0;
-            end[c] = 255.0;
-        }
-    }
-    let width = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
-    Clip {
-        start,
-        width,
-        start_over,
-        end_over,
-    }
-}
-
-/// Clipping as used by `updateToneCurve` (curve offsets and node count): the
-/// clip method only, regardless of monochrome.
-fn clip_for_curve(o: &Origins, s: &Settings, rc: RollClip) -> Clip {
-    if s.clip_method == ClipMethod::ColorProtected {
-        color_protected_clip(o, s, rc)
-    } else {
-        linear_clip(o, s, rc)
-    }
-}
-
-/// Clipping as used by `getRGBNodesForXAxis`: colour-protected only for colour.
-fn clip(o: &Origins, s: &Settings, rc: RollClip) -> Clip {
-    if s.clip_method == ClipMethod::ColorProtected && !s.is_monochrome() {
-        color_protected_clip(o, s, rc)
-    } else {
-        linear_clip(o, s, rc)
-    }
-}
-
-/// `getRGBNodesForXAxis` (L34_1).
-fn x_nodes(cl: &Clip, s: &Settings, nodes: &Nodes) -> Nodes {
-    const SOFT: f64 = 6.0;
-    let (first_soft, last_soft) = if is_positive(s) {
-        (s.soft_shadows, s.soft_highlights)
-    } else {
-        (s.soft_highlights, s.soft_shadows)
-    };
-    let mut x = map_nodes(nodes, |v, c, _| cl.start[c] + v * cl.width[c]);
-    let n = x[0].len();
-    if first_soft && (0..3).all(|c| x[c][0] > SOFT) {
-        for c in 0..3 {
-            x[c][0] -= SOFT;
-        }
-    }
-    if last_soft && (0..3).all(|c| x[c][n - 1] < 255.0 - SOFT) {
-        for c in 0..3 {
-            x[c][n - 1] += SOFT;
-        }
-    }
-    x
-}
-
-// ---- layers -------------------------------------------------------------------------
-
-/// `colorLinearLayer` — the WB Temp / Tint balance.
-fn color_linear_layer(n: &Nodes, s: &Settings) -> Nodes {
-    let k = 255.0 / TEMP_MULTIPLIER;
-    let l2 = -(s.wb_tint as f64) / k;
-    let l3 = -(s.wb_temp as f64) / k;
-    let l7 = s.wb_tint as f64 * 0.01;
-    let l8 = s.wb_temp as f64 * 0.01;
-    let (offs, factors): ([f64; 3], [f64; 3]) = match s.wb_tonality {
-        WbTonality::NeutralDensity => (
-            [
-                -l3 / 2.0 + -l2 / 2.0,
-                -l3 / 2.0 + l2 / 2.0,
-                l3 / 2.0 + -l2 / 2.0,
-            ],
-            [
-                (1.0 / (1.0 - l8 * 0.5)) * (1.0 / (1.0 - l7 * 0.5)),
-                (1.0 / (1.0 - l8 * 0.5)) * (1.0 - l7 * 0.5),
-                (1.0 - l8 * 0.5) * (1.0 / (1.0 - l7 * 0.5)),
-            ],
-        ),
-        WbTonality::SubtractDensity => (
-            [-l3 + -l2, -l3, -l2],
-            [
-                (1.0 / (1.0 - l8)) * (1.0 / (1.0 - l7)),
-                1.0 / (1.0 - l8),
-                1.0 / (1.0 - l7),
-            ],
-        ),
-        WbTonality::AddDensity => ([0.0, l2, l3], [1.0, 1.0 - l7, 1.0 - l8]),
-    };
-    let hi = 1.0 - L9;
-    map_nodes(n, |x, c, _| {
-        let off = offs[c];
-        let fac = factors[c].max(1e-6);
-        match s.wb_method {
-            WbMethod::LinearFixed => {
-                if x > 0.0 && x < 1.0 {
-                    if x > L9 {
-                        clamp01(off + (hi * x - off * x + off * L9) / hi)
-                    } else if x < L8 {
-                        clamp01(x + off * x / L8)
-                    } else {
-                        clamp01(x + off)
-                    }
-                } else {
-                    clamp01(x)
-                }
-            }
-            WbMethod::LinearDynamic => clamp01(x + off),
-            WbMethod::ShadowWeighted => clamp01(x.max(0.0).powf(1.0 / fac)),
-            WbMethod::HighlightWeighted => clamp01(1.0 - (1.0 - x).max(0.0).powf(fac)),
-            WbMethod::MidtoneWeighted => {
-                clamp01((x.max(0.0).powf(1.0 / fac) + (1.0 - (1.0 - x).max(0.0).powf(fac))) / 2.0)
-            }
-        }
-    })
-}
-
-/// `colorGammaLayer` — the Mids R/C, G/M, B/Y balance.
-fn color_gamma_layer(n: &Nodes, f: [f64; 3]) -> Nodes {
-    const L3: f64 = 0.2;
-    map_nodes(n, |x, c, _| {
-        let shift = (1.0 - f[c]) / 4.0;
-        let v = x - shift;
-        if x > 0.0 && x < 1.0 {
-            if v >= 1.0 {
-                1.0
-            } else if x > 1.0 - L3 {
-                x - shift * ((1.0 - x) / L3)
-            } else if v <= 0.0 {
-                0.0
-            } else {
-                v
-            }
-        } else {
-            x
-        }
-    })
-}
-
-fn exposure_layer(n: &Nodes, e: f64) -> Nodes {
-    map_nodes(n, |x, _, _| {
-        if e < 1.0 {
-            1.0 - (1.0 - x).max(0.0).powf(1.0 / e)
-        } else if e > 1.0 {
-            x * (1.0 - (1.0 - (2.0 - e)) * 0.4)
-        } else {
-            x
-        }
-    })
-}
-
-fn gamma_layer(n: &Nodes, g: f64) -> Nodes {
-    map_nodes(n, |x, _, _| x.max(0.0).powf(g))
-}
-
-fn contrast_layer(n: &Nodes, c: f64) -> Nodes {
-    if c >= 1.0 {
-        let a = 1.0 + c * 0.2;
-        map_nodes(n, |x, _, _| sigmoid(a, 0.5, x, 1.0))
-    } else if c <= -1.0 {
-        let a = 1.0 + c.abs() * 0.2 * 0.5;
-        map_nodes(n, |x, _, _| inv_sigmoid(a, 0.5, x, 1.0))
-    } else {
-        n.clone()
-    }
-}
-
-/// Lights (L20_1).
-fn highlights_layer(n: &Nodes, h: f64) -> Nodes {
-    let alpha = 0.5 + h.abs() * 0.1;
-    if h >= 1.0 {
-        map_nodes(n, |x, _, _| {
-            if x <= 0.1 {
-                x
-            } else {
-                1.0 - sigmoid(alpha, 0.75, 1.0 - x, 0.9)
-            }
-        })
-    } else if h <= -1.0 {
-        map_nodes(n, |x, _, _| {
-            if x <= 0.1 {
-                x
-            } else {
-                1.0 - inv_sigmoid(alpha, 0.75, 1.0 - x, 0.9)
-            }
-        })
-    } else {
-        n.clone()
-    }
-}
-
-/// Darks (L21_1).
-fn shadows_layer(n: &Nodes, s: f64) -> Nodes {
-    let alpha = 0.5 + s.abs() * 0.1;
-    if s > 0.0 {
-        map_nodes(n, |x, _, _| {
-            if x >= 0.9 {
-                x
-            } else {
-                inv_sigmoid(alpha, 0.75, x, 0.9)
-            }
-        })
-    } else if s < 0.0 {
-        map_nodes(n, |x, _, _| {
-            if x >= 0.9 {
-                x
-            } else {
-                sigmoid(alpha, 0.75, x, 0.9)
-            }
-        })
-    } else {
-        n.clone()
-    }
-}
-
-/// Blacks (L22_1): exponential fog lift / sigmoid crush.
-fn blacks_layer(n: &Nodes, ev: &EngineValues) -> Nodes {
-    let k = (1.0 - ev.shadow_range) * 0.33 + 5.0;
-    let b = ev.blacks;
-    if b >= 1.0 {
-        let d = b / 255.0;
-        map_nodes(
-            n,
-            |x, _, _| if x >= 0.9 { x } else { d * (-x * k).exp() + x },
-        )
-    } else if b <= -1.0 {
-        let alpha = 0.5 + b.abs() * 0.1;
-        map_nodes(n, |x, _, _| {
-            if x > 0.5 {
-                x
-            } else {
-                sigmoid(alpha, 0.75, x, 0.5)
-            }
-        })
-    } else {
-        n.clone()
-    }
-}
-
-/// Whites (L28_1): exponential shoulder roll-off / sigmoid expansion.
-fn whites_layer(n: &Nodes, s: &Settings, ev: &EngineValues) -> Nodes {
-    let k = (1.0 - s.high_range as f64) * 0.33 + 5.0;
-    let mut w = ev.whites;
-    if (s.highlights as f64) < -5.0 {
-        w += s.highlights as f64 / 5.0;
-    }
-    if w <= -1.0 {
-        let d = -w / 255.0;
-        map_nodes(n, |x, _, _| {
-            if x < 0.1 {
-                x
-            } else {
-                1.0 - (d * (-(1.0 - x) * k).exp() + (1.0 - x))
-            }
-        })
-    } else if w >= 1.0 {
-        let alpha = 0.5 + w.abs() * 0.1;
-        map_nodes(n, |x, _, _| {
-            if x < 0.5 {
-                x
-            } else {
-                1.0 - sigmoid(alpha, 0.75, 1.0 - x, 0.5)
-            }
-        })
-    } else {
-        n.clone()
-    }
-}
-
-/// L29_1: rescale so clipped origins keep their colour ratios.
-fn clip_offset_layer(n: &Nodes, a: [f64; 3], b: [f64; 3]) -> Nodes {
-    map_nodes(n, |x, c, _| {
-        if a[c] == 0.0 && b[c] == 0.0 {
-            x
-        } else {
-            let hi = (255.0 - a[c]) / 255.0;
-            let lo = b[c] / 255.0;
-            x * (hi - lo) + lo
-        }
-    })
-}
-
-/// L19_1: add a layer's delta (computed on `base`) onto `n`.
-fn add_with_base(n: &Nodes, layer: &Nodes, base: &Nodes) -> Nodes {
-    map_nodes(n, |x, c, k| clamp01(x + layer[c][k] - base[c][k]))
-}
-
-/// L24_1: shift a triple so its minimum is zero (or max zero).
-fn shift_nonneg(a: f64, b: f64, c: f64) -> [f64; 3] {
-    let m = a.min(b).min(c);
-    if m < 0.0 {
-        [a - m, b - m, c - m]
-    } else {
-        [a, b, c]
-    }
-}
-
-/// L23_1 linear map.
-fn lerp_map(v: f64, i0: f64, i1: f64, o0: f64, o1: f64) -> f64 {
-    (v - i0) / (i1 - i0) * (o1 - o0) + o0
-}
-
-/// L25_1 vintage toning curve.
-fn vintage(x: f64, a: f64, b: f64) -> f64 {
-    let g = (5.0 * a - 2.0 * b + 1.8).clamp(1.0, 2.5);
-    let xc = x.max(0.0);
-    if b >= xc && b > 0.0 {
-        a + (xc / b).powf(g) * (b - a)
-    } else {
-        x
-    }
-}
-
-/// Highlight colour toning (L27_1).
-fn highlight_toning(n: &Nodes, s: &Settings) -> Nodes {
-    let range = s.high_range as f64;
-    let l6 = 0.9 - (10.0 - range) * 0.0444;
-    let colors = [
-        -(s.high_cyan as f64),
-        -(s.high_tint as f64),
-        -(s.high_temp as f64),
-    ];
-    let vint = shift_nonneg(s.high_cyan as f64, s.high_tint as f64, s.high_temp as f64);
-    map_nodes(n, |x, c, _| {
-        if s.toning_method == ToningMethod::Vintage {
-            if vint[c] == 0.0 {
-                return x;
-            }
-            let v = vint[c] / 150.0;
-            let top = (lerp_map(range, 1.0, 10.0, 0.15, 0.6) + v).min(0.99);
-            return 1.0 - vintage(1.0 - x, v, top);
-        }
-        let w = colors[c];
-        let alpha = 0.75 + w.abs() * (1.0 + (10.0 - range) / 18.0) * 0.125;
-        if w == 0.0 || x <= 1.0 - l6 {
-            x
-        } else if w > 0.0 {
-            1.0 - sigmoid(alpha, 0.75, 1.0 - x, l6)
-        } else {
-            1.0 - inv_sigmoid(alpha, 0.75, 1.0 - x, l6)
-        }
-    })
-}
-
-/// Shadow colour toning (L26_1).
-fn shadow_toning(n: &Nodes, s: &Settings) -> Nodes {
-    let range = s.shadow_range as f64;
-    let l6 = 0.9 - (10.0 - range) * 0.0444;
-    let colors = [
-        -(s.shadow_cyan as f64),
-        -(s.shadow_tint as f64),
-        -(s.shadow_temp as f64),
-    ];
-    let vint = shift_nonneg(colors[0], colors[1], colors[2]);
-    map_nodes(n, |x, c, _| {
-        if s.toning_method == ToningMethod::Vintage {
-            if vint[c] == 0.0 {
-                return x;
-            }
-            let v = vint[c] / 150.0;
-            let top = (lerp_map(range, 1.0, 10.0, 0.15, 0.6) + v).min(0.99);
-            return vintage(x, v, top);
-        }
-        let w = colors[c];
-        let alpha = 0.75 + w.abs() * (1.0 + (10.0 - range) / 18.0) * 0.125;
-        if w == 0.0 || x >= l6 {
-            x
-        } else if w > 0.0 {
-            inv_sigmoid(alpha, 0.75, x, l6)
-        } else {
-            sigmoid(alpha, 0.75, x, l6)
-        }
-    })
-}
-
-/// `invert` (L30_1): reverse the node order of every channel.
-fn invert(n: &Nodes) -> Nodes {
-    let mut o = n.clone();
-    for c in o.iter_mut() {
-        c.reverse();
-    }
-    o
-}
-
-// ---- public API ---------------------------------------------------------------------
-
-/// Resulting per-channel curves.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ToneCurves {
-    /// Classic single-pass `ToneCurvePV2012*` point curves: x in 0..255 (negative),
-    /// y in 0..1 (positive).
-    Single { x: Nodes, y: Nodes },
-    /// v3.1 multi-pass: a linear inversion from `start` (→ white) to `end`
-    /// (→ black) followed by a full-frame mask curve with evenly spaced nodes.
-    Multi {
-        start: [f64; 3],
-        end: [f64; 3],
-        y: Nodes,
-    },
-}
-
-/// `updateToneCurve`: build the three channel curves for a frame.
-#[cfg(test)]
-pub fn update_tone_curve(o: &Origins, s: &Settings) -> ToneCurves {
-    update_tone_curve_roll(o, s, RollClip::default())
-}
-
-/// `updateToneCurve` with the roll clip offsets (`rollWhiteClip`,
-/// `rollBlackClip`) that Basic Lab roll processing passes in.
-pub fn update_tone_curve_roll(o: &Origins, s: &Settings, rc: RollClip) -> ToneCurves {
-    let ev = engine_values(o, s);
-    let cl = clip_for_curve(o, s, rc);
-    let n = node_count(cl.width[0].min(cl.width[1]).min(cl.width[2]), s);
-    let mut nodes = make_nodes(n);
-    let xs = x_nodes(&clip(o, s, rc), s, &nodes);
-    let mids = [ev.cyan, ev.tint, ev.temp];
-    let has_wb = s.wb_tint != 0.0 || s.wb_temp != 0.0;
-
-    if s.layer_order == LayerOrder::ColorFirst {
-        if has_wb {
-            nodes = color_linear_layer(&nodes, s);
-        }
-        nodes = color_gamma_layer(&nodes, mids);
-    }
-    nodes = exposure_layer(&nodes, ev.exposure);
-    nodes = gamma_layer(&nodes, ev.brightness);
-    nodes = contrast_layer(&nodes, ev.contrast);
-    nodes = highlights_layer(&nodes, ev.highlights);
-    nodes = shadows_layer(&nodes, ev.shadows);
-    nodes = blacks_layer(&nodes, &ev);
-    nodes = whites_layer(&nodes, s, &ev);
-    let (a, b) = if is_positive(s) {
-        (cl.end_over, cl.start_over)
-    } else {
-        (cl.start_over, cl.end_over)
-    };
-    nodes = clip_offset_layer(&nodes, a, b);
-
-    if s.layer_order == LayerOrder::TonesFirst {
-        let base = make_nodes(n);
-        if has_wb {
-            let col = color_linear_layer(&base, s);
-            nodes = add_with_base(&nodes, &col, &base);
-        }
-        let cg = color_gamma_layer(&base, mids);
-        nodes = add_with_base(&nodes, &cg, &base);
-    }
-
-    if s.high_cyan != 0.0 || s.high_tint != 0.0 || s.high_temp != 0.0 {
-        nodes = highlight_toning(&nodes, s);
-    }
-    if s.shadow_cyan != 0.0 || s.shadow_tint != 0.0 || s.shadow_temp != 0.0 {
-        nodes = shadow_toning(&nodes, s);
-    }
-
-    if is_positive(s) {
-        return ToneCurves::Single { x: xs, y: nodes };
-    }
-    if s.correction_type == CorrectionType::MultiPass {
-        let last = xs[0].len() - 1;
-        return ToneCurves::Multi {
-            start: [xs[0][0], xs[1][0], xs[2][0]],
-            end: [xs[0][last], xs[1][last], xs[2][last]],
-            y: nodes,
+            1.0
         };
-    }
-    ToneCurves::Single {
-        x: xs,
-        y: invert(&nodes),
-    }
-}
-
-/// `revertColorLinearLayer` (first L20_1): undo the linear-fixed WB offsets.
-fn revert_color_linear_layer(n: &Nodes, offs: [f64; 3]) -> Nodes {
-    let hi = 1.0 - L9;
-    map_nodes(n, |x, c, _| {
-        let off = offs[c];
-        let v = x - off;
-        if v > L9 {
-            (hi * x - hi * L9 - hi * off) / (hi - off) + L9
-        } else if v < L8 {
-            x * L8 / (L8 + off)
-        } else {
-            v
-        }
-    })
-}
-
-/// The plugin's colour picker (`NLPViewController` L44_1): take the picked
-/// positive colour, undo contrast, brightness/auto-tone gamma and the current
-/// WB offsets, then linear-balance it. Returns (temp, tint).
-pub fn eyedropper_wb(
-    color: [f64; 3],
-    o: &Origins,
-    s: &Settings,
-) -> Result<(f32, f32), &'static str> {
-    let p = tone_profile(s.tone_profile);
-    let nodes: Nodes = [vec![color[0]], vec![color[1]], vec![color[2]]];
-    let nodes = contrast_layer(&nodes, -(s.contrast as f64) - p.default_contrast);
-    let auto = if p.auto_tone {
-        auto_tone_gamma(o, s)
-    } else {
-        1.0
-    };
-    let g = (1.0 + s.brightness as f64 * 0.02) * p.default_gamma * auto;
-    let nodes = gamma_layer(&nodes, g);
-    let offs = [
-        0.0,
-        -(s.wb_tint as f64) / 255.0 * TEMP_MULTIPLIER,
-        -(s.wb_temp as f64) / 255.0 * TEMP_MULTIPLIER,
-    ];
-    let nodes = revert_color_linear_layer(&nodes, offs);
-    let c = [nodes[0][0], nodes[1][0], nodes[2][0]];
-    if c.iter().any(|v| *v > 0.95) {
-        return Err(
-            "The area you've selected is too bright. Please try something closer to neutral grey.",
-        );
-    }
-    if c.iter().any(|v| *v < 0.05) {
-        return Err(
-            "The area you've selected is too dark. Please try something closer to neutral grey.",
-        );
-    }
-    let v2 = 255.0 * (c[0] - c[1]);
-    let v3 = 255.0 * (c[0] - c[2]);
-    Ok((
-        (-v3 / TEMP_MULTIPLIER) as f32,
-        (-v2 / TEMP_MULTIPLIER) as f32,
-    ))
-}
-
-// ---- spline + LUT -------------------------------------------------------------------
-
-// ---- darkroom print exposure ----------------------------------------------------
-
-/// Photographic paper model: density vs. log10 exposure is a logistic
-/// (S-shaped) characteristic curve (grade-2-like: ~1.1 log units from paper
-/// white to maximum black). The image's black and white map to the paper's
-/// maximum black `IMG_DMAX` and paper white (density 0), which lie just
-/// inside the curve's asymptotes `PAPER_DMIN` / `PAPER_DMAX`.
-const IMG_DMAX: f64 = 2.1;
-const PAPER_DMIN: f64 = -0.05;
-const PAPER_DMAX: f64 = 2.15;
-const PAPER_K: f64 = 5.35;
-
-/// Re-print a positive value (encoded, 0..1) with the print time changed by
-/// `ev` stops: + EV = less light on the paper = lighter print. The value is
-/// turned into print density, traced back through the paper curve to its log
-/// exposure, shifted by `ev · log10(2)` and printed again.
-pub fn print_exposure(y: f32, ev: f32) -> f32 {
-    let r_min = 10f64.powf(-IMG_DMAX);
-    let lin = super::color::srgb_decode(y.clamp(0.0, 1.0)) as f64;
-    let d = -(r_min + (1.0 - r_min) * lin).log10();
-    let range = PAPER_DMAX - PAPER_DMIN;
-    // Inverse logistic → relative log exposure.
-    let log_e = -(range / (d - PAPER_DMIN) - 1.0).ln() / PAPER_K;
-    let log_e2 = log_e - ev as f64 * std::f64::consts::LOG10_2;
-    let d2 = PAPER_DMIN + range / (1.0 + (-PAPER_K * log_e2).exp());
-    let lin2 = ((10f64.powf(-d2) - r_min) / (1.0 - r_min)).clamp(0.0, 1.0);
-    super::color::srgb_encode(lin2 as f32)
-}
-
-/// Natural cubic spline through (x, y) as Lightroom/Photoshop use for point curves.
-pub struct Spline {
-    x: Vec<f64>,
-    y: Vec<f64>,
-    m: Vec<f64>,
-}
-
-impl Spline {
-    pub fn new(xs: &[f64], ys: &[f64]) -> Self {
-        // Force strictly increasing x.
-        let mut x: Vec<f64> = Vec::with_capacity(xs.len());
-        let mut y: Vec<f64> = Vec::with_capacity(ys.len());
-        for (i, (&xi, &yi)) in xs.iter().zip(ys).enumerate() {
-            let xi = if i > 0 && xi <= x[i - 1] {
-                x[i - 1] + 1e-3
-            } else {
-                xi
-            };
-            x.push(xi);
-            y.push(yi);
-        }
-        let n = x.len();
-        let mut m = vec![0.0; n];
-        if n > 2 {
-            // Solve tridiagonal system for second derivatives.
-            let mut a = vec![0.0; n];
-            let mut b = vec![0.0; n];
-            let mut c = vec![0.0; n];
-            let mut d = vec![0.0; n];
-            b[0] = 1.0;
-            b[n - 1] = 1.0;
-            for i in 1..n - 1 {
-                let h0 = x[i] - x[i - 1];
-                let h1 = x[i + 1] - x[i];
-                a[i] = h0;
-                b[i] = 2.0 * (h0 + h1);
-                c[i] = h1;
-                d[i] = 6.0 * ((y[i + 1] - y[i]) / h1 - (y[i] - y[i - 1]) / h0);
-            }
-            for i in 1..n {
-                let w = a[i] / b[i - 1];
-                b[i] -= w * c[i - 1];
-                d[i] -= w * d[i - 1];
-            }
-            m[n - 1] = d[n - 1] / b[n - 1];
-            for i in (0..n - 1).rev() {
-                m[i] = (d[i] - c[i] * m[i + 1]) / b[i];
-            }
-        }
-        Self { x, y, m }
-    }
-
-    pub fn eval(&self, v: f64) -> f64 {
-        let n = self.x.len();
-        if v <= self.x[0] {
-            return self.y[0];
-        }
-        if v >= self.x[n - 1] {
-            return self.y[n - 1];
-        }
-        let i = match self.x.binary_search_by(|p| p.partial_cmp(&v).unwrap()) {
-            Ok(i) => return self.y[i],
-            Err(i) => i - 1,
+        let brightness = 2f64.powf(-(s.brightness as f64) / 50.0 * 0.7);
+        let f = |v: f32| v as f64;
+        // Mids, highlight and shadow toning per channel: + cyan / magenta /
+        // yellow takes away red / green / blue.
+        let (mid, high, shadow) = match c {
+            0 => (s.mid_cyan, s.high_cyan, s.shadow_cyan),
+            1 => (s.mid_tint, s.high_tint, s.shadow_tint),
+            _ => (s.mid_temp, s.high_temp, s.shadow_temp),
         };
-        let h = self.x[i + 1] - self.x[i];
-        let t = (v - self.x[i]) / h;
-        let a = 1.0 - t;
-        a * self.y[i]
-            + t * self.y[i + 1]
-            + ((a * a * a - a) * self.m[i] + (t * t * t - t) * self.m[i + 1]) * h * h / 6.0
+        let wb = [0.0, f(s.wb_tint), f(s.wb_temp)][c];
+        let filtration = f(s.filtration[c]) + wb;
+        Self {
+            kind,
+            levels: l[c],
+            clip,
+            knots,
+            gamma: auto * brightness,
+            mid_gamma: 2f64.powf(f(mid) / 75.0 * 0.5),
+            whites: f(s.whites) - f(s.glow),
+            blacks: f(s.blacks) + f(s.fade),
+            highlights: f(s.highlights) + f(s.glow) / 1.5,
+            shadows: f(s.shadows) - f(s.fade) / 1.5,
+            tone_high: -f(high) / 75.0 * 0.12,
+            tone_shadow: -f(shadow) / 75.0 * 0.12,
+            high_range: f(s.high_range),
+            shadow_range: f(s.shadow_range),
+            contrast: 1.0 + f(s.contrast) * 0.015,
+            exposure: filtration * CC - f(s.print_exposure) * std::f64::consts::LOG10_2,
+        }
+    }
+
+    /// Normalised density: 0 prints black, 1 prints white.
+    fn normalised(&self, d: f64) -> f64 {
+        let x = match self.kind {
+            ImageType::Negative => self.levels.normalise(d),
+            ImageType::Positive => 1.0 - self.levels.normalise(d),
+            // Already positive: d is −log10 of the linear value.
+            ImageType::EditOnly => return color::srgb_encode(10f64.powf(-d) as f32) as f64,
+        };
+        let (b, w) = self.clip;
+        (x - b) / (1.0 - b - w).max(1e-3)
+    }
+
+    /// Shaped tone before the paper (1 = white).
+    fn tone(&self, d: f64) -> f64 {
+        let mut x = self.normalised(d);
+        x = x * (1.0 + self.whites * 0.006) + self.blacks * 0.004 * (1.0 - x);
+        x = pow_ext(x, self.gamma * self.mid_gamma);
+        x += 0.10 * self.highlights / 50.0 * highlight_bump(x, 5.0);
+        x += 0.10 * self.shadows / 50.0 * shadow_bump(x, 5.0);
+        x += self.tone_high * highlight_bump(x, self.high_range);
+        x += self.tone_shadow * shadow_bump(x, self.shadow_range);
+        0.5 + (x - 0.5) * self.contrast
+    }
+
+    /// Paper log exposure (0 = white … `PAPER_RANGE` = black).
+    fn exposure(&self, d: f64) -> f64 {
+        (1.0 - self.tone(d)) * PAPER_RANGE + self.exposure
+    }
+
+    /// Encoded output (sRGB tone response). Already positive scans keep
+    /// their own tones; everything else is printed with the tone profile.
+    fn output(&self, d: f64) -> f64 {
+        let x = 1.0 - self.exposure(d) / PAPER_RANGE;
+        if self.kind == ImageType::EditOnly {
+            return x;
+        }
+        tone_curve(&self.knots, x)
     }
 }
 
-pub const LUT_SIZE: usize = 4096;
-
-/// Per-channel lookup table: encoded negative value (0..1) → encoded positive (0..1).
+/// Per-channel lookup table: density above base → encoded positive (0..1).
 #[derive(Clone)]
 pub struct CurveLut {
     pub lut: [Vec<f32>; 3],
+    /// Density span shown by [`CurveLut::sample`].
+    view: (f64, f64),
 }
 
 impl CurveLut {
-    pub fn from_curves(c: &ToneCurves) -> Self {
-        let mut lut: [Vec<f32>; 3] = Default::default();
-        for ch in 0..3 {
-            lut[ch] = match c {
-                ToneCurves::Single { x, y } => {
-                    let sp = Spline::new(&x[ch], &y[ch]);
-                    (0..LUT_SIZE)
-                        .map(|i| {
-                            sp.eval(i as f64 / (LUT_SIZE - 1) as f64 * 255.0)
-                                .clamp(0.0, 1.0) as f32
-                        })
-                        .collect()
+    pub fn new(l: &Levels, s: &Settings) -> Self {
+        let lut = std::array::from_fn(|c| {
+            let cc = ChannelCurve::new(l, s, c);
+            let mut v: Vec<f32> = (0..LUT_SIZE)
+                .map(|i| cc.output(lut_density(i)).clamp(0.0, 1.0) as f32)
+                .collect();
+            // Strong tone adjustments must never fold the curve back.
+            if v[LUT_SIZE - 1] >= v[0] {
+                for i in 1..LUT_SIZE {
+                    v[i] = v[i].max(v[i - 1]);
                 }
-                ToneCurves::Multi { start, end, y } => {
-                    let n = y[ch].len();
-                    let xs: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();
-                    let sp = Spline::new(&xs, &y[ch]);
-                    let (s0, e0) = (start[ch], end[ch]);
-                    let w = if (e0 - s0).abs() < 1e-6 {
-                        1e-6
-                    } else {
-                        e0 - s0
-                    };
-                    (0..LUT_SIZE)
-                        .map(|i| {
-                            let x = i as f64 / (LUT_SIZE - 1) as f64 * 255.0;
-                            let p = (1.0 - (x - s0) / w).clamp(0.0, 1.0);
-                            sp.eval(p).clamp(0.0, 1.0) as f32
-                        })
-                        .collect()
-                }
-            };
-        }
-        Self { lut }
-    }
-
-    /// Apply a darkroom print-exposure change (stops) on top of the curves.
-    pub fn with_print_exposure(mut self, ev: f32) -> Self {
-        if ev.abs() > 1e-4 {
-            for ch in self.lut.iter_mut() {
-                for v in ch.iter_mut() {
-                    *v = print_exposure(*v, ev);
+            } else {
+                for i in 1..LUT_SIZE {
+                    v[i] = v[i].min(v[i - 1]);
                 }
             }
+            v
+        });
+        let view = if s.image_type == ImageType::EditOnly {
+            (0.0, 2.5)
+        } else {
+            let lo = l.iter().map(|c| c.lo).fold(f64::MAX, f64::min);
+            let hi = l.iter().map(|c| c.hi).fold(f64::MIN, f64::max);
+            let pad = (hi - lo) * 0.1;
+            (lo - pad, hi + pad)
+        };
+        Self { lut, view }
+    }
+
+    /// The unconverted negative as scanned: base at 0.97 linear.
+    pub fn negative_view() -> Self {
+        let lut = std::array::from_fn(|_| {
+            (0..LUT_SIZE)
+                .map(|i| color::srgb_encode(0.97 * 10f32.powf(-lut_density(i) as f32)))
+                .collect()
+        });
+        Self {
+            lut,
+            view: (0.0, 2.5),
         }
-        self
     }
 
     #[inline]
-    pub fn apply(&self, c: usize, v: f32) -> f32 {
-        let x = v.clamp(0.0, 1.0) * (LUT_SIZE - 1) as f32;
+    pub fn apply(&self, c: usize, d: f32) -> f32 {
+        let x = ((d - LUT_DMIN as f32) / (LUT_DMAX - LUT_DMIN) as f32 * (LUT_SIZE - 1) as f32)
+            .clamp(0.0, (LUT_SIZE - 1) as f32);
         let i = x as usize;
         let l = &self.lut[c];
         if i >= LUT_SIZE - 1 {
@@ -976,94 +467,211 @@ impl CurveLut {
         l[i] + (l[i + 1] - l[i]) * t
     }
 
-    /// Curves sampled for display (x: 0..1 negative input, y per channel).
+    /// Curves sampled for display: x 0..1 across the analysed density span
+    /// (thin to dense), y per channel.
     pub fn sample(&self, n: usize) -> Vec<[f32; 4]> {
         (0..n)
             .map(|i| {
-                let x = i as f32 / (n - 1) as f32;
-                [x, self.apply(0, x), self.apply(1, x), self.apply(2, x)]
+                let t = i as f64 / (n - 1) as f64;
+                let d = (self.view.0 + t * (self.view.1 - self.view.0)) as f32;
+                [
+                    t as f32,
+                    self.apply(0, d),
+                    self.apply(1, d),
+                    self.apply(2, d),
+                ]
             })
             .collect()
     }
+}
+
+fn lut_density(i: usize) -> f64 {
+    LUT_DMIN + i as f64 / (LUT_SIZE - 1) as f64 * (LUT_DMAX - LUT_DMIN)
+}
+
+/// The colour picker: white balance (temp, tint) that prints the sampled
+/// density `d` neutral. With equal paper exposure in all three channels
+/// the print is grey, so temp and tint are the blue and green exposure
+/// differences from red, in CC.
+pub fn eyedropper_wb(d: [f64; 3], l: &Levels, s: &Settings) -> Result<(f32, f32), &'static str> {
+    let s = Settings {
+        wb_temp: 0.0,
+        wb_tint: 0.0,
+        ..s.clone()
+    };
+    let cc: [ChannelCurve; 3] = std::array::from_fn(|c| ChannelCurve::new(l, &s, c));
+    let x: [f64; 3] = std::array::from_fn(|c| cc[c].tone(d[c]));
+    if x.iter().any(|v| *v > 0.97) {
+        return Err(
+            "The area you've selected is too bright. Please try something closer to neutral grey.",
+        );
+    }
+    if x.iter().any(|v| *v < 0.03) {
+        return Err(
+            "The area you've selected is too dark. Please try something closer to neutral grey.",
+        );
+    }
+    let u: [f64; 3] = std::array::from_fn(|c| cc[c].exposure(d[c]));
+    Ok((((u[0] - u[2]) / CC) as f32, ((u[0] - u[1]) / CC) as f32))
+}
+
+/// Temp / tint (CC) that bring normalised channel values `x` to neutral.
+pub fn balance_wb(x: [f64; 3]) -> (f32, f32) {
+    let u = x.map(|v| (1.0 - v) * PAPER_RANGE);
+    (((u[0] - u[2]) / CC) as f32, ((u[0] - u[1]) / CC) as f32)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn origins() -> Origins {
+    fn levels() -> Levels {
         [
-            ChannelOrigin {
-                white: 40.0,
-                black: 200.0,
-                mean: 0.45,
+            ChannelLevels {
+                lo: 0.10,
+                hi: 1.00,
+                mid: 0.50,
+                bow: 0.0,
             },
-            ChannelOrigin {
-                white: 30.0,
-                black: 180.0,
-                mean: 0.45,
+            ChannelLevels {
+                lo: 0.12,
+                hi: 1.10,
+                mid: 0.58,
+                bow: 0.0,
             },
-            ChannelOrigin {
-                white: 20.0,
-                black: 150.0,
-                mean: 0.45,
+            ChannelLevels {
+                lo: 0.15,
+                hi: 1.25,
+                mid: 0.66,
+                bow: 0.0,
             },
         ]
     }
 
+    fn mid_grey(l: &Levels, c: usize) -> f32 {
+        (l[c].lo + (l[c].hi - l[c].lo) * 0.5) as f32
+    }
+
+    /// A bowed channel still maps its ends to 0 and 1, stays monotone
+    /// beyond them, and reads a grey on its curve as the green value.
     #[test]
-    fn sigmoid_is_normalised() {
-        assert!((sigmoid(3.0, 0.5, 0.0, 1.0)).abs() < 1e-9);
-        assert!((sigmoid(3.0, 0.5, 1.0, 1.0) - 1.0).abs() < 1e-9);
-        let y = sigmoid(3.0, 0.5, 0.3, 1.0);
-        assert!((inv_sigmoid(3.0, 0.5, y, 1.0) - 0.3).abs() < 1e-6);
+    fn bowed_levels_follow_the_neutral_curve() {
+        for q in [-0.4, 0.3] {
+            let l = ChannelLevels {
+                lo: 0.2,
+                hi: 1.4,
+                mid: 0.8,
+                bow: q,
+            };
+            assert!(l.normalise(0.2).abs() < 1e-9 && (l.normalise(1.4) - 1.0).abs() < 1e-9);
+            let mut prev = f64::MIN;
+            for i in -20..=140 {
+                let x = l.normalise(i as f64 * 0.01);
+                assert!(x > prev, "bow {q}: not monotone at {i}");
+                prev = x;
+            }
+            for x in [-0.2, 0.1, 0.5, 0.9, 1.3] {
+                let d = l.density(x);
+                assert!((l.normalise(d) - x).abs() < 1e-9, "bow {q} at {x}");
+            }
+            let d = l.lo + (l.hi - l.lo) * ((1.0 + q) * 0.3 - q * 0.09);
+            assert!((l.normalise(d) - 0.3).abs() < 1e-9, "bow {q}");
+        }
     }
 
     #[test]
-    fn negative_curve_inverts() {
-        let s = Settings::default();
-        for corr in [CorrectionType::SinglePass, CorrectionType::MultiPass] {
-            let mut s = s.clone();
-            s.correction_type = corr;
-            let lut = CurveLut::from_curves(&update_tone_curve(&origins(), &s));
-            for c in 0..3 {
-                let lo = lut.apply(c, 0.0);
-                let hi = lut.apply(c, 1.0);
-                assert!(lo > 0.9, "white end {lo}");
-                assert!(hi < 0.1, "black end {hi}");
-                // monotonic decreasing (roughly)
-                assert!(lut.apply(c, 0.3) > lut.apply(c, 0.5));
-            }
+    fn negative_prints_thin_dark_and_dense_light() {
+        let l = levels();
+        let lut = CurveLut::new(&l, &Settings::default());
+        for c in 0..3 {
+            assert!(lut.apply(c, l[c].lo as f32) < 0.1, "black end");
+            assert!(lut.apply(c, l[c].hi as f32) > 0.9, "white end");
+            assert!(lut.apply(c, 0.4) < lut.apply(c, 0.7));
         }
+    }
+
+    #[test]
+    fn normalised_mid_prints_mid_grey_in_every_channel() {
+        let l = levels();
+        let s = Settings {
+            tone_profile: ToneProfile::AllSoft,
+            ..Settings::default()
+        };
+        let lut = CurveLut::new(&l, &s);
+        let y: Vec<f32> = (0..3).map(|c| lut.apply(c, mid_grey(&l, c))).collect();
+        // Every channel lands on the same value: the slopes are matched.
+        assert!(
+            (y[0] - y[1]).abs() < 1e-3 && (y[1] - y[2]).abs() < 1e-3,
+            "{y:?}"
+        );
     }
 
     #[test]
     fn print_exposure_behaves_like_paper() {
-        for y in [0.0f32, 0.1, 0.5, 0.9, 1.0] {
-            assert!(
-                (print_exposure(y, 0.0) - y).abs() < 2e-3,
-                "identity at 0 EV for {y}"
-            );
-        }
-        // One stop up lightens, one down darkens, monotonic in EV.
-        let m = 0.45;
-        assert!(print_exposure(m, 1.0) > m && print_exposure(m, -1.0) < m);
-        assert!(print_exposure(m, 2.0) > print_exposure(m, 1.0));
+        let l = levels();
+        let at = |ev: f32| {
+            let s = Settings {
+                print_exposure: ev,
+                ..Settings::default()
+            };
+            CurveLut::new(&l, &s).apply(1, mid_grey(&l, 1))
+        };
+        let m = at(0.0);
+        assert!(at(1.0) > m && at(-1.0) < m);
+        assert!(at(2.0) > at(1.0));
         // Extremes saturate towards paper white / max black, but never flip.
-        assert!(print_exposure(m, 5.0) > 0.95);
-        assert!(print_exposure(m, -5.0) < 0.05);
-        assert!(print_exposure(0.2, -3.0) <= print_exposure(0.3, -3.0));
+        assert!(at(5.0) > 0.95);
+        assert!(at(-5.0) < 0.05);
     }
 
     #[test]
     fn warm_temp_reduces_blue() {
-        let o = origins();
+        let l = levels();
         let s0 = Settings::default();
-        let mut s1 = s0.clone();
-        s1.wb_temp = 20.0;
-        let l0 = CurveLut::from_curves(&update_tone_curve(&o, &s0));
-        let l1 = CurveLut::from_curves(&update_tone_curve(&o, &s1));
-        let mid = 95.0 / 255.0;
-        assert!(l1.apply(2, mid) < l0.apply(2, mid));
+        let s1 = Settings {
+            wb_temp: 10.0,
+            ..s0.clone()
+        };
+        let d = mid_grey(&l, 2);
+        assert!(CurveLut::new(&l, &s1).apply(2, d) < CurveLut::new(&l, &s0).apply(2, d));
+    }
+
+    #[test]
+    fn eyedropper_neutralises_the_sample() {
+        let l = levels();
+        let s = Settings::default();
+        // A grey with a cast: green and blue a little dense.
+        let d = [0.5, 0.65, 0.78];
+        let (t, n) = eyedropper_wb(d, &l, &s).unwrap();
+        let s = Settings {
+            wb_temp: t,
+            wb_tint: n,
+            ..s
+        };
+        let lut = CurveLut::new(&l, &s);
+        let y: Vec<f32> = (0..3).map(|c| lut.apply(c, d[c] as f32)).collect();
+        assert!(
+            (y[0] - y[1]).abs() < 2e-3 && (y[0] - y[2]).abs() < 2e-3,
+            "{y:?}"
+        );
+    }
+
+    #[test]
+    fn extreme_tone_settings_stay_monotonic() {
+        let l = levels();
+        let s = Settings {
+            highlights: 50.0,
+            shadows: -50.0,
+            whites: 50.0,
+            blacks: -50.0,
+            contrast: 50.0,
+            high_cyan: 75.0,
+            shadow_temp: -75.0,
+            ..Settings::default()
+        };
+        let lut = CurveLut::new(&l, &s);
+        for c in 0..3 {
+            assert!(lut.lut[c].windows(2).all(|w| w[1] >= w[0]));
+        }
     }
 }
