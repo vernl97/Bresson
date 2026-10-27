@@ -161,6 +161,8 @@ pub struct RollInfo {
     pub notes: String,
     /// Unix seconds when the roll was first set up.
     pub created: u64,
+    /// Custom export folder for this roll.
+    pub export_dir: Option<PathBuf>,
 }
 
 pub fn roll_info_path(dir: &Path) -> PathBuf {

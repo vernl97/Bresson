@@ -461,6 +461,31 @@ impl NlpApp {
                         )
                         .on_hover_text("Thumbnail size");
                         ui.label(tiny("Small"));
+                        let (done, total) = (self.auto.convert_done, self.auto.convert_total);
+                        if self.auto.busy() || done < total {
+                            ui.add_space(12.0);
+                            let auto = !self.auto.queue.is_empty() || self.auto.roll_pass == super::auto::RollPass::Running;
+                            if auto
+                                && ui
+                                    .add(egui::Button::new(tiny("Stop")).frame(false))
+                                    .on_hover_text("Stop converting new frames by themselves")
+                                    .clicked()
+                            {
+                                self.stop_auto();
+                            }
+                            let label = if self.auto.roll_pass == super::auto::RollPass::Running {
+                                "Balancing the roll…".to_string()
+                            } else {
+                                format!("Converting {}/{}", done.min(total), total.max(1))
+                            };
+                            ui.add(
+                                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                                    .desired_width(120.0)
+                                    .desired_height(4.0)
+                                    .fill(theme::ACCENT),
+                            );
+                            ui.label(RichText::new(label).small().color(theme::MUTED));
+                        }
                         if self.export_total > 0 && self.export_done < self.export_total {
                             ui.add_space(12.0);
                             ui.add(

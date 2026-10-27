@@ -153,6 +153,29 @@ impl NlpApp {
         }
     }
 
+    /// The open roll's custom export folder.
+    pub fn roll_export_dir(&self) -> Option<PathBuf> {
+        self.roll.info.as_ref().and_then(|r| r.export_dir.clone())
+    }
+
+    /// Remember a custom export folder (`None`: next to the scans), with
+    /// the roll when a folder is open, else as the app default.
+    pub fn set_export_dir(&mut self, dir: Option<PathBuf>) {
+        match self.folder.clone().filter(|_| !self.single_mode) {
+            Some(f) => {
+                let mut info = self.roll.info.clone().unwrap_or_else(|| RollInfo {
+                    name: folder_name(&f),
+                    ..Default::default()
+                });
+                info.export_dir = dir;
+                self.save_roll_info(&f, info);
+                self.defaults.export.output_dir = None;
+            }
+            None => self.defaults.export.output_dir = dir,
+        }
+        let _ = sidecar::save_defaults(&self.defaults);
+    }
+
     /// Write the roll info and give it to frames without film details of their own.
     pub fn save_roll_info(&mut self, dir: &Path, mut info: RollInfo) {
         if info.created == 0 {

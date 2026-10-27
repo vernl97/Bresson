@@ -20,7 +20,7 @@ use eframe::egui;
 use crate::engine::decode::{self, SourceImage};
 use crate::engine::pipeline::{self, AutoWb, Renderer};
 use crate::engine::settings::{
-    ExportFormat, ExportPreset, ExportSettings, OutputSpace, Settings, WbMode, lab,
+    ExportFormat, ExportPreset, ExportSettings, OutputSpace, Placement, Settings, WbMode, lab,
 };
 use crate::engine::sidecar::{self, Defaults, Sidecar};
 use jobs::{JobResult, Jobs};
@@ -164,6 +164,8 @@ pub struct Toast {
     pub text: String,
     pub until: f64,
     pub error: bool,
+    /// A file the toast offers to show in Finder / Explorer.
+    pub reveal: Option<PathBuf>,
 }
 
 pub struct NlpApp {
@@ -256,7 +258,30 @@ impl NlpApp {
             text: text.into(),
             until,
             error,
+            reveal: None,
         });
+    }
+
+    /// Report a file that couldn't be read. Failures arriving together
+    /// share one toast instead of one each.
+    fn read_failed(&mut self, name: String) {
+        let until = self.time + 8.0;
+        self.auto.read_failures.push(name);
+        let names = &self.auto.read_failures;
+        let text = match names.len() {
+            1 => format!("Couldn't read {}", names[0]),
+            n => format!("Couldn't read {n} files: {}", names.join(", ")),
+        };
+        let live = self.toasts.iter_mut().find(|t| t.error && t.text.starts_with("Couldn't read"));
+        match live {
+            Some(t) => (t.text, t.until) = (text, until),
+            None => self.toasts.push(Toast {
+                text,
+                until,
+                error: true,
+                reveal: None,
+            }),
+        }
     }
 
     // ---- library --------------------------------------------------------------
@@ -489,6 +514,7 @@ impl NlpApp {
                 settings: self.frames[i].sc.settings.clone(),
             })
             .collect();
+        self.convert_started(idx.len());
         self.jobs.spawn(move || jobs::convert(items, as_roll, true));
     }
 
@@ -642,18 +668,18 @@ impl NlpApp {
             return;
         }
 
-        let default_dir = targets
+        let scan_dir = targets
             .first()
             .and_then(|&idx| self.frames.get(idx))
             .and_then(|f| f.path.parent())
             .map(Path::to_path_buf)
             .or_else(|| self.folder.clone())
             .unwrap_or_else(|| PathBuf::from("."));
-
-        let display_dir = match &self.defaults.export.output_dir {
-            Some(d) if !d.as_os_str().is_empty() && d.exists() => d.clone(),
-            _ => default_dir.clone(),
-        };
+        // A custom folder: the roll's own, else the last one chosen.
+        let custom_dir = self
+            .roll_export_dir()
+            .or_else(|| self.defaults.export.output_dir.clone())
+            .filter(|d| !d.as_os_str().is_empty() && d.exists());
 
         let mut go = false;
         let mut should_close = false;
@@ -732,16 +758,54 @@ impl NlpApp {
                         .small()
                         .color(theme::MUTED),
                 );
-                let display_str = display_dir.to_string_lossy().to_string();
-                let field = egui::Button::new(egui::RichText::new(&display_str).color(theme::TEXT))
-                    .truncate()
-                    .right_text(egui::RichText::new("Change…").color(theme::ACCENT))
-                    .min_size(egui::vec2(ui.available_width(), 30.0));
-                if ui.add(field).on_hover_text(&display_str).clicked() {
-                    if let Some(picked) = picker::pick_folder(Some(&display_dir), Some("Choose")) {
-                        picked_dir = Some(picked);
+                let dest_name = |custom: bool, p: Placement| match (custom, p) {
+                    (true, _) => "Custom folder",
+                    (false, Placement::Subfolder) => "Subfolder next to the scans",
+                    (false, Placement::SameFolder) => "Next to the scans",
+                };
+                let custom = custom_dir.is_some();
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("export_dest")
+                        .width(if !custom && ex.placement == Placement::Subfolder { 220.0 } else { ui.available_width() - 4.0 })
+                        .selected_text(dest_name(custom, ex.placement))
+                        .show_ui(ui, |ui| {
+                            for p in [Placement::Subfolder, Placement::SameFolder] {
+                                if ui.selectable_label(!custom && ex.placement == p, dest_name(false, p)).clicked() {
+                                    ex.placement = p;
+                                    picked_dir = Some(PathBuf::new());
+                                    save = true;
+                                }
+                            }
+                            if ui.selectable_label(custom, "Custom folder…").clicked() {
+                                let start = custom_dir.clone().unwrap_or_else(|| scan_dir.clone());
+                                if let Some(picked) = picker::pick_folder(Some(&start), Some("Choose")) {
+                                    picked_dir = Some(picked);
+                                }
+                            }
+                        });
+                    if !custom && ex.placement == Placement::Subfolder {
+                        save |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut ex.subfolder)
+                                    .hint_text("Positives")
+                                    .desired_width(ui.available_width() - 4.0),
+                            )
+                            .on_hover_text("Subfolder name")
+                            .changed();
                     }
-                }
+                });
+                let mut shown = ex.clone();
+                shown.output_dir = custom_dir.clone();
+                let dest = crate::engine::export::output_path(
+                    &first_path,
+                    &shown,
+                    &crate::engine::export::NameCtx { n: 1, meta: &first_meta },
+                );
+                let dest = dest.parent().unwrap_or(&scan_dir).display().to_string();
+                let r = ui.add(
+                    egui::Label::new(egui::RichText::new(&dest).small().color(theme::FAINT)).truncate(),
+                );
+                r.on_hover_text(&dest);
 
                 ui.add_space(10.0);
                 egui::CollapsingHeader::new(
@@ -838,16 +902,37 @@ impl NlpApp {
                             .response
                             .on_hover_text("Long edge of the exported image");
                         let ui = &mut cols[1];
-                        ui.label(egui::RichText::new("File name").small().color(theme::MUTED))
-                            .on_hover_text(
-                                "Tokens: {name} source name · {suffix} · {n} or {n:03} position in the export · {stock} · {iso} · {date} scan date",
-                            );
+                        ui.label(egui::RichText::new("File name").small().color(theme::MUTED));
                         save |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut ex.name_template)
                                     .desired_width(ui.available_width() - 4.0),
                             )
                             .changed();
+                    });
+                    // Click a token to add it to the file name.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                        for (tok, tip) in [
+                            ("{name}", "Source file name"),
+                            ("{suffix}", "The suffix, e.g. -positive"),
+                            ("{n:03}", "Position in the export: 001, 002, …"),
+                            ("{stock}", "Film stock"),
+                            ("{iso}", "Film ISO"),
+                            ("{date}", "Scan date"),
+                        ] {
+                            if ui
+                                .add(
+                                    egui::Button::new(egui::RichText::new(tok).small().monospace().color(theme::MUTED))
+                                        .corner_radius(8.0),
+                                )
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                ex.name_template.push_str(tok);
+                                save = true;
+                            }
+                        }
                     });
                     let preview = crate::engine::export::file_name(
                         &first_path,
@@ -889,9 +974,10 @@ impl NlpApp {
         if save {
             let _ = crate::engine::sidecar::save_defaults(&self.defaults);
         }
+        // An empty path clears the custom folder.
         if let Some(picked) = picked_dir {
-            self.defaults.export.output_dir = Some(picked);
-            let _ = crate::engine::sidecar::save_defaults(&self.defaults);
+            let dir = (!picked.as_os_str().is_empty()).then_some(picked);
+            self.set_export_dir(dir);
         }
 
         if r.should_close() || should_close || go {
@@ -907,7 +993,7 @@ impl NlpApp {
             self.editor.export_open = false;
 
             let mut ex = self.defaults.export.clone();
-            ex.output_dir = Some(display_dir);
+            ex.output_dir = custom_dir;
 
             for &t in &targets {
                 self.save_frame(t);
@@ -922,6 +1008,7 @@ impl NlpApp {
         while let Ok(r) = self.jobs.rx.try_recv() {
             match r {
                 JobResult::ExposureVariance { items, spread } => {
+                    self.auto.convert_done += items.len();
                     if let Some(items) = self.auto_exposure_variance(items, spread) {
                         self.exposure_prompt = Some((items, spread));
                     }
@@ -946,8 +1033,8 @@ impl NlpApp {
                             self.auto_queue(i);
                         }
                         Err(e) => {
-                            self.frames[i].proxy = ProxyState::Failed(e.clone());
-                            self.toast(e, true);
+                            self.frames[i].proxy = ProxyState::Failed(e);
+                            self.read_failed(self.frames[i].name.clone());
                         }
                     }
                 }
@@ -971,10 +1058,11 @@ impl NlpApp {
                     roll,
                     errors,
                 } => {
-                    for e in errors {
-                        self.toast(e, true);
+                    for e in &errors {
+                        self.toast(e.clone(), true);
                     }
                     let n = frames.len();
+                    self.auto.convert_done += n + errors.len();
                     let paths: Vec<PathBuf> = frames.iter().map(|f| f.0.clone()).collect();
                     let auto = self.auto_converted(&paths, roll.is_some());
                     for (path, src, a, detected) in frames {
@@ -1032,13 +1120,17 @@ impl NlpApp {
                     match result {
                         Ok(p) => {
                             if self.export_done >= self.export_total {
+                                let dir = p.parent().unwrap_or(&p).display().to_string();
                                 let msg = format!(
-                                    "Exported {} positive cop{} (last: {})",
+                                    "Exported {} positive cop{} to {dir}",
                                     self.export_total,
                                     if self.export_total == 1 { "y" } else { "ies" },
-                                    p.display()
                                 );
                                 self.toast(msg, false);
+                                if let Some(t) = self.toasts.last_mut() {
+                                    t.reveal = Some(p);
+                                    t.until += 4.0;
+                                }
                             }
                         }
                         Err(e) => self.toast(format!("Export failed: {e}"), true),
@@ -1128,11 +1220,11 @@ impl NlpApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
         egui::Area::new(egui::Id::new("toasts"))
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -44.0])
-            .interactable(false)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     let n = self.toasts.len();
+                    let mut reveal = None;
                     for t in self.toasts.iter().skip(n.saturating_sub(3)) {
                         egui::Frame::new()
                             .fill(theme::SURFACE)
@@ -1156,8 +1248,29 @@ impl NlpApp {
                                         )
                                         .wrap(),
                                     );
+                                    if let Some(p) = &t.reveal {
+                                        let label = if cfg!(target_os = "macos") {
+                                            "Show in Finder"
+                                        } else {
+                                            "Show"
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(label).color(theme::ACCENT),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            reveal = Some(p.clone());
+                                        }
+                                    }
                                 });
                             });
+                    }
+                    if let Some(p) = reveal {
+                        picker::reveal(&p);
                     }
                 });
             });

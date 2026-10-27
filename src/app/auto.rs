@@ -34,6 +34,11 @@ pub struct AutoState {
     pub roll_pass: RollPass,
     /// The roll pass ignored the exposure metadata: the frames' spread in EV.
     pub exposure_note: Option<f64>,
+    /// Frames sent to conversion and come back, for the progress bar.
+    pub convert_total: usize,
+    pub convert_done: usize,
+    /// Files of this folder that couldn't be read, for the shared toast.
+    pub read_failures: Vec<String>,
     /// Exports waiting for their frame to be converted: frame, target, settings.
     pub export_waiting: Vec<(PathBuf, PathBuf, ExportSettings)>,
 }
@@ -108,7 +113,29 @@ impl NlpApp {
                 }
             })
             .collect();
+        self.convert_started(idx.len());
         self.jobs.spawn(move || jobs::convert(items, as_roll, true));
+    }
+
+    /// Count frames into the conversion progress.
+    pub fn convert_started(&mut self, n: usize) {
+        if self.auto.convert_done >= self.auto.convert_total {
+            (self.auto.convert_total, self.auto.convert_done) = (0, 0);
+        }
+        self.auto.convert_total += n;
+    }
+
+    /// Stop converting by itself: queued frames stay as they are.
+    pub fn stop_auto(&mut self) {
+        self.auto.convert_total -= self.auto.queue.len().min(self.auto.convert_total);
+        self.auto.queue.clear();
+        self.auto.queued_since = None;
+        self.auto.roll_pass = RollPass::Done;
+        for f in &mut self.frames {
+            if !f.sc.is_converted() {
+                f.auto_convert = false;
+            }
+        }
     }
 
     /// A roll pass found exposures more than 1 EV apart: balance by the
@@ -120,6 +147,7 @@ impl NlpApp {
             return Some(items);
         }
         self.auto.exposure_note = Some(spread);
+        self.convert_started(items.len());
         self.jobs.spawn(move || jobs::convert(items, true, false));
         None
     }
