@@ -1,6 +1,6 @@
 # NLP Studio
 
-A standalone Rust port of the **Negative Conversion Plugin** for Lightroom (see `../SPEC.md` and `../manual.md`). It reads camera RAW negatives or TIFF/JPEG scans, inverts them with the plugin's curve engine, and writes positive copies.
+A standalone film negative converter in Rust. It reads camera RAW negatives (camera scans) or TIFF/JPEG/PNG and scanner DNG scans, converts them with a density-based print engine, and writes positive copies. It started as a port of the Negative Lab Pro Lightroom plugin; it keeps the plugin's tone profiles and looks (as native data) but needs no Lightroom or plugin files.
 
 ## Build & run
 
@@ -14,19 +14,19 @@ cargo run --release -- help
 
 ```bash
 cargo run --release -- convert [--roll] [--roll-process NAME] [--tone NAME] [--wb NAME] \
-    [--lut NAME] [--border PCT] [--auto-crop] [--jpg] [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
-cargo run --release -- scan-prep FILES              # level + gamma 2.2 encode linear (gamma 1.0) TIF scans
+    [--lut NAME] [--border PCT] [--auto-crop] [--flat FILE] [--jpg] [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
+cargo run --release -- scan-prep FILES              # gamma-encode linear TIF scans (no longer needed: set the source to Linear Scan)
 cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorChecker negative (ev = stops over)
 ```
 
-`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Lab (each frame's own colour and density, default) or Darkroom (one setting for the roll). `--auto-crop` crops and straightens each frame to its detected frame before analysis. `--name` takes the export file name template (see Export below).
+`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Lab (each frame's own colour and density, default) or Darkroom (one setting for the roll). `--auto-crop` crops and straightens each frame to its detected frame before analysis. `--flat` divides out uneven light with a flat-field frame. `--tone` and `--roll-process` also accept the last or first word of a name (`--tone Standard`, `--roll-process Darkroom`). `--name` takes the export file name template (see Export below).
 
 ## GUI
 
 **Folder View**
 - Browse a folder of RAW and TIFF files as a thumbnail grid. Select with click, ⌘/Ctrl-click, Shift-click or ⌘A; double-click (or Enter) opens the editor.
 - The top bar acts on the selection:
-  - **Convert** / **Convert as roll** (2+ frames) open a dialog with the conversion inputs: source, colour model, film base, pre-saturation, border buffer, white balance, *Auto-crop frames* and, for rolls, the roll process (Lab: density per frame, or Darkroom: one exposure).
+  - **Convert** / **Convert as roll** (2+ frames) open a dialog with the conversion inputs: source, colour model, film base, flat field, pre-saturation, border buffer, white balance, *Auto-crop frames* and, for rolls, the roll process (Lab: each frame's own colour and density, or Darkroom: one setting for the roll).
   - **Export**: positive copies as TIF (8/16-bit, ZIP) or JPG, in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile and EXIF.
     - Presets: *Lab JPEG M/L* (3000/6000 px) and *Archive TIFF*, plus your own (*Save as…*).
     - Size: full or a long edge of 2000–6000 px.
@@ -62,7 +62,7 @@ The engine started as a port of the Lightroom plugin and now models the film its
 
 1. **Density.** `pipeline::prepare_negative` divides out uneven light with an optional flat-field frame (`flat.rs`), takes linear camera RGB through the camera matrix, divides out the film base and stores `log10(base / transmittance)` per channel, unclamped. A C-41 dye crosstalk correction (the dyes' unwanted absorptions) and the colour model's calibration are applied in density.
 2. **Levels.** `pipeline::analyze` trims film rebate, holder (within 0.2 D of the frame's densest area) and light past the film off the edges, then measures each channel's density range (exact 0.05 % / 99.99 % quantiles and the median) on the 600 px, border-cropped, blurred analysis buffer. Red and blue are placed on the image's neutral axis. The white end stays within twice the shadow-to-median span above the median, so a lamp or specular in the frame can't print the scene dark. Normalising every channel to its own range matches the layers' different H&D slopes, so neutrals stay neutral from shadows to highlights.
-3. **Print.** `curve.rs` shapes the normalised density (brightness, contrast, lights/darks, whites/blacks, toning), turns it into paper log exposure plus printing filtration (white balance and the C·M·Y keys, in CC) and print time (EV), and prints it with the tone profile. The 14 profiles are the plugin's (tuned on real rolls), measured on the test chart as curves over this engine's normalised density. The result is baked into density-indexed LUTs.
+3. **Print.** `curve.rs` shapes the normalised density (brightness, contrast, lights/darks, whites/blacks, toning), turns it into paper log exposure plus printing filtration (white balance and the C·M·Y keys, in CC) and print time (EV), and prints it with the tone profile. The 14 profiles are the plugin's (tuned on real rolls), measured on the test chart as curves over this engine's normalised density. A base saturation of 0.85 in density keeps colours at the scene's chroma. The result is baked into density-indexed LUTs, then the look (`look.rs`) and the output space are applied.
 4. **Auto colour.** Auto-Neutral is the filtration that prints the near-neutral pixels grey.
 5. **Rolls.** The roll supplies the film's properties: its channel slopes are the median of the frames' neutral-axis slopes (a single frame's fit also follows its light). *Lab* (default) then gives each frame its own colour balance and density, like a lab scanner, falling back to the roll's balance when a frame has too few neutral tones. *Darkroom* prints the whole roll at one balance and one exposure. EXIF exposure differences are exact density offsets (`log10 2` per stop).
 
@@ -70,7 +70,8 @@ The engine started as a port of the Lightroom plugin and now models the film its
 
 | Module | Role |
 |---|---|
-| `curve.rs` | Print engine: normalisation, tone and colour shaping, paper curve, LUTs, eyedropper |
+| `decode.rs` | RAW (rawler) and bitmap loading, proxies, geometry |
+| `curve.rs` | Print engine: normalisation, tone and colour shaping, tone profiles, LUTs, eyedropper |
 | `pipeline.rs` | Film base, density, crosstalk, analysis, auto colour, roll aggregation, renderer |
 | `presets.rs` | Colour models, pre-saturation, film WB presets, sharpening |
 | `look.rs` | Native looks (`assets/looks.json`, measured from the plugin's looks), sharpening |
@@ -78,7 +79,11 @@ The engine started as a port of the Lightroom plugin and now models the film its
 | `flat.rs` | Flat-field gain maps |
 | `demosaic.rs` | Bayer demosaic for full-resolution exports |
 | `testchart.rs` | Physically modelled test negative and quality metrics |
+| `frame.rs` | Frame detection (crop and straighten) |
+| `sidecar.rs` | Sidecars, roll info, defaults |
 | `export.rs` | Positive copies with ICC and EXIF, TIF scan prep |
+
+The GUI is in `src/app` (eframe/egui); `gpu.rs` and `preview.wgsl` draw the editor preview.
 
 ### Notes
 - **GPU preview.** With wgpu (the default), the editor draws its preview in a fragment shader (`app/gpu.rs`, `app/preview.wgsl`): the density image is a texture, the print curves and the native look are buffers. It matches the CPU renderer within 0.04/255 and stays at full editor resolution while sliders move. The histogram, readout and clipping view come from a 1024 px CPU render. Exports, thumbnails and the no-wgpu fallback use the CPU renderer. The preview leaves out output sharpening.
@@ -88,11 +93,12 @@ The engine started as a port of the Lightroom plugin and now models the film its
 - **Flat field.** A frame of the bare light source or clear film leader, shot with the same camera, lens and light (Convert dialog, the editor's Source section, or `--flat FILE`). Uneven light varies across the frame, which the levels can't absorb.
 - **Sidecars** from before the density engine keep their settings and metadata but need a new Convert.
 - **Looks.** Natural, Frontier, Crystal and Pakon are native data measured from the plugin's looks: grey curves plus a hue/saturation/value map (24 × 5 × 8). They reproduce the plugin's looks to a mean of 2–4.5 out of 255. Saturation levels 1–10 rise smoothly (the plugin's level 5 was more saturated than 6–8).
-- **Not ported:** licensing and the Lightroom catalog/DNG-profile plumbing, which a standalone app doesn't need.
+- **Sharpening** stays in the perceptual (encoded) space: in linear light the bright side of halos gets stronger.
 
 ## Tests
 
 ```bash
-cargo test --release
+cargo test --release                                  # includes the chart quality metrics and a GPU-vs-CPU check
+cargo test --release chart_quality -- --nocapture     # print the conversion quality numbers
 NLP_UI_TEST_DIR=<scans> NLP_UI_OUT=<dir> cargo test --release ui_screens -- --ignored   # headless UI screenshots
 ```
