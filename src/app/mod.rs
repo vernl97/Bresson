@@ -129,15 +129,10 @@ impl Frame {
         }
     }
 
-    /// The auto WB candidates this frame renders with: the roll's when it
-    /// renders from the roll, otherwise its own analysis.
+    /// The auto WB candidates for the levels this frame renders with (see
+    /// [`pipeline::auto_wb_for`]).
     pub fn auto_wb(&self, s: &Settings) -> Option<AutoWb> {
-        let roll = if s.use_roll {
-            self.sc.roll.as_ref().and_then(|r| r.auto_wb)
-        } else {
-            None
-        };
-        roll.or_else(|| self.sc.analysis.as_ref().map(|a| a.auto_wb))
+        pipeline::auto_wb_for(s, self.sc.analysis.as_ref(), self.sc.roll.as_ref())
     }
 
     /// Temp / Tint that `s.wb_mode` gives this frame (roll WB when rendering

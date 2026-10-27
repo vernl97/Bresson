@@ -992,9 +992,12 @@ fn frame_axis(a: &Analysis) -> ([f64; 3], [f64; 3], Option<[f64; 3]>) {
 /// frame's fit also follows its light (open shade turns its shadows blue). The roll's filtration is
 /// the median of the frames' axis offsets under those slopes, leaving out
 /// frames whose balance is far from the rest (robust outlier test, at
-/// least 0.05 D off). The roll's one-exposure levels take the median green
-/// range. With a `common_ev`, frames are first moved onto that exposure.
-/// Returns the roll and the excluded frame indices.
+/// least 0.05 D off). Slopes, bends and filtration come only from frames
+/// with a neutral axis of their own (all frames when fewer than two have
+/// one): a frame without one has only its colour-biased channel ranges to
+/// offer. The roll's one-exposure levels take the median green range. With
+/// a `common_ev`, frames are first moved onto that exposure. Returns the
+/// roll and the excluded frame indices.
 pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggregate, Vec<usize>) {
     let t = frames[0].key.image_type;
     let shift = |a: &Analysis| match (common_ev, a.ev) {
@@ -1008,7 +1011,13 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
             (slope, grey.map(|v| v + shift(a)), bend)
         })
         .collect();
-    let bends: Vec<[f64; 3]> = axes.iter().filter_map(|a| a.2).collect();
+    let mut reliable: Vec<usize> = (0..frames.len())
+        .filter(|&i| frames[i].auto_wb.confidence >= LOW_CONFIDENCE)
+        .collect();
+    if reliable.len() < 2 {
+        reliable = (0..frames.len()).collect();
+    }
+    let bends: Vec<[f64; 3]> = reliable.iter().filter_map(|&i| axes[i].2).collect();
     let bend: [f64; 3] = std::array::from_fn(|c| median(bends.iter().map(|b| b[c]).collect()));
     let pivot = median(frames.iter().map(|a| a.levels[1].mid + shift(a)).collect());
     // The bends were measured over the frames' green ranges: half the
@@ -1024,8 +1033,12 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
     let shape = RollBalance {
         slope: std::array::from_fn(|c| {
             median(
-                axes.iter()
-                    .map(|(s, g, _)| s[c] - 2.0 * bend[c] * (g[1] - pivot))
+                reliable
+                    .iter()
+                    .map(|&i| {
+                        let (s, g, _) = &axes[i];
+                        s[c] - 2.0 * bend[c] * (g[1] - pivot)
+                    })
                     .collect(),
             )
         }),
@@ -1036,10 +1049,10 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
     };
     let offsets: Vec<[f64; 3]> = axes.iter().map(|a| shape.through(a.1)).collect();
     let mut excluded: Vec<usize> = Vec::new();
-    if frames.len() >= 3 {
+    if reliable.len() >= 3 {
         for c in [0, 2] {
-            let v: Vec<f64> = offsets.iter().map(|o| o[c]).collect();
-            excluded.extend(outliers(&v, 0.05));
+            let v: Vec<f64> = reliable.iter().map(|&i| offsets[i][c]).collect();
+            excluded.extend(outliers(&v, 0.05).into_iter().map(|k| reliable[k]));
         }
         excluded.sort_unstable();
         excluded.dedup();
@@ -1047,8 +1060,15 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
     let kept: Vec<usize> = (0..frames.len())
         .filter(|i| !excluded.contains(i))
         .collect();
+    let balanced: Vec<usize> = reliable
+        .iter()
+        .copied()
+        .filter(|i| !excluded.contains(i))
+        .collect();
     let balance = RollBalance {
-        offset: std::array::from_fn(|c| median(kept.iter().map(|&i| offsets[i][c]).collect())),
+        offset: std::array::from_fn(|c| {
+            median(balanced.iter().map(|&i| offsets[i][c]).collect())
+        }),
         ..shape
     };
     let green = |f: fn(&ChannelLevels) -> f64| {
@@ -1093,13 +1113,28 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
 pub const LOW_CONFIDENCE: f32 = 0.4;
 const HIGH_CONFIDENCE: f32 = 0.6;
 
+/// How far Lab mode trusts a frame's own colour balance (0..1).
+fn lab_trust(f: &Analysis) -> f64 {
+    ((f.auto_wb.confidence - LOW_CONFIDENCE) / (HIGH_CONFIDENCE - LOW_CONFIDENCE)).clamp(0.0, 1.0)
+        as f64
+}
+
+/// The roll's balance moved onto this frame's scan exposure.
+fn roll_balance_for(frame: Option<&Analysis>, roll: &RollData) -> (RollBalance, f64) {
+    let d = match (roll.common_ev, frame.and_then(|a| a.ev)) {
+        (Some(c), Some(e)) => ev_density(e - c),
+        _ => 0.0,
+    };
+    (roll.balance.shifted(d), d)
+}
+
 /// Pick the levels a frame renders with: its own analysis, or the roll's.
-/// A roll always prints with the film's slopes from the roll. In Lab mode
-/// each frame keeps its own colour balance (the light changes from frame
-/// to frame: daylight, shade, tungsten) and its own density range, falling
-/// back to the roll's balance when the frame has too few neutral tones to
-/// judge. Darkroom mode prints every frame with the roll's one balance and
-/// one exposure.
+/// In Lab mode a frame with a reliable neutral axis prints exactly as it
+/// would alone (the light changes from frame to frame: daylight, shade,
+/// tungsten); one with too few neutral tones to judge takes the film's
+/// slopes and the roll's balance at its own density range, and in between
+/// the two are blended. Darkroom mode prints every frame with the roll's
+/// one balance and one exposure.
 pub fn levels_for(
     s: &Settings,
     frame: Option<&Analysis>,
@@ -1108,43 +1143,53 @@ pub fn levels_for(
     let Some(roll) = roll.filter(|_| s.use_roll) else {
         return frame.map(|a| a.levels);
     };
-    // Move the roll onto this frame's scan exposure.
-    let d = match (roll.common_ev, frame.and_then(|a| a.ev)) {
-        (Some(c), Some(e)) => ev_density(e - c),
-        _ => 0.0,
-    };
-    let balance = roll.balance.shifted(d);
+    let (balance, d) = roll_balance_for(frame, roll);
     let Some(f) = frame.filter(|_| s.roll_mode == RollMode::Lab) else {
         return Some(balance.levels(shift_levels(&roll.levels, d)[1]));
     };
-    let trust = ((f.auto_wb.confidence - LOW_CONFIDENCE) / (HIGH_CONFIDENCE - LOW_CONFIDENCE))
-        .clamp(0.0, 1.0) as f64;
-    let balance = if trust > 0.0 {
-        let (_, grey, bend) = frame_axis(f);
-        // The film's slopes, carried to this frame's grey; the bend from
-        // where the frame sits on the film's curve (toe or shoulder), when
-        // the frame had the tones to show it.
-        let r = balance.reach.unwrap_or(f64::INFINITY);
-        let u = (grey[1] - balance.pivot).clamp(-r, r);
-        let local = RollBalance {
-            slope: std::array::from_fn(|c| balance.slope[c] + 2.0 * balance.bend[c] * u),
-            offset: [0.0; 3],
-            bend: bend.unwrap_or([0.0; 3]),
-            pivot: grey[1],
-            reach: None,
-        };
-        // Partly trusted: the frame's grey moves only part of the way from
-        // the roll's grey at the same green density.
-        let roll_grey: [f64; 3] = std::array::from_fn(|c| balance.at(c, grey[1]));
-        let grey = std::array::from_fn(|c| roll_grey[c] + trust * (grey[c] - roll_grey[c]));
-        RollBalance {
-            offset: local.through(grey),
-            ..local
+    let trust = lab_trust(f);
+    let from_roll = balance.levels(f.levels[1]);
+    let mix = |a: f64, b: f64| a + trust * (b - a);
+    Some(std::array::from_fn(|c| {
+        let (r, o) = (from_roll[c], f.levels[c]);
+        ChannelLevels {
+            lo: mix(r.lo, o.lo),
+            hi: mix(r.hi, o.hi),
+            mid: mix(r.mid, o.mid),
+            bow: mix(r.bow, o.bow),
         }
-    } else {
-        balance
+    }))
+}
+
+/// The auto WB candidates for the levels [`levels_for`] gives: the frame's
+/// own, the roll's in Darkroom mode, and in Lab mode the frame's grey
+/// blended with the roll's as far as the frame is trusted.
+pub fn auto_wb_for(
+    s: &Settings,
+    frame: Option<&Analysis>,
+    roll: Option<&RollData>,
+) -> Option<AutoWb> {
+    let Some(roll) = roll.filter(|_| s.use_roll) else {
+        return frame.map(|a| a.auto_wb);
     };
-    Some(balance.levels(f.levels[1]))
+    let Some(f) = frame.filter(|_| s.roll_mode == RollMode::Lab) else {
+        return roll.auto_wb.or_else(|| frame.map(|a| a.auto_wb));
+    };
+    let trust = lab_trust(f);
+    if trust >= 1.0 {
+        return Some(f.auto_wb);
+    }
+    let l = levels_for(s, Some(f), Some(roll))?;
+    let (balance, _) = roll_balance_for(frame, roll);
+    let roll_grey = balance.levels(f.levels[1]).map(|c| c.mid);
+    let grey = std::array::from_fn(|c| roll_grey[c] + trust * (f.auto_wb.grey[c] - roll_grey[c]));
+    Some(auto_wb_from(
+        &l,
+        f.key.image_type,
+        grey,
+        f.auto_wb.mean,
+        f.auto_wb.confidence,
+    ))
 }
 
 // ---- rendering --------------------------------------------------------------------
@@ -1364,6 +1409,33 @@ mod tests {
         }
     }
 
+    /// Frames without a neutral axis of their own (a sunset's channel
+    /// ranges) do not move the film's slopes or the roll's filtration.
+    #[test]
+    fn roll_balance_ignores_frames_without_an_axis() {
+        let on_axis = |lo_g: f64, hi_g: f64| {
+            let mut f = frame(
+                [0.9 * lo_g - 0.035, lo_g, 1.1 * lo_g + 0.035],
+                [0.9 * hi_g - 0.035, hi_g, 1.1 * hi_g + 0.035],
+            );
+            f.auto_wb.confidence = 0.8;
+            f
+        };
+        let mut frames: Vec<Analysis> = (0..3)
+            .map(|i| on_axis(0.15 + i as f64 * 0.05, 1.1 + i as f64 * 0.05))
+            .collect();
+        for _ in 0..3 {
+            let mut f = frame([0.05, 0.2, 0.4], [1.3, 1.0, 0.9]);
+            f.auto_wb.confidence = 0.2;
+            frames.push(f);
+        }
+        let (r, excluded) = aggregate_roll(&frames, None);
+        assert!(excluded.is_empty(), "{excluded:?}");
+        assert!((r.balance.slope[0] - 0.9).abs() < 1e-6, "{:?}", r.balance);
+        assert!((r.balance.slope[2] - 1.1).abs() < 1e-6, "{:?}", r.balance);
+        assert!((r.balance.offset[0] + 0.035).abs() < 1e-6, "{:?}", r.balance);
+    }
+
     #[test]
     fn roll_process_modes() {
         let frames = [
@@ -1386,12 +1458,17 @@ mod tests {
         assert_eq!(lab[1].hi, frames[1].levels[1].hi);
         // Too few neutral tones (confidence 0): the roll's balance.
         assert_eq!(lab, agg.balance.levels(frames[1].levels[1]));
-        // A frame with a reliable neutral axis keeps its own balance.
+        // A frame with a reliable neutral axis prints as it would alone.
         let mut own = frames[1].clone();
         own.auto_wb.confidence = 1.0;
-        let l = levels_for(&s, Some(&own), Some(&roll)).unwrap();
+        assert_eq!(levels_for(&s, Some(&own), Some(&roll)).unwrap(), own.levels);
+        assert_eq!(auto_wb_for(&s, Some(&own), Some(&roll)).unwrap(), own.auto_wb);
+        // Half trusted: halfway between the roll's balance and its own.
+        own.auto_wb.confidence = (LOW_CONFIDENCE + HIGH_CONFIDENCE) / 2.0;
+        let half = levels_for(&s, Some(&own), Some(&roll)).unwrap();
         for c in 0..3 {
-            assert!((l[c].mid - own.levels[c].mid).abs() < 1e-9, "{l:?}");
+            let want = (lab[c].lo + own.levels[c].lo) / 2.0;
+            assert!((half[c].lo - want).abs() < 1e-6, "{half:?}");
         }
         s.use_roll = false;
         assert_eq!(get(&s), frames[1].levels);
@@ -1680,7 +1757,7 @@ mod tests {
         let neg = prepare_negative(&chart.src, s, a.base);
         let mut s = s.clone();
         s.use_roll = roll.is_some();
-        let wb = roll.and_then(|r| r.auto_wb).unwrap_or(a.auto_wb);
+        let wb = auto_wb_for(&s, Some(a), roll).unwrap();
         if let Some((t, n)) = wb_for_mode(s.wb_mode, &wb) {
             (s.wb_temp, s.wb_tint) = (t, n);
         }
@@ -1907,7 +1984,7 @@ mod tests {
             .fold(0.0, f64::max);
         eprintln!("crossover: neutral C* straight {flat:.2}, bent {bent:.2}, roll {rolled:.2}");
         assert!(bent < 0.3 * flat, "bent {bent} vs straight {flat}");
-        assert!(rolled < 0.4 * flat, "roll {rolled} vs straight {flat}");
+        assert!(rolled < 0.25 * flat, "roll {rolled} vs straight {flat}");
     }
 
     /// Backlit against a bright sky or flashed at night, a print exposed
@@ -2138,7 +2215,45 @@ mod tests {
         );
         assert!(frame_spread < 0.65, "frame spread {frame_spread}");
         assert!(roll_spread < 0.65, "roll spread {roll_spread}");
-        assert!(roll_cast < 0.6, "roll neutral C* {roll_cast}");
+        assert!(roll_cast < 0.5, "roll neutral C* {roll_cast}");
+    }
+
+    /// Lab mode never prints a frame that can judge its own balance worse
+    /// than converting it alone, and frames that can't stay near neutral.
+    #[test]
+    fn roll_lab_matches_single_frames() {
+        use crate::engine::testchart::{dominated, negative, neutral_cast};
+        let s = chart_settings();
+        let mut charts: Vec<_> = [-1.0, 0.0, 1.0].into_iter().map(negative).collect();
+        charts.push(dominated(0.0, [62.0, 30.0, 55.0]));
+        charts.push(dominated(0.0, [43.46, -32.0, 38.0]));
+        let mut analyses: Vec<_> = charts.iter().map(|c| analyse_chart(c, &s)).collect();
+        // The foliage frame as if it had too few neutral tones to judge.
+        analyses[4].auto_wb.confidence = 0.2;
+        let (agg, _) = aggregate_roll(&analyses, None);
+        let roll = RollData {
+            base: analyses[1].base,
+            ..roll_of(&agg, charts.len())
+        };
+        for (i, (c, a)) in charts.iter().zip(&analyses).enumerate() {
+            let single = convert_chart(c, &s, a, None);
+            let rolled = convert_chart(c, &s, a, Some(&roll));
+            let (cs, cr) = (neutral_cast(c, &single).0, neutral_cast(c, &rolled).0);
+            eprintln!(
+                "frame {i}: confidence {:.1}, neutral C* single {cs:.2}, roll {cr:.2}",
+                a.auto_wb.confidence
+            );
+            if lab_trust(a) >= 1.0 {
+                let diff = single
+                    .iter()
+                    .zip(&rolled)
+                    .flat_map(|(p, q)| (0..3).map(move |k| (p[k] - q[k]).abs()))
+                    .fold(0.0f32, f32::max);
+                assert!(diff < 1e-4, "frame {i} differs by {diff}");
+            } else {
+                assert!(cr < 0.5, "frame {i}: roll {cr} vs single {cs}");
+            }
+        }
     }
 
     #[test]

@@ -195,10 +195,7 @@ fn convert(args: Vec<String>) -> Result<()> {
     {
         let mut fs = fs.clone();
         fs.use_roll = s.use_roll;
-        let wb = roll_data
-            .as_ref()
-            .and_then(|r| r.auto_wb)
-            .unwrap_or(a.auto_wb);
+        let wb = pipeline::auto_wb_for(&fs, Some(&a), roll_data.as_ref()).unwrap_or(a.auto_wb);
         if let Some((t, n)) = pipeline::wb_for_mode(fs.wb_mode, &wb) {
             fs.wb_temp = t;
             fs.wb_tint = n;
