@@ -46,7 +46,7 @@ cargo run --release -- synth [out.tif] [variant]    # write a synthetic colour n
   - The ⋯ menu beside Re-convert: save/apply default, reset edits, unconvert and the LUT folder.
 - Film-base eyedropper for sampling the unexposed border.
 
-Settings are saved next to each scan as `<file>.nlp.json`.
+Settings are saved inside the `NLP/` subfolder as `<file>.nlp.json`.
 
 ## Engine (`src/engine`)
 

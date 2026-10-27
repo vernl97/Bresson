@@ -251,6 +251,7 @@ impl NlpApp {
 
     fn load_frames(&mut self, files: Vec<PathBuf>, dir: &Path) {
         self.save_all();
+        let _ = std::fs::create_dir_all(dir.join("NLP"));
         self.frames = files
             .into_iter()
             .map(|path| {
