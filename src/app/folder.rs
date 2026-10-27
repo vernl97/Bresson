@@ -147,6 +147,8 @@ impl NlpApp {
         self.folder_shortcuts(&ctx);
         let cmd = egui::Modifiers::COMMAND;
         let export_key = widgets::shortcut(&ctx, cmd, egui::Key::E);
+        let select_key = widgets::shortcut(&ctx, cmd, egui::Key::A);
+        let paste_key = widgets::shortcut(&ctx, cmd, egui::Key::V);
         egui::Panel::top("folder_top")
             .exact_size(44.0)
             .frame(
@@ -157,39 +159,72 @@ impl NlpApp {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    if ui
-                        .add(widgets::ghost("‹ Rolls"))
-                        .on_hover_text("Back to all rolls")
-                        .clicked()
-                    {
+                    // Breadcrumb: Rolls / <roll name>.
+                    let back = icon_button(ui, Icon::Back, "Back to all rolls", false, true);
+                    let rolls = ui
+                        .add(
+                            egui::Label::new(RichText::new("Rolls").color(theme::MUTED))
+                                .sense(Sense::click()),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if back.clicked() || rolls.clicked() {
                         self.close_to_projects();
                     }
-                    let r = icon_button(ui, Icon::Folder, "Open…", false, true);
+                    if let Some(f) = self.folder.clone() {
+                        ui.label(RichText::new("/").color(theme::FAINT));
+                        let name = f
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| f.display().to_string());
+                        let label = egui::Label::new(RichText::new(name).font(theme::medium(13.5)))
+                            .truncate();
+                        if self.single_mode {
+                            ui.add(label).on_hover_text(f.display().to_string());
+                        } else if ui
+                            .add(label.sense(Sense::click()))
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(format!(
+                                "{}\nClick for roll info: film, camera, notes",
+                                f.display()
+                            ))
+                            .clicked()
+                        {
+                            self.open_roll_dialog(&f, false);
+                        }
+                    }
+                    ui.add_space(2.0);
+                    let r = icon_button(ui, Icon::More, "More", false, true);
                     egui::Popup::menu(&r).show(|ui| {
+                        let key = |k: &str| RichText::new(k.to_owned()).color(theme::FAINT);
                         if ui.button("Open folder…").clicked() {
                             self.choose_folder();
                         }
                         if ui.button("Open images…").clicked() {
                             self.choose_files();
                         }
-                    });
-                    if let Some(f) = &self.folder {
-                        let name = f
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| f.display().to_string());
-                        ui.label(RichText::new(name).font(theme::medium(13.5)))
-                            .on_hover_text(f.display().to_string());
-                        if !self.single_mode
-                            && ui
-                                .add(widgets::ghost("Roll info…"))
-                                .on_hover_text("Film, camera and notes for the whole roll")
-                                .clicked()
-                        {
-                            let dir = f.clone();
-                            self.open_roll_dialog(&dir, false);
+                        ui.separator();
+                        if !self.single_mode {
+                            if let Some(f) = self.folder.clone() {
+                                if ui.button("Roll info…").clicked() {
+                                    self.open_roll_dialog(&f, false);
+                                }
+                            }
                         }
-                    }
+                        if ui
+                            .add(egui::Button::new("Select all").shortcut_text(key(&select_key)))
+                            .clicked()
+                        {
+                            self.selected = (0..self.frames.len()).collect();
+                        }
+                        let paste = egui::Button::new("Paste settings").shortcut_text(key(&paste_key));
+                        if ui
+                            .add_enabled(self.clipboard.is_some() && !self.selected.is_empty(), paste)
+                            .clicked()
+                        {
+                            self.paste_settings();
+                        }
+                    });
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let n = self.selected.len();
                         if n > 0 {
@@ -200,16 +235,31 @@ impl NlpApp {
                             {
                                 self.open_export_dialog(self.sel_vec());
                             }
-                            if n >= 2
-                                && ui
-                                    .add(widgets::ghost("Convert as roll"))
+                            // Split Convert button: main action + ▾ for roll mode.
+                            ui.spacing_mut().item_spacing.x = 1.0;
+                            let more = ui
+                                .add(widgets::ghost("").min_size(vec2(22.0, 28.0)))
+                                .on_hover_text("Convert options");
+                            let c = more.rect.center();
+                            ui.painter().line(
+                                vec![pos2(c.x - 4.0, c.y - 2.0), pos2(c.x, c.y + 2.0), pos2(c.x + 4.0, c.y - 2.0)],
+                                egui::Stroke::new(1.5, theme::MUTED),
+                            );
+                            egui::Popup::menu(&more).show(|ui| {
+                                if ui.button("Convert each frame").clicked() {
+                                    self.open_convert_dialog(self.sel_vec(), false);
+                                }
+                                if ui
+                                    .add_enabled(n >= 2, egui::Button::new("Convert as roll"))
                                     .on_hover_text(
                                         "Analyse the selection together for one consistent roll balance",
                                     )
+                                    .on_disabled_hover_text("Select two or more frames")
                                     .clicked()
-                            {
-                                self.open_convert_dialog(self.sel_vec(), true);
-                            }
+                                {
+                                    self.open_convert_dialog(self.sel_vec(), true);
+                                }
+                            });
                             if ui
                                 .add(widgets::ghost("Convert"))
                                 .on_hover_text("Analyse each selected frame on its own")
@@ -217,17 +267,29 @@ impl NlpApp {
                             {
                                 self.open_convert_dialog(self.sel_vec(), false);
                             }
-                        }
-                        if n == 0 {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("Clear").small().color(theme::MUTED))
+                                        .frame(false),
+                                )
+                                .on_hover_text("Clear selection (Esc)")
+                                .clicked()
+                            {
+                                self.selected.clear();
+                            }
                             ui.label(
-                                RichText::new("Select frames to convert or export · double-click to edit")
-                                    .small()
-                                    .color(theme::FAINT),
+                                RichText::new(format!("{n} selected")).small().color(theme::MUTED),
                             );
                         }
+                        // Fixed slot so the buttons don't shift when jobs start/finish.
+                        ui.add_space(4.0);
+                        let (slot, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                         if self.jobs.busy() > 0 {
-                            ui.add_space(4.0);
-                            ui.add(egui::Spinner::new().size(14.0).color(theme::MUTED));
+                            ui.put(slot, egui::Spinner::new().size(14.0).color(theme::MUTED));
                         }
                     });
                 });
@@ -243,18 +305,26 @@ impl NlpApp {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let conv = self.frames.iter().filter(|f| f.sc.is_converted()).count();
-                    let mut status = format!("{} frames · {} converted", self.frames.len(), conv);
-                    if !self.selected.is_empty() {
-                        status += &format!(" · {} selected", self.selected.len());
-                    }
+                    let status = format!("{} frames · {} converted", self.frames.len(), conv);
                     ui.label(RichText::new(status).small().color(theme::MUTED));
+                    if self.selected.is_empty() {
+                        ui.label(
+                            RichText::new("· Click to select · double-click to edit")
+                                .small()
+                                .color(theme::FAINT),
+                        );
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
                         ui.spacing_mut().slider_width = 90.0;
+                        let tiny = |t: &str| RichText::new(t.to_owned()).small().color(theme::FAINT);
+                        ui.label(tiny("Large"));
                         ui.add(
                             egui::Slider::new(&mut self.thumb_size, 110.0..=340.0)
                                 .show_value(false),
                         )
                         .on_hover_text("Thumbnail size");
+                        ui.label(tiny("Small"));
                         if self.export_total > 0 && self.export_done < self.export_total {
                             ui.add_space(12.0);
                             ui.add(
@@ -397,6 +467,7 @@ impl NlpApp {
         let mut clicked: Option<(usize, egui::Modifiers)> = None;
         let mut double: Option<usize> = None;
         let mut ctx_action: Option<(usize, CellAction)> = None;
+        let mut bg_click = false;
         let multi = self.selected.len() >= 2;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -555,7 +626,17 @@ impl NlpApp {
                         });
                     }
                 });
+                // Clicking empty space below the grid clears the selection.
+                let rest = ui.available_rect_before_wrap();
+                if rest.height() > 0.0
+                    && ui.allocate_rect(rest, Sense::click()).clicked()
+                {
+                    bg_click = true;
+                }
             });
+        if bg_click && clicked.is_none() {
+            self.selected.clear();
+        }
         if let Some((i, m)) = clicked {
             if m.shift {
                 let a = self.anchor.unwrap_or(i);
