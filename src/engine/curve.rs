@@ -7,8 +7,8 @@
 //! Normalising every channel to its own range matches the layers' different
 //! H&D slopes, so neutrals stay neutral from shadows to highlights. Tone and
 //! colour controls shape the normalised density. It then becomes a paper log
-//! exposure (plus printing filtration and print time), and a paper
-//! characteristic curve with a toe and shoulder gives the print density.
+//! exposure (plus printing filtration and print time), and the tone profile
+//! (the plugin's, measured) gives the printed value.
 //!
 //! Every channel is a pure function of its own density, so the whole engine
 //! bakes into one density-indexed lookup table per channel ([`CurveLut`]).
@@ -32,10 +32,9 @@ pub struct ChannelLevels {
 pub type Levels = [ChannelLevels; 3];
 
 /// Log exposure range of the paper between printed white and printed black
-/// (ISO R ≈ 105, a grade-2 paper).
+/// (ISO R ≈ 105, a grade-2 paper): the span print exposure and filtration
+/// move along.
 pub const PAPER_RANGE: f64 = 1.05;
-/// Maximum (asymptotic) print density.
-const PAPER_DMAX: f64 = 2.2;
 /// One CC unit of printing filtration, in log exposure.
 pub const CC: f64 = 0.01;
 
@@ -44,79 +43,172 @@ const LUT_DMIN: f64 = -0.5;
 const LUT_DMAX: f64 = 4.5;
 pub const LUT_SIZE: usize = 8192;
 
-/// A paper / scanner tone curve.
-#[derive(Debug, Clone, Copy)]
-struct Paper {
-    /// Print density where normalised density 1 lands (paper white side).
-    white: f64,
-    /// Print density where normalised density 0 lands (black side).
-    black: f64,
-    /// Contrast (slope multiplier around the midtone).
-    grade: f64,
-    /// Midtone gamma (> 1 is denser).
-    gamma: f64,
-    /// Place the median density on mid grey.
-    auto: bool,
-    /// No paper curve: the normalised density is the encoded output.
-    linear: bool,
-}
+/// Number of knots of a tone curve, evenly spaced over normalised density.
+const KNOTS: usize = 21;
 
-fn paper(p: ToneProfile) -> Paper {
-    let base = Paper {
-        white: 0.06,
-        black: 2.0,
-        grade: 1.0,
-        gamma: 1.0,
-        auto: true,
-        linear: false,
-    };
+/// A tone profile: the encoded output at evenly spaced normalised densities
+/// (0 = black end … 1 = white end), and whether the median density is
+/// auto-placed on the midtone first.
+///
+/// The curves are the Lightroom plugin's tone profiles, which were tuned on
+/// real rolls, measured on the modelled ColorChecker negative: each knot is
+/// the plugin's printed grey (local regression over the chart's 18 neutral
+/// patches at −1, 0 and +1 EV) at that normalised density of this engine.
+fn profile(p: ToneProfile) -> (bool, [f64; KNOTS]) {
+    use ToneProfile::*;
     match p {
-        ToneProfile::Standard => base,
-        ToneProfile::Soft => Paper {
-            grade: 0.85,
-            ..base
-        },
-        ToneProfile::Hard => Paper { grade: 1.2, ..base },
-        ToneProfile::Rich => Paper {
-            grade: 1.1,
-            gamma: 1.08,
-            black: 2.1,
-            ..base
-        },
-        ToneProfile::Flat => Paper {
-            grade: 0.75,
-            white: 0.12,
-            black: 1.6,
-            auto: false,
-            ..base
-        },
-        ToneProfile::Linear => Paper {
-            auto: false,
-            linear: true,
-            ..base
-        },
+        Logarithmic => (
+            false,
+            [
+                0.0000, 0.0511, 0.1022, 0.1526, 0.2024, 0.2519, 0.3008, 0.3495, 0.3979, 0.4446,
+                0.4901, 0.5349, 0.5789, 0.6227, 0.6667, 0.7124, 0.7619, 0.8133, 0.8656, 0.9185,
+                0.9713,
+            ],
+        ),
+        LogarithmicRich => (
+            false,
+            [
+                0.0000, 0.0356, 0.0740, 0.1185, 0.1677, 0.2202, 0.2753, 0.3322, 0.3896, 0.4441,
+                0.4962, 0.5464, 0.5937, 0.6394, 0.6850, 0.7313, 0.7796, 0.8285, 0.8775, 0.9259,
+                0.9740,
+            ],
+        ),
+        LogarithmicFlat => (
+            false,
+            [
+                0.0187, 0.0669, 0.1153, 0.1627, 0.2092, 0.2553, 0.3007, 0.3459, 0.3905, 0.4336,
+                0.4756, 0.5168, 0.5567, 0.5958, 0.6347, 0.6740, 0.7155, 0.7585, 0.8027, 0.8486,
+                0.8949,
+            ],
+        ),
+        Standard => (
+            true,
+            [
+                0.0072, 0.0581, 0.1145, 0.1768, 0.2417, 0.3082, 0.3751, 0.4414, 0.5050, 0.5663,
+                0.6252, 0.6789, 0.7269, 0.7725, 0.8155, 0.8519, 0.8846, 0.9153, 0.9427, 0.9674,
+                0.9919,
+            ],
+        ),
+        AllSoft => (
+            true,
+            [
+                0.0389, 0.0966, 0.1569, 0.2186, 0.2795, 0.3389, 0.3966, 0.4517, 0.5040, 0.5544,
+                0.6031, 0.6486, 0.6909, 0.7319, 0.7714, 0.8073, 0.8413, 0.8739, 0.9043, 0.9325,
+                0.9604,
+            ],
+        ),
+        AllHard => (
+            true,
+            [
+                0.0069, 0.0338, 0.0703, 0.1206, 0.1815, 0.2531, 0.3323, 0.4200, 0.5068, 0.5903,
+                0.6690, 0.7358, 0.7888, 0.8360, 0.8782, 0.9076, 0.9308, 0.9508, 0.9668, 0.9796,
+                0.9921,
+            ],
+        ),
+        HighlightHard => (
+            true,
+            [
+                0.0071, 0.0582, 0.1160, 0.1814, 0.2504, 0.3216, 0.3936, 0.4645, 0.5316, 0.5956,
+                0.6563, 0.7101, 0.7566, 0.8000, 0.8405, 0.8731, 0.9018, 0.9282, 0.9513, 0.9718,
+                0.9919,
+            ],
+        ),
+        HighlightSoft => (
+            true,
+            [
+                0.0075, 0.0618, 0.1187, 0.1784, 0.2387, 0.2990, 0.3587, 0.4170, 0.4732, 0.5277,
+                0.5806, 0.6302, 0.6763, 0.7209, 0.7638, 0.8020, 0.8377, 0.8718, 0.9030, 0.9319,
+                0.9604,
+            ],
+        ),
+        ShadowHard => (
+            true,
+            [
+                0.0072, 0.0493, 0.0978, 0.1538, 0.2142, 0.2781, 0.3442, 0.4122, 0.4789, 0.5439,
+                0.6068, 0.6646, 0.7162, 0.7652, 0.8113, 0.8494, 0.8834, 0.9149, 0.9427, 0.9674,
+                0.9919,
+            ],
+        ),
+        ShadowSoft => (
+            true,
+            [
+                0.0348, 0.0948, 0.1583, 0.2245, 0.2906, 0.3553, 0.4185, 0.4786, 0.5351, 0.5892,
+                0.6411, 0.6885, 0.7318, 0.7733, 0.8130, 0.8480, 0.8805, 0.9114, 0.9398, 0.9659,
+                0.9919,
+            ],
+        ),
+        Linear => (
+            false,
+            [
+                0.0001, 0.0720, 0.1434, 0.2118, 0.2768, 0.3394, 0.3989, 0.4562, 0.5105, 0.5610,
+                0.6093, 0.6560, 0.6999, 0.7405, 0.7798, 0.8174, 0.8523, 0.8858, 0.9177, 0.9475,
+                0.9768,
+            ],
+        ),
+        LinearGamma => (
+            false,
+            [
+                0.0000, 0.0257, 0.0569, 0.0995, 0.1482, 0.2000, 0.2539, 0.3094, 0.3666, 0.4232,
+                0.4792, 0.5349, 0.5899, 0.6429, 0.6949, 0.7458, 0.7950, 0.8429, 0.8893, 0.9333,
+                0.9769,
+            ],
+        ),
+        LinearDeep => (
+            false,
+            [
+                0.0000, 0.0584, 0.1181, 0.1796, 0.2413, 0.3027, 0.3632, 0.4230, 0.4812, 0.5363,
+                0.5893, 0.6408, 0.6895, 0.7344, 0.7777, 0.8187, 0.8560, 0.8912, 0.9243, 0.9546,
+                0.9844,
+            ],
+        ),
+        LinearFlat => (
+            false,
+            [
+                0.0257, 0.0911, 0.1560, 0.2176, 0.2759, 0.3320, 0.3855, 0.4367, 0.4851, 0.5305,
+                0.5740, 0.6158, 0.6548, 0.6912, 0.7267, 0.7602, 0.7914, 0.8215, 0.8500, 0.8766,
+                0.9031,
+            ],
+        ),
     }
 }
 
-fn logit(p: f64) -> f64 {
-    (p / (1.0 - p)).ln()
-}
-
-/// Paper characteristic curve: print density at paper log exposure `u`,
-/// where `u = 0` prints `white` and `u = PAPER_RANGE` prints `black`. A
-/// logistic in log exposure, so the toe and shoulder compress smoothly
-/// towards paper white and maximum black instead of clipping.
-fn print_density(u: f64, p: &Paper) -> f64 {
-    let lw = logit(p.white / PAPER_DMAX);
-    let lb = logit(p.black / PAPER_DMAX);
-    let l = lw + (lb - lw) * (u / PAPER_RANGE);
-    PAPER_DMAX / (1.0 + (-l).exp())
-}
-
-/// Print density → linear output, with maximum black at 0 and paper white at 1.
-fn print_to_linear(d: f64) -> f64 {
-    let r_min = 10f64.powf(-PAPER_DMAX);
-    (10f64.powf(-d) - r_min) / (1.0 - r_min)
+/// Monotone cubic (Fritsch–Carlson) through the knots at `x`, continuing
+/// smoothly towards black below 0 and towards paper white above 1.
+fn tone_curve(k: &[f64; KNOTS], x: f64) -> f64 {
+    let h = 1.0 / (KNOTS - 1) as f64;
+    let d: Vec<f64> = k.windows(2).map(|w| (w[1] - w[0]) / h).collect();
+    let tangent = |i: usize| -> f64 {
+        if i == 0 {
+            d[0]
+        } else if i == KNOTS - 1 {
+            d[KNOTS - 2]
+        } else if d[i - 1] * d[i] <= 0.0 {
+            0.0
+        } else {
+            2.0 / (1.0 / d[i - 1] + 1.0 / d[i])
+        }
+    };
+    if x <= 0.0 {
+        let s = tangent(0).max(1e-6);
+        return if k[0] > 1e-6 {
+            k[0] * (s * x / k[0]).exp()
+        } else {
+            (s * x).max(0.0)
+        };
+    }
+    if x >= 1.0 {
+        let room = (1.0 - k[KNOTS - 1]).max(1e-6);
+        let s = tangent(KNOTS - 1).max(1e-6);
+        return 1.0 - room * (-s * (x - 1.0) / room).exp();
+    }
+    let i = ((x / h) as usize).min(KNOTS - 2);
+    let t = (x - i as f64 * h) / h;
+    let (m0, m1) = (tangent(i) * h, tangent(i + 1) * h);
+    let (t2, t3) = (t * t, t * t * t);
+    (2.0 * t3 - 3.0 * t2 + 1.0) * k[i]
+        + (t3 - 2.0 * t2 + t) * m0
+        + (-2.0 * t3 + 3.0 * t2) * k[i + 1]
+        + (t3 - t2) * m1
 }
 
 /// Power that leaves 0 and 1 in place and continues straight outside them.
@@ -149,7 +241,9 @@ fn shadow_bump(x: f64, range: f64) -> f64 {
     highlight_bump(1.0 - x, range)
 }
 
-/// Auto midtone gamma: puts the mean normalised median density on 0.5.
+/// Auto midtone gamma: moves the mean normalised median density towards
+/// 0.5. Bright (high-key) frames may come down further than dark ones go
+/// up, like a lab printer exposing for the frame's average density.
 pub fn auto_gamma(l: &Levels) -> f64 {
     let m: f64 = (0..3)
         .map(|c| (l[c].mid - l[c].lo) / (l[c].hi - l[c].lo).max(1e-6))
@@ -158,7 +252,7 @@ pub fn auto_gamma(l: &Levels) -> f64 {
     if !(m > 0.0 && m < 1.0) {
         return 1.0;
     }
-    (0.5f64.ln() / m.ln()).clamp(0.8, 1.25)
+    (0.5f64.ln() / m.ln()).clamp(0.8, 1.6)
 }
 
 /// Everything one channel's curve depends on.
@@ -168,7 +262,7 @@ struct ChannelCurve {
     /// Density printing black (negatives) / white (positives), after clipping.
     lo: f64,
     hi: f64,
-    paper: Paper,
+    knots: [f64; KNOTS],
     gamma: f64,
     /// Mid-tone colour gamma of this channel.
     mid_gamma: f64,
@@ -188,7 +282,7 @@ struct ChannelCurve {
 
 impl ChannelCurve {
     fn new(l: &Levels, s: &Settings, c: usize) -> Self {
-        let p = paper(s.tone_profile);
+        let (auto_tone, knots) = profile(s.tone_profile);
         let kind = s.image_type;
         let span = (l[c].hi - l[c].lo).max(1e-3);
         // Clip moves the black / white end into the range (− recovers).
@@ -197,7 +291,7 @@ impl ChannelCurve {
             ImageType::Positive => (l[c].lo + wc * span, l[c].hi - bc * span),
             _ => (l[c].lo + bc * span, l[c].hi - wc * span),
         };
-        let auto = if p.auto && kind == ImageType::Negative {
+        let auto = if auto_tone && kind == ImageType::Negative {
             auto_gamma(l)
         } else {
             1.0
@@ -217,8 +311,8 @@ impl ChannelCurve {
             kind,
             lo,
             hi,
-            paper: p,
-            gamma: p.gamma * auto * brightness,
+            knots,
+            gamma: auto * brightness,
             mid_gamma: 2f64.powf(f(mid) / 75.0 * 0.5),
             whites: f(s.whites) - f(s.glow),
             blacks: f(s.blacks) + f(s.fade),
@@ -228,7 +322,7 @@ impl ChannelCurve {
             tone_shadow: -f(shadow) / 75.0 * 0.12,
             high_range: f(s.high_range),
             shadow_range: f(s.shadow_range),
-            contrast: p.grade * (1.0 + f(s.contrast) * 0.015),
+            contrast: 1.0 + f(s.contrast) * 0.015,
             exposure: filtration * CC - f(s.print_exposure) * std::f64::consts::LOG10_2,
         }
     }
@@ -260,14 +354,14 @@ impl ChannelCurve {
         (1.0 - self.tone(d)) * PAPER_RANGE + self.exposure
     }
 
-    /// Encoded output (sRGB tone response).
+    /// Encoded output (sRGB tone response). Already positive scans keep
+    /// their own tones; everything else is printed with the tone profile.
     fn output(&self, d: f64) -> f64 {
-        let u = self.exposure(d);
-        if self.paper.linear {
-            return 1.0 - u / PAPER_RANGE;
+        let x = 1.0 - self.exposure(d) / PAPER_RANGE;
+        if self.kind == ImageType::EditOnly {
+            return x;
         }
-        let lin = print_to_linear(print_density(u, &self.paper));
-        color::srgb_encode(lin as f32) as f64
+        tone_curve(&self.knots, x)
     }
 }
 
@@ -432,7 +526,7 @@ mod tests {
     fn normalised_mid_prints_mid_grey_in_every_channel() {
         let l = levels();
         let s = Settings {
-            tone_profile: ToneProfile::Soft,
+            tone_profile: ToneProfile::AllSoft,
             ..Settings::default()
         };
         let lut = CurveLut::new(&l, &s);

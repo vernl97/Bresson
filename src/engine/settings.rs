@@ -71,14 +71,22 @@ choice_enum!(
 );
 
 choice_enum!(
-    /// Paper / scanner tone curve the negative is printed with.
+    /// Tone curve the negative is printed with (the plugin's profiles).
     ToneProfile {
-        Standard => "Standard",
-        Soft => "Soft",
-        Hard => "Hard",
-        Rich => "Rich",
-        Flat => "Flat (for grading)",
+        Logarithmic => "Cinematic - Log",
+        LogarithmicRich => "Cinematic - Rich",
+        LogarithmicFlat => "Cinematic - Flat",
+        Standard => "LAB - Standard",
+        AllSoft => "LAB - Soft",
+        AllHard => "LAB - Hard",
+        HighlightHard => "LAB - Highlight Hard",
+        HighlightSoft => "LAB - Highlight Soft",
+        ShadowHard => "LAB - Shadow Hard",
+        ShadowSoft => "LAB - Shadow Soft",
         Linear => "Linear",
+        LinearGamma => "Linear + Gamma",
+        LinearDeep => "Linear + Deep",
+        LinearFlat => "Linear + Flat",
     } default Standard
 );
 
@@ -295,7 +303,7 @@ impl Default for Settings {
 impl Settings {
     /// Defaults for the B+W colour model.
     pub fn apply_mono_defaults(&mut self) {
-        self.tone_profile = ToneProfile::Standard;
+        self.tone_profile = ToneProfile::LinearGamma;
         self.wb_mode = WbMode::None;
         (self.wb_temp, self.wb_tint) = (0.0, 0.0);
     }
@@ -691,7 +699,7 @@ mod tests {
     #[test]
     fn unknown_choices_load_as_default() {
         let s: Settings =
-            serde_json::from_str(r#"{"tone_profile": "LogarithmicRich", "contrast": 7}"#).unwrap();
+            serde_json::from_str(r#"{"tone_profile": "Rich", "contrast": 7}"#).unwrap();
         assert_eq!(s.tone_profile, ToneProfile::default());
         assert_eq!(s.contrast, 7.0);
     }

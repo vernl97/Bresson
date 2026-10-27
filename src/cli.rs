@@ -20,7 +20,7 @@ USAGE:
 CONVERT OPTIONS:
   --roll               Analyse all files as one roll
   --roll-process NAME  Lab (default: density per frame) | Darkroom (one exposure)
-  --tone NAME          Tone profile: Standard | Soft | Hard | Rich | Flat | Linear
+  --tone NAME          Tone profile, e.g. \"LAB - Standard\" (or Standard), \"Cinematic - Rich\"
   --wb NAME            White balance (Auto-Neutral, Kodak, Fuji, ...)
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
   --border PCT         Border buffer percent (default 5)
@@ -33,15 +33,16 @@ CONVERT OPTIONS:
   --out DIR            Output folder (default: <source>/Positives)
 ";
 
-/// The choice whose label is `name`, or starts with `name` and a space
-/// ("Flat" for "Flat (for grading)").
+/// The first choice whose label is `name`, starts with `name` and a space
+/// ("Lab" for "Lab (per frame)") or ends with a space and `name` ("Rich"
+/// for "Cinematic - Rich").
 fn find<T: Copy>(all: &[T], label: impl Fn(T) -> &'static str, name: &str) -> Result<T> {
     let n = name.to_ascii_lowercase();
     all.iter()
         .copied()
         .find(|v| {
             let l = label(*v).to_ascii_lowercase();
-            l == n || l.starts_with(&format!("{n} "))
+            l == n || l.starts_with(&format!("{n} ")) || l.ends_with(&format!(" {n}"))
         })
         .with_context(|| format!("unknown value '{name}'"))
 }

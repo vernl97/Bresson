@@ -1262,7 +1262,8 @@ mod ui_tests {
             let app = h.state_mut();
             let i = app.active.unwrap();
             app.frames[i].sc.settings.rotation = 3;
-            app.frames[i].sc.settings.tone_profile = crate::engine::settings::ToneProfile::Rich;
+            app.frames[i].sc.settings.tone_profile =
+                crate::engine::settings::ToneProfile::LogarithmicRich;
             app.editor.invalidate();
         }
         settle(&mut h, 30.0);
@@ -1389,14 +1390,14 @@ mod ui_tests {
         h.get_by_value(label).click();
         h.run_steps(4);
         assert!(
-            h.query_by_label("Rich").is_some(),
+            h.query_by_label("Cinematic - Rich").is_some(),
             "Tones dropdown should be open"
         );
-        h.get_by_label("Rich").click();
+        h.get_by_label("Cinematic - Rich").click();
         h.run_steps(4);
         assert_eq!(
             h.state().frames[0].sc.settings.tone_profile,
-            crate::engine::settings::ToneProfile::Rich
+            crate::engine::settings::ToneProfile::LogarithmicRich
         );
     }
 
