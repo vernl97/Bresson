@@ -42,12 +42,16 @@ pub struct AutoWb {
     pub warm: (f32, f32),
     pub cool: (f32, f32),
     pub avg: (f32, f32),
-    /// Mean density of the near-neutral pixels; roll analysis averages it.
+    /// Grey density the neutral balance prints grey; roll analysis averages it.
     #[serde(default)]
     pub grey: [f64; 3],
     /// Mean density of all image pixels.
     #[serde(default)]
     pub mean: [f64; 3],
+    /// 0..1: how much near-neutral content, across how many tones, the
+    /// neutral estimate rests on.
+    #[serde(default)]
+    pub confidence: f32,
 }
 
 /// Per-frame result of "Convert".
@@ -320,19 +324,35 @@ fn channel_quantiles(buf: &Negative, t: ImageType) -> Levels {
     })
 }
 
+/// The image's neutral axis: per channel `D_c = a + b · D_green`.
+#[derive(Debug, Clone, Copy)]
+pub struct NeutralAxis {
+    pub fit: [(f64, f64); 3],
+    /// Tonal steps (of 10) with enough near-neutral pixels.
+    pub steps: usize,
+}
+
+impl NeutralAxis {
+    /// The grey of the axis at green density `g`.
+    fn at(&self, g: f64) -> [f64; 3] {
+        self.fit.map(|(a, b)| a + b * g)
+    }
+}
+
 /// Analysed levels: green's own density range, with red and blue placed on
 /// the image's neutral axis (see [`neutral_axis`]) so their slopes match the
-/// film's per-layer H&D slopes. Falls back to each channel's own range when
-/// the image has too little near-neutral content.
-pub fn levels_from_buffer(buf: &Negative, t: ImageType) -> Levels {
+/// film's per-layer H&D slopes. Keeps each channel's own range when the
+/// image has too little near-neutral content.
+pub fn levels_from_buffer(buf: &Negative, t: ImageType) -> (Levels, Option<NeutralAxis>) {
     let mut l = channel_quantiles(buf, t);
     let own = l;
+    let mut axis = None;
     for _ in 0..3 {
         let Some(fit) = neutral_axis(buf, &l, t) else {
             break;
         };
         for c in [0, 2] {
-            let (a, b) = fit[c];
+            let (a, b) = fit.fit[c];
             // Keep the fitted slope within reach of the channel's own range.
             let own_b = (own[c].hi - own[c].lo) / (own[1].hi - own[1].lo).max(1e-3);
             let b = b.clamp(own_b * 0.8, own_b * 1.25);
@@ -343,16 +363,18 @@ pub fn levels_from_buffer(buf: &Negative, t: ImageType) -> Levels {
                 mid: own[c].mid,
             };
         }
+        axis = Some(fit);
     }
-    l
+    (l, axis)
 }
 
 /// The neutral axis of an image: near-neutral pixels (normalised channels
 /// within 0.1 of each other under the current levels `l`), binned by green
-/// density into tonal steps, and a weighted line `D_c = a + b · D_green`
-/// through the bins' median densities for each channel. `None` without
-/// near-neutral pixels in at least four tonal steps.
-fn neutral_axis(buf: &Negative, l: &Levels, t: ImageType) -> Option<[(f64, f64); 3]> {
+/// density into ten tonal steps, and a line `D_c = a + b · D_green` through
+/// the steps' median densities for each channel. Every step weighs the same,
+/// so a large area of one colour and tone can bias at most one step. `None`
+/// without near-neutral pixels in at least four steps.
+fn neutral_axis(buf: &Negative, l: &Levels, t: ImageType) -> Option<NeutralAxis> {
     const BINS: usize = 10;
     let mut bins: Vec<Vec<[f32; 3]>> = vec![Vec::new(); BINS];
     for p in &buf.data {
@@ -365,30 +387,27 @@ fn neutral_axis(buf: &Negative, l: &Levels, t: ImageType) -> Option<[(f64, f64);
         }
     }
     let min_count = (buf.data.len() / 500).max(8);
-    let steps: Vec<([f64; 3], f64)> = bins
+    let steps: Vec<[f64; 3]> = bins
         .into_iter()
         .filter(|b| b.len() >= min_count)
-        .map(|b| {
-            let w = (b.len() as f64).sqrt();
-            let med = std::array::from_fn(|c| median(b.iter().map(|p| p[c] as f64).collect()));
-            (med, w)
-        })
+        .map(|b| std::array::from_fn(|c| median(b.iter().map(|p| p[c] as f64).collect())))
         .collect();
     if steps.len() < 4 {
         return None;
     }
-    Some(std::array::from_fn(|c| {
-        let sw: f64 = steps.iter().map(|s| s.1).sum();
-        let mx = steps.iter().map(|s| s.1 * s.0[1]).sum::<f64>() / sw;
-        let my = steps.iter().map(|s| s.1 * s.0[c]).sum::<f64>() / sw;
-        let sxx: f64 = steps.iter().map(|s| s.1 * (s.0[1] - mx).powi(2)).sum();
-        let sxy: f64 = steps
-            .iter()
-            .map(|s| s.1 * (s.0[1] - mx) * (s.0[c] - my))
-            .sum();
+    let n = steps.len() as f64;
+    let fit = std::array::from_fn(|c| {
+        let mx = steps.iter().map(|s| s[1]).sum::<f64>() / n;
+        let my = steps.iter().map(|s| s[c]).sum::<f64>() / n;
+        let sxx: f64 = steps.iter().map(|s| (s[1] - mx).powi(2)).sum();
+        let sxy: f64 = steps.iter().map(|s| (s[1] - mx) * (s[c] - my)).sum();
         let b = if sxx > 1e-9 { sxy / sxx } else { 1.0 };
         (my - b * mx, b)
-    }))
+    });
+    Some(NeutralAxis {
+        fit,
+        steps: steps.len(),
+    })
 }
 
 /// Normalised density (0 prints black … 1 prints white).
@@ -397,58 +416,30 @@ fn normalised(l: &Levels, t: ImageType, c: usize, d: f64) -> f64 {
     if t == ImageType::Positive { 1.0 - x } else { x }
 }
 
-/// Mean density of the image pixels and of its near-neutral pixels. Pixels
-/// count as neutral when their normalised channels agree within 0.12 once
-/// the overall cast is taken out; the cast estimate is refined a few times.
-fn grey_and_mean(buf: &Negative, l: &Levels, t: ImageType) -> ([f64; 3], [f64; 3]) {
-    let px: Vec<([f64; 3], [f64; 3])> = buf
-        .data
-        .iter()
-        .map(|p| {
-            let d = p.map(|v| v as f64);
-            (d, std::array::from_fn(|c| normalised(l, t, c, d[c])))
-        })
-        .filter(|(_, x)| x.iter().all(|v| (0.02..0.98).contains(v)))
-        .collect();
-    let mean_of = |sel: &[&([f64; 3], [f64; 3])]| -> Option<([f64; 3], [f64; 3])> {
-        if sel.is_empty() {
-            return None;
+/// Mean density of the image pixels (gray world), and of the pixels that
+/// are near-neutral under `l`.
+fn image_means(buf: &Negative, l: &Levels, t: ImageType) -> ([f64; 3], Option<[f64; 3]>) {
+    let (mut all, mut grey) = (([0.0; 3], 0usize), ([0.0; 3], 0usize));
+    for p in &buf.data {
+        let d = p.map(|v| v as f64);
+        let x: [f64; 3] = std::array::from_fn(|c| normalised(l, t, c, d[c]));
+        if !x.iter().all(|v| (0.02..0.98).contains(v)) {
+            continue;
         }
-        let n = sel.len() as f64;
-        let mut d = [0.0; 3];
-        let mut x = [0.0; 3];
-        for (pd, px) in sel {
-            for c in 0..3 {
-                d[c] += pd[c] / n;
-                x[c] += px[c] / n;
+        let spread =
+            x.iter().fold(f64::MIN, |a, &b| a.max(b)) - x.iter().fold(f64::MAX, |a, &b| a.min(b));
+        for (acc, ok) in [(&mut all, true), (&mut grey, spread < 0.1)] {
+            if ok {
+                for c in 0..3 {
+                    acc.0[c] += d[c];
+                }
+                acc.1 += 1;
             }
         }
-        Some((d, x))
-    };
-    let all: Vec<_> = px.iter().collect();
-    let Some((mean, mut cast_x)) = mean_of(&all) else {
-        let mid = [0, 1, 2].map(|c| l[c].mid);
-        return (mid, mid);
-    };
-    let mut grey = mean;
-    for _ in 0..4 {
-        let m = (cast_x[0] + cast_x[1] + cast_x[2]) / 3.0;
-        let off = cast_x.map(|v| v - m);
-        let sel: Vec<_> = px
-            .iter()
-            .filter(|(_, x)| {
-                let y: [f64; 3] = std::array::from_fn(|c| x[c] - off[c]);
-                y.iter().fold(f64::MIN, |a, &b| a.max(b))
-                    - y.iter().fold(f64::MAX, |a, &b| a.min(b))
-                    < 0.12
-            })
-            .collect();
-        if sel.len() * 100 < px.len() {
-            break;
-        }
-        (grey, cast_x) = mean_of(&sel).unwrap();
     }
-    (grey, mean)
+    let mean = |(v, n): ([f64; 3], usize)| (n > 0).then(|| v.map(|x| x / n as f64));
+    let mid = [0, 1, 2].map(|c| l[c].mid);
+    (mean(all).unwrap_or(mid), mean(grey))
 }
 
 /// White balance (temp, tint) that prints density `d` neutral.
@@ -456,8 +447,14 @@ fn wb_for_density(l: &Levels, t: ImageType, d: [f64; 3]) -> (f32, f32) {
     curve::balance_wb(std::array::from_fn(|c| normalised(l, t, c, d[c])))
 }
 
-/// Auto WB candidates from the mean grey and mean densities.
-fn auto_wb_from(l: &Levels, t: ImageType, grey: [f64; 3], mean: [f64; 3]) -> AutoWb {
+/// Auto WB candidates from the grey and mean densities.
+fn auto_wb_from(
+    l: &Levels,
+    t: ImageType,
+    grey: [f64; 3],
+    mean: [f64; 3],
+    confidence: f32,
+) -> AutoWb {
     let neutral = wb_for_density(l, t, grey);
     AutoWb {
         neutral,
@@ -466,12 +463,22 @@ fn auto_wb_from(l: &Levels, t: ImageType, grey: [f64; 3], mean: [f64; 3]) -> Aut
         avg: wb_for_density(l, t, mean),
         grey,
         mean,
+        confidence,
     }
 }
 
-pub fn auto_wb(buf: &Negative, l: &Levels, t: ImageType) -> AutoWb {
-    let (grey, mean) = grey_and_mean(buf, l, t);
-    auto_wb_from(l, t, grey, mean)
+/// Auto colour balance. Auto-Neutral prints the image's neutral axis grey
+/// at its median tone; without a neutral axis it falls back to the mean of
+/// the near-neutral pixels, then to the channel medians, with a confidence
+/// that says so. Auto-AVG is the plain gray-world mean of all pixels.
+pub fn auto_wb(buf: &Negative, l: &Levels, axis: Option<&NeutralAxis>, t: ImageType) -> AutoWb {
+    let (mean, near) = image_means(buf, l, t);
+    let (grey, confidence) = match (axis, near) {
+        (Some(a), _) => (a.at(l[1].mid), a.steps as f32 / 10.0),
+        (None, Some(g)) => (g, 0.2),
+        (None, None) => ([0, 1, 2].map(|c| l[c].mid), 0.0),
+    };
+    auto_wb_from(l, t, grey, mean, confidence)
 }
 
 /// Levels that Edit Only frames get instead of an analysis.
@@ -489,8 +496,8 @@ pub fn analyze(neg: &Negative, s: &Settings, base: [f32; 3], ev: Option<f64>) ->
         (edit_only_levels(), AutoWb::default())
     } else {
         let buf = analysis_buffer(neg, s);
-        let levels = levels_from_buffer(&buf, s.image_type);
-        let wb = auto_wb(&buf, &levels, s.image_type);
+        let (levels, axis) = levels_from_buffer(&buf, s.image_type);
+        let wb = auto_wb(&buf, &levels, axis.as_ref(), s.image_type);
         (levels, wb)
     };
     Analysis {
@@ -665,7 +672,11 @@ pub fn aggregate_roll(frames: &[Analysis], common_ev: Option<f64>) -> (RollAggre
         }
         m
     };
-    let auto_wb = auto_wb_from(&levels, t, avg(&|w| w.grey), avg(&|w| w.mean));
+    let confidence = kept
+        .iter()
+        .map(|&i| frames[i].auto_wb.confidence)
+        .fold(0.0, f32::max);
+    let auto_wb = auto_wb_from(&levels, t, avg(&|w| w.grey), avg(&|w| w.mean), confidence);
     (
         RollAggregate {
             levels,
@@ -830,7 +841,7 @@ mod tests {
             height: 1,
             data,
         };
-        let l = levels_from_buffer(&buf, ImageType::Negative);
+        let (l, _) = levels_from_buffer(&buf, ImageType::Negative);
         assert!(
             (l[0].lo - 0.2).abs() < 0.01 && (l[0].hi - 1.2).abs() < 0.01,
             "{l:?}"
@@ -1171,6 +1182,39 @@ mod tests {
         sum / 24.0
     }
 
+    /// Auto-Neutral on scenes dominated by one colour (foliage, sunset sky,
+    /// skin-toned interior): the grey ramp and neutral patches must stay grey.
+    #[test]
+    fn dominated_scenes_stay_neutral() {
+        use crate::engine::testchart::{dominated, neutral_cast};
+        let s = chart_settings();
+        let mut worst = 0.0f64;
+        for (name, field) in [
+            ("foliage", [43.46, -32.0, 38.0]),
+            ("sunset", [62.0, 30.0, 55.0]),
+            ("interior", [60.0, 14.0, 20.0]),
+            ("sky", [60.0, -6.0, -38.0]),
+        ] {
+            let chart = dominated(0.0, field);
+            let a = analyse_chart(&chart, &s);
+            let (mean, max) = neutral_cast(&chart, &convert_chart(&chart, &s, &a, None));
+            eprintln!("dominated {name}: neutral C* {mean:.2} (max {max:.2})");
+            if std::env::var("NLP_CHART_DEBUG").is_ok() {
+                eprintln!("  levels {:?}\n  wb {:?}", a.levels, a.auto_wb);
+                let own = channel_quantiles(
+                    &analysis_buffer(&prepare_negative(&chart.src, &s, a.base), &s),
+                    s.image_type,
+                );
+                eprintln!("  own {own:?}");
+            }
+            worst = worst.max(mean);
+        }
+        eprintln!("dominated worst neutral C* {worst:.2}");
+        // Plugin-port engine: foliage 1.01, sunset 1.67, interior 8.78,
+        // sky 15.40.
+        assert!(worst < 0.6, "dominated scene neutral C* {worst}");
+    }
+
     /// Conversion quality on the physically modelled chart: colour accuracy,
     /// neutrality, and consistency of a roll shot at −1, 0 and +1 EV.
     #[test]
@@ -1243,15 +1287,15 @@ mod tests {
             m.tone_matched_de
         );
         assert!(m.color_de < 5.5, "colour dE00 {}", m.color_de);
-        assert!(m.neutral_cast < 1.7, "neutral C* {}", m.neutral_cast);
+        assert!(m.neutral_cast < 0.5, "neutral C* {}", m.neutral_cast);
         assert!(
-            m.neutral_cast_max < 3.0,
+            m.neutral_cast_max < 1.2,
             "neutral C* max {}",
             m.neutral_cast_max
         );
-        assert!(frame_spread < 1.5, "frame spread {frame_spread}");
-        assert!(roll_spread < 1.8, "roll spread {roll_spread}");
-        assert!(roll_cast < 1.4, "roll neutral C* {roll_cast}");
+        assert!(frame_spread < 0.7, "frame spread {frame_spread}");
+        assert!(roll_spread < 1.6, "roll spread {roll_spread}");
+        assert!(roll_cast < 0.8, "roll neutral C* {roll_cast}");
     }
 
     #[test]

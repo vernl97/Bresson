@@ -1186,6 +1186,24 @@ impl NlpApp {
                 &format!("Pick a neutral grey in the image ({wb_key})"),
                 true,
             );
+            let auto = matches!(
+                s.wb_mode,
+                WbMode::AutoNeutral | WbMode::AutoWarm | WbMode::AutoCool | WbMode::AutoMix
+            );
+            let confidence = self
+                .editor_index()
+                .and_then(|i| self.frames[i].auto_wb(s))
+                .map(|w| w.confidence);
+            if auto && confidence.is_some_and(|c| c < 0.4) {
+                widgets::status_line(
+                    ui,
+                    Icon::Warn,
+                    theme::WARN,
+                    &format!(
+                        "Few neutral tones to balance on. Pick a grey ({wb_key}) or use the roll."
+                    ),
+                );
+            }
             let mut t = s.wb_temp;
             if fl_slider(
                 ui,

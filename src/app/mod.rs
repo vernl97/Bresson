@@ -15,7 +15,7 @@ use std::sync::Arc;
 use eframe::egui;
 
 use crate::engine::decode::{self, SourceImage};
-use crate::engine::pipeline::{self, Renderer};
+use crate::engine::pipeline::{self, AutoWb, Renderer};
 use crate::engine::settings::{
     ExportFormat, ExportPreset, ExportSettings, OutputSpace, Settings, WbMode, lab,
 };
@@ -123,15 +123,21 @@ impl Frame {
         }
     }
 
-    /// Temp / Tint that `s.wb_mode` gives this frame (roll WB when rendering
-    /// from the roll); `None` keeps the current values.
-    pub fn wb_values(&self, s: &Settings) -> Option<(f32, f32)> {
-        let wb = if self.sc.roll.is_some() && s.use_roll {
+    /// The auto WB candidates this frame renders with: the roll's when it
+    /// renders from the roll, otherwise its own analysis.
+    pub fn auto_wb(&self, s: &Settings) -> Option<AutoWb> {
+        let roll = if s.use_roll {
             self.sc.roll.as_ref().and_then(|r| r.auto_wb)
         } else {
             None
         };
-        match wb.or_else(|| self.sc.analysis.as_ref().map(|a| a.auto_wb)) {
+        roll.or_else(|| self.sc.analysis.as_ref().map(|a| a.auto_wb))
+    }
+
+    /// Temp / Tint that `s.wb_mode` gives this frame (roll WB when rendering
+    /// from the roll); `None` keeps the current values.
+    pub fn wb_values(&self, s: &Settings) -> Option<(f32, f32)> {
+        match self.auto_wb(s) {
             Some(w) => pipeline::wb_for_mode(s.wb_mode, &w),
             // Unconverted: film presets apply, the auto modes wait for analysis.
             None => pipeline::wb_for_mode(s.wb_mode, &Default::default()).filter(|_| {

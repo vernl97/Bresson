@@ -195,6 +195,102 @@ pub fn negative(ev: f64) -> Chart {
     Chart { src, patches }
 }
 
+/// A scene dominated by one colour: the grey ramp along the top, the six
+/// neutral ColorChecker patches along the bottom, and `field` (CIELAB D50)
+/// filling the rest (about 60 % of the frame). Auto colour balance must keep
+/// the greys neutral without being pulled towards the field.
+pub fn dominated(ev: f64, field: [f64; 3]) -> Chart {
+    let ramp: Vec<f64> = (0..12)
+        .map(|i| 0.02 * (0.9f64 / 0.02).powf(i as f64 / 11.0))
+        .collect();
+    let neutral_lab =
+        |y: f64| color::xyz_to_lab(color::mat_vec(&color::rgb_to_xyz(&PROPHOTO), [y; 3]), D50);
+    let mut patches: Vec<Patch> = ramp
+        .iter()
+        .map(|&y| neutral_lab(y))
+        .chain(COLORCHECKER[18..].iter().copied())
+        .map(|lab| Patch {
+            lab,
+            neutral: true,
+            pixels: Vec::new(),
+        })
+        .collect();
+    let refl: Vec<[f64; 3]> = ramp
+        .iter()
+        .map(|&y| [y; 3])
+        .chain(COLORCHECKER[18..].iter().map(|l| reflectance(*l)))
+        .collect();
+    let field = reflectance(field);
+    let (x0, x1) = (REBATE, WIDTH - REBATE);
+    let (y0, y1) = (REBATE, HEIGHT - REBATE);
+    let ramp_bottom = y0 + 56;
+    let row_top = y1 - 56;
+    let mut data = vec![[0.0f32; 3]; WIDTH * HEIGHT];
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let i = y * WIDTH + x;
+            let inside = (x0..x1).contains(&x) && (y0..y1).contains(&y);
+            let strip = |n: usize, top: usize, bottom: usize| {
+                let w = (x1 - x0) as f64 / n as f64;
+                let k = ((x - x0) as f64 / w) as usize;
+                let fx = (x - x0) as f64 / w - k as f64;
+                let fy = (y - top) as f64 / (bottom - top) as f64;
+                (
+                    k.min(n - 1),
+                    (0.2..0.8).contains(&fx) && (0.2..0.8).contains(&fy),
+                )
+            };
+            let r = if !inside {
+                None
+            } else if y < ramp_bottom || y >= row_top {
+                let (p, centre) = if y < ramp_bottom {
+                    strip(12, y0, ramp_bottom)
+                } else {
+                    let (k, c) = strip(6, row_top, y1);
+                    (12 + k, c)
+                };
+                if centre {
+                    patches[p].pixels.push(i);
+                }
+                Some(refl[p])
+            } else {
+                Some(field)
+            };
+            data[i] = scan(r, ev).map(|v| v as f32);
+        }
+    }
+    let src = SourceImage {
+        width: WIDTH,
+        height: HEIGHT,
+        data,
+        to_melissa: color::to_f32(&color::mat_inv(&CAMERA_MIX)),
+        as_shot_wb: [1.0; 3],
+        is_raw: false,
+        info: super::decode::SourceInfo {
+            full_width: WIDTH,
+            full_height: HEIGHT,
+            ..Default::default()
+        },
+    };
+    Chart { src, patches }
+}
+
+/// Mean and largest chroma (C*ab) of a chart's neutral patches.
+pub fn neutral_cast(chart: &Chart, srgb: &[[f32; 3]]) -> (f64, f64) {
+    let labs = patch_lab(chart, srgb);
+    let c: Vec<f64> = chart
+        .patches
+        .iter()
+        .zip(&labs)
+        .filter(|(p, _)| p.neutral)
+        .map(|(_, l)| l[1].hypot(l[2]))
+        .collect();
+    (
+        c.iter().sum::<f64>() / c.len() as f64,
+        c.iter().fold(0.0, |a, &b| a.max(b)),
+    )
+}
+
 /// Quality of a converted chart.
 #[derive(Debug, Clone, Copy)]
 pub struct ChartMetrics {
