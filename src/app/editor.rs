@@ -735,6 +735,14 @@ impl NlpApp {
             {
                 self.history_step(i, false);
             }
+            ui.add_space(6.0);
+            if ui
+                .add_enabled(self.editor.crop.is_none(), widgets::ghost("Reset"))
+                .on_hover_text("Reset all edits to the defaults (undo with the arrow)")
+                .clicked()
+            {
+                self.reset_edits(i, s);
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -1368,6 +1376,21 @@ impl NlpApp {
         (s.wb_temp, s.wb_tint) = self.frames[i].wb_values(s).unwrap_or((0.0, 0.0));
     }
 
+    /// `resetSettings`: back to the positive, B+W or colour defaults,
+    /// keeping the frame's source fields and engine preset.
+    fn reset_edits(&mut self, i: usize, s: &mut Settings) {
+        let keep = s.clone();
+        *s = Settings::default();
+        s.keep_frame_fields(&keep);
+        if s.image_type == ImageType::Positive {
+            s.apply_positive_defaults();
+        } else if s.is_monochrome() {
+            s.apply_mono_defaults();
+        }
+        s.apply_engine_preset(keep.engine);
+        self.refresh_wb(i, s);
+    }
+
     /// The ⋯ menu next to Re-convert: defaults, unconvert and the LUT folder.
     fn defaults_menu(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
         if ui
@@ -1401,20 +1424,6 @@ impl NlpApp {
             ui.close();
         }
         ui.separator();
-        if ui.button("Reset edits").clicked() {
-            // `resetSettings`: the positive, B+W or colour defaults.
-            let keep = s.clone();
-            *s = Settings::default();
-            s.keep_frame_fields(&keep);
-            if s.image_type == ImageType::Positive {
-                s.apply_positive_defaults();
-            } else if s.is_monochrome() {
-                s.apply_mono_defaults();
-            }
-            s.apply_engine_preset(keep.engine);
-            self.refresh_wb(i, s);
-            ui.close();
-        }
         if self.frames[i].sc.is_converted()
             && ui
                 .button("Unconvert")
@@ -1781,6 +1790,9 @@ impl NlpApp {
                 }
             }
         }
+        if !cropping && self.editor.pick.is_none() {
+            resp.context_menu(|ui| self.canvas_menu(ui, i));
+        }
 
         if self.editor.before && !cropping {
             pill(&p, pos2(avail.left() + 44.0, avail.top() + 22.0), "Before");
@@ -1835,6 +1847,86 @@ impl NlpApp {
                 ZoomReq::Absolute(full)
             });
         }
+    }
+
+    /// Right-click menu on the preview.
+    fn canvas_menu(&mut self, ui: &mut egui::Ui, i: usize) {
+        let before = self.frames[i].sc.settings.clone();
+        let mut s = before.clone();
+        let converted = self.frames[i].sc.is_converted();
+        if ui
+            .button("Auto crop")
+            .on_hover_text("Detect the frame and open it in Crop & straighten")
+            .clicked()
+        {
+            self.enter_crop(i);
+            self.detect_frame(i);
+            ui.close();
+        }
+        if ui.button("Crop & straighten…").clicked() {
+            self.enter_crop(i);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Rotate left").clicked() {
+            s.rotation = (s.rotation + 3) % 4;
+            s.crop = rotate_insets(s.crop, false);
+            ui.close();
+        }
+        if ui.button("Rotate right").clicked() {
+            s.rotation = (s.rotation + 1) % 4;
+            s.crop = rotate_insets(s.crop, true);
+            ui.close();
+        }
+        if ui.button("Flip horizontally").clicked() {
+            s.flip_h = !s.flip_h;
+            s.crop = [s.crop[2], s.crop[1], s.crop[0], s.crop[3]];
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Pick white balance").clicked() {
+            self.editor.pick = Some(Pick::WhiteBalance);
+            ui.close();
+        }
+        if ui.button("Pick film base").clicked() {
+            self.editor.pick = Some(Pick::FilmBase);
+            ui.close();
+        }
+        ui.separator();
+        if ui.checkbox(&mut self.editor.before.clone(), "Before / after").clicked() {
+            self.editor.before = !self.editor.before;
+            self.editor.split = false;
+            self.editor.dirty = true;
+            ui.close();
+        }
+        if ui.checkbox(&mut self.editor.split.clone(), "Split view").clicked() {
+            self.editor.split = !self.editor.split;
+            self.editor.before = false;
+            self.editor.dirty = true;
+            ui.close();
+        }
+        if converted && ui.checkbox(&mut self.editor.clip_view.clone(), "Show clipping").clicked() {
+            self.editor.clip_view = !self.editor.clip_view;
+            self.editor.dirty = true;
+            ui.close();
+        }
+        if ui
+            .button(if self.editor.zoom.is_some() { "Zoom to fit" } else { "Zoom in" })
+            .clicked()
+        {
+            self.editor.zoom_req = Some(if self.editor.zoom.is_some() {
+                ZoomReq::Absolute(0.0)
+            } else {
+                ZoomReq::Factor(2.0)
+            });
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Reset edits").clicked() {
+            self.reset_edits(i, &mut s);
+            ui.close();
+        }
+        self.apply_change(i, &before, s);
     }
 
     fn crop_overlay(&mut self, ui: &mut egui::Ui, resp: &egui::Response, img: Rect, avail: Rect) {
