@@ -14,34 +14,42 @@ cargo run --release -- help
 
 ```bash
 cargo run --release -- convert [--roll] [--roll-process NAME] [--tone NAME] [--wb NAME] \
-    [--lut NAME] [--border PCT] [--jpg] [--out DIR] FILES
+    [--lut NAME] [--border PCT] [--auto-crop] [--jpg] [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
 cargo run --release -- scan-prep FILES              # level + gamma 2.2 encode linear (gamma 1.0) TIF scans
 cargo run --release -- synth [out.tif] [variant]    # write a synthetic colour negative for testing
 ```
 
-`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Pro Lab, Basic Lab or Darkroom Paper.
+`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Pro Lab, Basic Lab or Darkroom Paper. `--auto-crop` crops and straightens each frame to its detected frame before analysis. `--name` takes the export file name template (see Export below).
 
 ## GUI
 
 **Folder View**
 - Browse a folder of RAW and TIFF files as a thumbnail grid. Select with click, ⌘/Ctrl-click, Shift-click or ⌘A; double-click (or Enter) opens the editor.
 - The top bar acts on the selection:
-  - **Convert** / **Convert as roll** (2+ frames) open a dialog with the conversion inputs: source, colour model, film base, pre-saturation, border buffer, white balance and, for rolls, the roll process (Pro Lab, Basic Lab or Darkroom Paper).
+  - **Convert** / **Convert as roll** (2+ frames) open a dialog with the conversion inputs: source, colour model, film base, pre-saturation, border buffer, white balance, *Auto-crop frames* and, for rolls, the roll process (Pro Lab, Basic Lab or Darkroom Paper).
   - **Export**: positive copies as TIF (8/16-bit, ZIP) or JPG, in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile and EXIF.
-- Right-click a frame for open, convert, export, copy/paste settings and unconvert.
+    - Presets: *Lab JPEG M/L* (3000/6000 px) and *Archive TIFF*, plus your own (*Save as…*).
+    - Size: full or a long edge of 2000–6000 px.
+    - File name template: `{name}`, `{suffix}`, `{n}` / `{n:03}` (position in the export), `{stock}`, `{iso}`, `{date}` (scan date). Clashing names get `-2`, `-3`, ….
+- Right-click a frame for open, convert, export, detect frame, copy/paste settings and unconvert.
+- Lab correction keys act on the selected converted frames; the offsets show under each thumbnail (see below).
 
 **Editor View**
 - Toolbar:
   - Left: back (Space), previous/next (←/→, wraps; skips unconverted frames when the current one is converted), zoom (+/−, ⌘-scroll or double-click), undo/redo (⌘Z / ⇧⌘Z).
-  - Centre: file name and tone profile.
-  - Right: before/after (B), rotate, flip, crop/straighten (C), export.
-- Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. Reset Crop / Cancel (Esc) / Apply (Enter).
+  - Centre: file name, tone profile and the lab correction offsets (`D+2 C−1 M0 Y+1`).
+  - Right: before/after (B; ⇧B for a split view with a draggable divider), rotate, flip, crop/straighten (C), export.
+- Lab correction keys, like a Frontier/Noritsu keyboard (number row or numpad): 7 8 9 add cyan, magenta, yellow; 1 2 3 take them away; 4 / 6 print denser (darker) / lighter in 1/6 EV steps; 0 resets. They move the Exposure and mid-tone colour sliders.
+- J shows clipping: red where a channel is blown, blue where the shadows are blocked. The histogram marks clipped channels in its corners.
+- Hovering the image shows the output RGB and the negative's density above the film base.
+- Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. Detect finds the frame inside the film rebate and holder. Reset Crop / Cancel (Esc) / Apply (Enter).
 - A single-column sidebar with a histogram on top:
   - Before conversion it shows the conversion inputs (Source, Analysis). Dragging the border buffer slider outlines the analysed area on the canvas. Afterwards they fold into a one-line **Conversion** summary with Re-convert.
   - **Tone**: tone profile, Exposure, Brightness, Contrast, Lights, Darks, Whites, Blacks; *Glow, fade & clipping* holds Lab Glow/Fade, Soft Highs/Lows and White/Black clip.
   - **White balance**: presets, a neutral eyedropper and Temp/Tint.
   - **Colour toning**: mids, highs and shadows.
   - **Look**: LUT with amount and saturation, sharpening.
+  - **Film** (collapsed): film stock, ISO, developer and camera details for the EXIF and the file name tokens; *Apply to roll/folder* copies them.
   - **Engine** (collapsed): engine presets v2.1 to v3.1, curve points, processing order, WB density and type, plus a curve and analysis readout. Roll frames get *Use roll analysis* and the roll process.
   - The ⋯ menu beside Re-convert: save/apply default, reset edits, unconvert and the LUT folder.
 - Film-base eyedropper for sampling the unexposed border.
