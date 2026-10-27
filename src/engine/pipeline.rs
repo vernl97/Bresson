@@ -390,6 +390,13 @@ fn channel_quantiles(buf: &Negative, t: ImageType) -> Levels {
     })
 }
 
+/// Median position (share of the uncapped range) below which a frame is
+/// mostly dark, as at night.
+const DARK_SHARE: f64 = 0.25;
+/// Density range (D) between a frame's 97th percentile and its white end
+/// that marks the area above the white-end cap as a lit subject.
+const LIT_SPREAD: f64 = 0.1;
+
 /// Smallest green density range skin is looked for in: a frame mostly at
 /// its black end (a flash at night) has its white end capped close to the
 /// black, with a flashed face far beyond it.
@@ -453,9 +460,25 @@ pub fn levels_from_buffer(buf: &Negative, t: ImageType) -> (Levels, Option<Neutr
         // scene around it and would print the whole scene dark: keep green's
         // white end within twice its shadow-to-median span above the median,
         // and shorten every channel's range by the same fraction so neutrals
-        // stay neutral.
+        // stay neutral. A lit subject in a mostly dark frame (a flash at
+        // night) is different: it spans many tones above that cap, and only
+        // its top 3 % of the frame may clip (Fuji counts an extreme from 3 %
+        // of the area). A light source is one plateau of density; a holder
+        // or mask left in the frame is left out, as dense as the scan reads.
         let g = l[1];
-        let cap = (g.mid + 2.0 * (g.mid - g.lo)).max(g.mid + 0.1);
+        let mut cap = (g.mid + 2.0 * (g.mid - g.lo)).max(g.mid + 0.1);
+        let opaque = opaque_density(&buf.data);
+        let mut v: Vec<f32> = buf
+            .data
+            .iter()
+            .filter(|p| p.iter().all(|&d| d > -0.03) && p[1] < opaque)
+            .map(|p| p[1])
+            .collect();
+        let (top, hi) = (quantile(&mut v, 0.97), quantile(&mut v, 0.9995));
+        let dark = g.mid - g.lo < DARK_SHARE * (hi - g.lo);
+        if dark && top > cap && hi - top > LIT_SPREAD {
+            cap = top;
+        }
         let f = ((cap - g.lo) / (g.hi - g.lo).max(1e-6)).min(1.0);
         for c in l.iter_mut() {
             c.hi = c.lo + (c.hi - c.lo) * f;
@@ -1993,6 +2016,27 @@ mod tests {
             (l1 - l0).abs() < 1.5,
             "a scene near its key moves {l0} -> {l1}"
         );
+    }
+
+    /// A flash at night: lit things far brighter than the dark scene keep
+    /// their tones instead of printing as white blobs, even without skin
+    /// to go by. Here the lit subject is the grey ramp (many tones) on a
+    /// near-black field; most of its steps must stay below white.
+    #[test]
+    fn lit_subjects_at_night_keep_their_tones() {
+        use crate::engine::testchart::{dominated, patch_lab};
+        let s = chart_settings();
+        let chart = dominated(0.0, [6.0, 0.0, 0.0]);
+        let base = resolve_base(&chart.src, &s, None);
+        let neg = prepare_negative(&chart.src, &s, base);
+        let a = analyze_skin(&neg, &s, base, None, false);
+        let lab = patch_lab(&chart, &convert_chart(&chart, &s, &a, None));
+        let open = lab[..12].iter().filter(|l| l[0] < 97.0).count();
+        eprintln!(
+            "lit subject at night: {open} of 12 ramp steps below L* 97: {:?}",
+            lab[..12].iter().map(|l| l[0].round()).collect::<Vec<_>>()
+        );
+        assert!(open >= 7, "the lit ramp blows out");
     }
 
     #[test]
