@@ -231,6 +231,8 @@ pub struct Settings {
     pub film_base: FilmBase,
     /// Linear camera-space multipliers when `film_base == Sampled`.
     pub film_base_sample: [f32; 3],
+    /// Detect the frame (crop and straighten) when converting an uncropped frame.
+    pub auto_crop: bool,
 
     // ---- Geometry (Lightroom would provide these) ---------------------------
     /// Quarter turns clockwise.
@@ -315,6 +317,7 @@ impl Default for Settings {
             border_buffer: 5.0,
             film_base: FilmBase::Auto,
             film_base_sample: [1.0, 1.0, 1.0],
+            auto_crop: false,
             rotation: 0,
             flip_h: false,
             straighten: 0.0,
@@ -474,6 +477,7 @@ impl Settings {
             self.border_buffer,
             self.film_base,
             self.film_base_sample,
+            self.auto_crop,
             self.use_roll,
         ) = (
             k.source,
@@ -483,6 +487,7 @@ impl Settings {
             k.border_buffer,
             k.film_base,
             k.film_base_sample,
+            k.auto_crop,
             k.use_roll,
         );
         (self.rotation, self.flip_h, self.straighten, self.crop) =

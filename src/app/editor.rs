@@ -410,6 +410,23 @@ impl NlpApp {
         self.editor.dirty = true;
     }
 
+    /// Propose the detected frame as the pending crop.
+    fn detect_frame(&mut self, i: usize) {
+        let Some(src) = self.editor.src.clone() else {
+            return;
+        };
+        let f = &self.frames[i];
+        match crate::engine::frame::detect(&src, &f.sc.settings, f.base_for(&src)) {
+            Some(d) => {
+                if let Some(c) = &mut self.editor.crop {
+                    (c.insets, c.angle) = (d.crop, d.straighten);
+                    self.editor.dirty = true;
+                }
+            }
+            None => self.toast("No frame edge found", false),
+        }
+    }
+
     fn cancel_crop(&mut self) {
         self.editor.crop = None;
         self.editor.dirty = true;
@@ -786,6 +803,13 @@ impl NlpApp {
                     c.angle = 0.0;
                     self.editor.dirty = true;
                 }
+            }
+            if ui
+                .add(widgets::ghost("Detect"))
+                .on_hover_text("Find the frame inside the film rebate and holder")
+                .clicked()
+            {
+                self.detect_frame(i);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui

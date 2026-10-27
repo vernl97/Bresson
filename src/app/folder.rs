@@ -30,6 +30,7 @@ enum CellAction {
     Copy,
     Paste,
     Unconvert,
+    DetectFrame,
 }
 
 impl NlpApp {
@@ -317,6 +318,30 @@ impl NlpApp {
         }
     }
 
+    /// Crop and straighten each frame to its detected frame.
+    pub fn detect_frames(&mut self, idx: &[usize]) {
+        let mut missed = 0;
+        for &i in idx {
+            let f = &self.frames[i];
+            let Some(src) = f.proxy() else {
+                missed += 1;
+                continue;
+            };
+            match crate::engine::frame::detect(&src, &f.sc.settings, f.base_for(&src)) {
+                Some(d) => {
+                    let s = &mut self.frames[i].sc.settings;
+                    (s.crop, s.straighten) = (d.crop, d.straighten);
+                    self.mark_changed(i);
+                }
+                None => missed += 1,
+            }
+        }
+        self.editor.invalidate();
+        if missed > 0 {
+            self.toast(format!("No frame edge found in {missed} frame(s)"), false);
+        }
+    }
+
     pub fn copy_settings(&mut self) {
         let lead = self
             .active
@@ -509,6 +534,8 @@ impl NlpApp {
                             }
                             item(ui, "Export…", &keys[1], CellAction::Export, true);
                             ui.separator();
+                            item(ui, "Detect frame", "", CellAction::DetectFrame, true);
+                            ui.separator();
                             item(ui, "Copy settings", &keys[2], CellAction::Copy, true);
                             item(ui, "Paste settings", &keys[3], CellAction::Paste, has_clip);
                             ui.separator();
@@ -554,6 +581,7 @@ impl NlpApp {
                 CellAction::Copy => self.copy_settings(),
                 CellAction::Paste => self.paste_settings(),
                 CellAction::Unconvert => self.unconvert(&self.sel_vec()),
+                CellAction::DetectFrame => self.detect_frames(&self.sel_vec()),
             }
         }
     }
@@ -698,6 +726,10 @@ impl NlpApp {
                     None,
                 );
                 widgets::fl_combo(ui, "White balance", &mut s.wb_mode, WbMode::ALL, WbMode::label, "");
+                ui.add_space(6.0);
+                ui.checkbox(&mut s.auto_crop, "Auto-crop frames").on_hover_text(
+                    "Find each uncropped frame inside the film rebate and holder, and straighten it",
+                );
                 if count > 1 {
                     ui.add_space(6.0);
                     ui.checkbox(&mut d.as_roll, "Convert as roll")
@@ -735,8 +767,8 @@ impl NlpApp {
                 let (was_type, was_model) = (s.image_type, s.color_model);
                 (s.image_type, s.source, s.color_model, s.film_base) =
                     (o.image_type, o.source, o.color_model, o.film_base);
-                (s.pre_saturation, s.border_buffer, s.wb_mode, s.roll_mode) =
-                    (o.pre_saturation, o.border_buffer, o.wb_mode, o.roll_mode);
+                (s.pre_saturation, s.border_buffer, s.wb_mode, s.roll_mode, s.auto_crop) =
+                    (o.pre_saturation, o.border_buffer, o.wb_mode, o.roll_mode, o.auto_crop);
                 if s.image_type != was_type && s.image_type != ImageType::Negative {
                     s.apply_positive_defaults();
                     s.wb_mode = o.wb_mode;

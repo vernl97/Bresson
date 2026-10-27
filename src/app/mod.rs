@@ -707,7 +707,7 @@ impl NlpApp {
                         self.toast(e, true);
                     }
                     let n = frames.len();
-                    for (path, src, a) in frames {
+                    for (path, src, a, detected) in frames {
                         let Some(i) = self.index_of(&path) else {
                             continue;
                         };
@@ -722,6 +722,9 @@ impl NlpApp {
                                 ..(*src).clone()
                             });
                             f.proxy = ProxyState::Ready(src);
+                        }
+                        if let Some(d) = detected {
+                            (f.sc.settings.crop, f.sc.settings.straighten) = (d.crop, d.straighten);
                         }
                         f.sc.analysis = Some(a);
                         f.sc.roll = roll.clone();

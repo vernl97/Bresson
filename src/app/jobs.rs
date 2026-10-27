@@ -10,6 +10,7 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::decode::{self, SourceImage, SourceInfo};
+use crate::engine::frame::{self, Detected};
 use crate::engine::pipeline::{self, Analysis};
 use crate::engine::settings::Settings;
 use crate::engine::sidecar::{self, RollData};
@@ -29,7 +30,8 @@ pub enum JobResult {
         result: Result<Arc<SourceImage>, String>,
     },
     Converted {
-        frames: Vec<(PathBuf, Arc<SourceImage>, Analysis)>,
+        /// The frame geometry, for frames converted with auto-crop.
+        frames: Vec<(PathBuf, Arc<SourceImage>, Analysis, Option<Detected>)>,
         roll: Option<RollData>,
         errors: Vec<String>,
     },
@@ -168,6 +170,15 @@ pub fn load_proxy(path: &Path) -> anyhow::Result<SourceImage> {
 
 // ---- conversion ------------------------------------------------------------------
 
+/// Frame detection for a frame converted with `auto_crop` that has no crop
+/// or straighten of its own yet.
+pub fn auto_crop(src: &SourceImage, s: &Settings) -> Option<Detected> {
+    if !s.auto_crop || s.crop != [0.0; 4] || s.straighten != 0.0 {
+        return None;
+    }
+    frame::detect(src, s, pipeline::resolve_base(src, s, None))
+}
+
 pub struct ConvertItem {
     pub path: PathBuf,
     pub proxy: Option<Arc<SourceImage>>,
@@ -191,7 +202,7 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
         })
         .collect();
     let mut errors = Vec::new();
-    let ok: Vec<(PathBuf, Arc<SourceImage>, Settings)> = loaded
+    let mut ok: Vec<(PathBuf, Arc<SourceImage>, Settings)> = loaded
         .into_iter()
         .filter_map(|r| r.map_err(|e| errors.push(e)).ok())
         .collect();
@@ -202,6 +213,21 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
             errors,
         };
     }
+    // Crop before analysing, so the analysis sees only the image.
+    let detected: Vec<Option<Detected>> = ok
+        .par_iter_mut()
+        .map(|(_, src, s)| {
+            if let Some(found) = auto_crop(src, s) {
+                (s.crop, s.straighten) = (found.crop, found.straighten);
+            }
+            // Also report geometry detected by an earlier pass (the exposure
+            // variance prompt re-runs the conversion with it).
+            s.auto_crop.then_some(Detected {
+                crop: s.crop,
+                straighten: s.straighten,
+            })
+        })
+        .collect();
     // `createRoll` only runs for more than one frame.
     let as_roll = as_roll && ok.len() > 1;
     let bases: Vec<[f32; 3]> = ok
@@ -276,7 +302,8 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
     let frames = ok
         .into_iter()
         .zip(analyses)
-        .map(|((p, src, _), a)| (p, src, a))
+        .zip(detected)
+        .map(|(((p, src, _), a), d)| (p, src, a, d))
         .collect();
     JobResult::Converted {
         frames,
