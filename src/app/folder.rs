@@ -132,6 +132,16 @@ impl NlpApp {
                             self.open_folder(&dir);
                         }
                     }
+                    if !self.defaults.projects.is_empty() {
+                        ui.add_space(6.0);
+                        if ui
+                            .add(widgets::ghost("Projects"))
+                            .on_hover_text("All rolls you have opened")
+                            .clicked()
+                        {
+                            self.show_projects();
+                        }
+                    }
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new("Camera RAW · TIFF · JPEG · PNG")
@@ -144,7 +154,11 @@ impl NlpApp {
 
     pub fn folder_ui(&mut self, ui: &mut egui::Ui) {
         if self.frames.is_empty() {
-            self.welcome_ui(ui);
+            if self.roll.projects_open {
+                self.projects_ui(ui);
+            } else {
+                self.welcome_ui(ui);
+            }
             return;
         }
         let ctx = ui.ctx().clone();
@@ -177,6 +191,15 @@ impl NlpApp {
                             .unwrap_or_else(|| f.display().to_string());
                         ui.label(RichText::new(name).font(theme::medium(13.5)))
                             .on_hover_text(f.display().to_string());
+                        if !self.single_mode
+                            && ui
+                                .add(widgets::ghost("Roll info…"))
+                                .on_hover_text("Film, camera and notes for the whole roll")
+                                .clicked()
+                        {
+                            let dir = f.clone();
+                            self.open_roll_dialog(&dir, false);
+                        }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let n = self.selected.len();

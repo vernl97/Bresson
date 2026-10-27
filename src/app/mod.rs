@@ -5,6 +5,7 @@ mod editor;
 mod folder;
 mod jobs;
 mod picker;
+mod roll;
 mod widgets;
 
 use std::collections::BTreeSet;
@@ -175,12 +176,19 @@ pub struct NlpApp {
     pub exposure_prompt: Option<(Vec<jobs::ConvertItem>, f64)>,
     /// Name being typed for a new export preset.
     pub preset_draft: Option<String>,
+    /// Roll info, its dialog and the Projects screen.
+    pub roll: roll::RollState,
 }
 
 impl NlpApp {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
         widgets::theme::apply(&cc.egui_ctx);
-        let defaults = sidecar::load_defaults();
+        let mut defaults = sidecar::load_defaults();
+        if defaults.projects.is_empty()
+            && let Some(last) = defaults.last_folder.clone().filter(|p| p.is_dir())
+        {
+            sidecar::remember_project(&mut defaults, &last);
+        }
         let mut app = Self {
             view: View::Folder,
             folder: None,
@@ -202,6 +210,7 @@ impl NlpApp {
             convert_dialog: None,
             exposure_prompt: None,
             preset_draft: None,
+            roll: Default::default(),
         };
         if let Some(p) = open {
             if p.is_dir() {
@@ -240,7 +249,12 @@ impl NlpApp {
         self.load_frames(files, dir);
         self.single_mode = false;
         self.defaults.last_folder = Some(dir.to_path_buf());
+        sidecar::remember_project(&mut self.defaults, dir);
         let _ = sidecar::save_defaults(&self.defaults);
+        self.roll.projects_open = false;
+        if self.roll.info.is_none() {
+            self.open_roll_dialog(dir, true);
+        }
     }
 
     /// Open individual image file(s) without the rest of their folder.
@@ -291,12 +305,15 @@ impl NlpApp {
     fn load_frames(&mut self, files: Vec<PathBuf>, dir: &Path) {
         self.save_all();
         let _ = std::fs::create_dir_all(dir.join("NLP"));
+        self.roll.info = sidecar::load_roll_info(dir);
+        let roll_meta = self.roll.info.as_ref().map(|r| r.metadata.clone());
         self.frames = files
             .into_iter()
             .map(|path| {
                 let source_auto = sidecar::load(&path).is_none();
                 let mut sc = sidecar::load(&path).unwrap_or_else(|| Sidecar {
                     settings: self.defaults.settings.clone(),
+                    metadata: roll_meta.clone().unwrap_or_default(),
                     ..Default::default()
                 });
                 if decode::is_raw(&path) || sc.analysis.is_some() {
@@ -1069,6 +1086,7 @@ impl eframe::App for NlpApp {
         self.toasts_ui(&ctx);
         self.export_dialog(&ctx);
         self.convert_dialog_ui(&ctx);
+        self.roll_dialog_ui(&ctx);
         self.exposure_prompt_ui(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_all();
@@ -1456,6 +1474,55 @@ mod ui_tests {
     }
 
     #[test]
+    fn roll_info_fills_frames_and_persists() {
+        let dir = std::env::temp_dir().join(format!("nlp_roll_app_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("frame_01.tif");
+        std::fs::write(&img, b"").unwrap();
+        let mut app = NlpApp {
+            view: View::Folder,
+            folder: None,
+            frames: Vec::new(),
+            selected: BTreeSet::new(),
+            anchor: None,
+            active: None,
+            jobs: Jobs::new(egui::Context::default()),
+            defaults: Default::default(),
+            clipboard: None,
+            editor: editor::Editor::default(),
+            toasts: Vec::new(),
+            export_total: 0,
+            export_done: 0,
+            thumb_size: 180.0,
+            time: 0.0,
+            single_mode: false,
+            export_targets: None,
+            convert_dialog: None,
+            exposure_prompt: None,
+            preset_draft: None,
+            roll: Default::default(),
+        };
+        // (open_folder would also write the user's defaults.json.)
+        app.load_frames(vec![img.clone()], &dir);
+        assert!(app.roll.info.is_none(), "new folder has no roll info");
+        app.open_roll_dialog(&dir, true);
+        let mut info = app.roll.dialog.take().unwrap().info;
+        info.metadata.film_stock = "Portra 400".into();
+        app.save_roll_info(&dir, info);
+        assert!(sidecar::roll_info_path(&dir).is_file());
+        assert_eq!(app.frames[0].sc.metadata.film_stock, "Portra 400");
+
+        // Reopening reads it back and new frames inherit it.
+        app.frames.clear();
+        app.load_frames(vec![img], &dir);
+        let r = app.roll.info.as_ref().expect("roll info reloaded");
+        assert_eq!(r.metadata.film_stock, "Portra 400");
+        assert_eq!(app.frames[0].sc.metadata.film_stock, "Portra 400");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn export_dialog_state_management() {
         let mut app = NlpApp {
             view: View::Folder,
@@ -1478,6 +1545,7 @@ mod ui_tests {
             convert_dialog: None,
             exposure_prompt: None,
             preset_draft: None,
+            roll: Default::default(),
         };
 
         // Empty targets is a no-op
@@ -1514,6 +1582,7 @@ mod ui_tests {
             convert_dialog: None,
             exposure_prompt: None,
             preset_draft: None,
+            roll: Default::default(),
         };
         app.open_convert_dialog(vec![], true);
         assert!(app.convert_dialog.is_none());
@@ -1590,6 +1659,7 @@ mod ui_tests {
             convert_dialog: None,
             exposure_prompt: None,
             preset_draft: None,
+            roll: Default::default(),
         };
 
         let tmp = std::env::temp_dir().join("test_picker_single.tif");

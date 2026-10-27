@@ -38,7 +38,8 @@ Key data types live in `settings.rs`: `Settings` holds the per-image edit state,
 
 Persistence (`sidecar.rs`):
 - `<image>.nlp.json` in the `NLP/` subfolder of each scan folder holds settings, analysis and roll data.
-- App defaults and last folder: `dirs::config_dir()/nlp-studio/defaults.json`.
+- `NLP/roll.json` holds the roll info (`RollInfo`: name, date, film metadata, notes). It is asked for the first time a folder is opened (`app/roll.rs`), and frames without their own film details inherit it.
+- App defaults, last folder and the Projects list (`projects`): `dirs::config_dir()/nlp-studio/defaults.json`.
 - Decoded proxy cache: `dirs::cache_dir()/nlp-studio/proxies/`, keyed by path, size and mtime.
 
 New `Settings` fields need `#[serde(default)]` compatibility so existing sidecars still load.

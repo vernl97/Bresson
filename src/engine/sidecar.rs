@@ -122,6 +122,56 @@ pub struct Defaults {
     /// The user's own export presets (`ExportPreset::builtin` ship with the app).
     pub export_presets: Vec<ExportPreset>,
     pub last_folder: Option<PathBuf>,
+    /// Scan folders opened before, most recent first (the Projects list).
+    pub projects: Vec<PathBuf>,
+}
+
+/// Move `dir` to the front of the Projects list.
+pub fn remember_project(d: &mut Defaults, dir: &Path) {
+    d.projects.retain(|p| p != dir);
+    d.projects.insert(0, dir.to_path_buf());
+}
+
+/// Details for a whole roll, kept in `<folder>/NLP/roll.json`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RollInfo {
+    pub name: String,
+    /// Shoot date, free text.
+    pub date: String,
+    pub metadata: FilmMetadata,
+    pub notes: String,
+    /// Unix seconds when the roll was first set up.
+    pub created: u64,
+}
+
+pub fn roll_info_path(dir: &Path) -> PathBuf {
+    dir.join("NLP").join("roll.json")
+}
+
+pub fn load_roll_info(dir: &Path) -> Option<RollInfo> {
+    let s = std::fs::read_to_string(roll_info_path(dir)).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+pub fn save_roll_info(dir: &Path, info: &RollInfo) -> Result<()> {
+    let path = roll_info_path(dir);
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(info)?)?;
+    Ok(())
+}
+
+/// Number of frames with a sidecar in a scan folder.
+pub fn sidecar_count(dir: &Path) -> usize {
+    std::fs::read_dir(dir.join("NLP"))
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".nlp.json"))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 pub fn load_defaults() -> Defaults {
@@ -154,6 +204,33 @@ pub fn proxy_cache_path(image: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roll_info_round_trip() {
+        let tmp = std::env::temp_dir().join(format!("nlp_roll_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(load_roll_info(&tmp).is_none());
+        let mut info = RollInfo {
+            name: "Roll 7".into(),
+            ..Default::default()
+        };
+        info.metadata.film_stock = "Portra 400".into();
+        save_roll_info(&tmp, &info).unwrap();
+        assert_eq!(load_roll_info(&tmp), Some(info));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn defaults_without_projects_load() {
+        let d: Defaults = serde_json::from_str(r#"{"last_folder":"/x"}"#).unwrap();
+        assert!(d.projects.is_empty());
+        let mut d = d;
+        remember_project(&mut d, Path::new("/a"));
+        remember_project(&mut d, Path::new("/b"));
+        remember_project(&mut d, Path::new("/a"));
+        assert_eq!(d.projects, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+    }
 
     #[test]
     fn sidecar_paths_use_nlp_subfolder() {

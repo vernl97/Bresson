@@ -824,36 +824,8 @@ impl NlpApp {
         if !widgets::fold_with(ui, "Film", false) {
             return;
         }
-        let mut changed = false;
-        let m = &mut self.frames[i].sc.metadata;
-        let fields: [(&str, &mut String, &str); 10] = [
-            ("Film stock", &mut m.film_stock, "Portra 400"),
-            ("Film ISO", &mut m.film_iso, "400"),
-            ("Shot at ISO", &mut m.shot_at_iso, "800 (push)"),
-            ("Developer", &mut m.developer, "C-41 lab"),
-            ("Camera make", &mut m.camera_make, "Nikon"),
-            ("Camera model", &mut m.camera_model, "FM2"),
-            ("Lens", &mut m.lens, "50mm f/1.8"),
-            ("Shutter", &mut m.shutter_speed, "1/125"),
-            ("Aperture", &mut m.aperture, "f/8"),
-            ("Notes", &mut m.development_notes, ""),
-        ];
-        egui::Grid::new("film_meta")
-            .num_columns(2)
-            .spacing(vec2(8.0, 4.0))
-            .show(ui, |ui| {
-                for (label, v, hint) in fields {
-                    ui.label(RichText::new(label).small().color(theme::MUTED));
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(v)
-                                .hint_text(hint)
-                                .desired_width(ui.available_width()),
-                        )
-                        .changed();
-                    ui.end_row();
-                }
-            });
+        let changed =
+            super::roll::film_fields(ui, "film_meta", &mut self.frames[i].sc.metadata, true);
         if changed {
             self.frames[i].dirty_since = Some(self.time);
         }
