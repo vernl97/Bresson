@@ -497,6 +497,18 @@ impl NlpApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        let mac = ctx.os() == egui::os::OperatingSystem::Mac;
+        let (undo, redo) = ctx.input(|i| {
+            let cmd = i.modifiers.command;
+            (
+                cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
+                (cmd && i.modifiers.shift && i.key_pressed(egui::Key::Z))
+                    || (cmd && !mac && i.key_pressed(egui::Key::Y)),
+            )
+        });
+        if undo || redo {
+            self.history_step(undo);
+        }
         let (all, none, enter, copy, paste, export) = ctx.input(|i| {
             (
                 i.modifiers.command && i.key_pressed(egui::Key::A),
@@ -530,6 +542,9 @@ impl NlpApp {
         }
         if let Some(key) = super::lab_key(ctx).filter(|_| self.export_targets.is_none()) {
             let sel = self.sel_vec();
+            let converted: Vec<usize> =
+                sel.iter().copied().filter(|&i| self.frames[i].sc.is_converted()).collect();
+            self.record(&converted);
             let n = sel.iter().filter(|&&i| self.apply_lab_key(i, key)).count();
             if n < sel.len() {
                 self.toast("Only converted frames can be corrected", false);
@@ -578,6 +593,7 @@ impl NlpApp {
 
     /// Crop and straighten each frame to its detected frame.
     pub fn detect_frames(&mut self, idx: &[usize]) {
+        self.record(idx);
         let mut missed = 0;
         for &i in idx {
             let f = &self.frames[i];
@@ -613,18 +629,27 @@ impl NlpApp {
     }
 
     pub fn paste_settings(&mut self) {
+        self.paste_settings_to(self.sel_vec());
+    }
+
+    /// Paste the copied edit onto frames `idx`, as one undo step.
+    pub fn paste_settings_to(&mut self, idx: Vec<usize>) {
         let Some(c) = self.clipboard.clone() else {
             return;
         };
-        for i in self.sel_vec() {
+        self.record(&idx);
+        for &i in &idx {
             self.frames[i].sc.settings.copy_edit_from(&c);
             if c.wb_mode != WbMode::Custom {
                 self.frames[i].apply_wb_mode();
             }
             self.mark_changed(i);
+            if self.editor.path.as_ref() == Some(&self.frames[i].path) {
+                self.editor.set_committed(self.frames[i].sc.settings.clone());
+            }
         }
         self.editor.invalidate();
-        let n = self.selected.len();
+        let n = idx.len();
         self.toast(format!("Pasted settings to {n} frame(s)"), false);
     }
 

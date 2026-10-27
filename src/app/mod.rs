@@ -5,6 +5,7 @@ mod auto;
 mod editor;
 mod folder;
 mod gpu;
+mod history;
 mod jobs;
 mod picker;
 mod roll;
@@ -197,6 +198,8 @@ pub struct NlpApp {
     pub gpu: bool,
     /// Conversions and exports the app runs by itself.
     pub auto: auto::AutoState,
+    /// Undo / redo of settings edits, editor and grid alike.
+    pub history: history::History,
 }
 
 impl NlpApp {
@@ -228,6 +231,7 @@ impl NlpApp {
             export_targets: None,
             convert_dialog: None,
             auto: Default::default(),
+            history: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -373,6 +377,7 @@ impl NlpApp {
         self.view = View::Folder;
         self.editor = editor::Editor::default();
         self.auto = Default::default();
+        self.history = Default::default();
         for i in 0..self.frames.len() {
             self.request_proxy(i);
         }
@@ -1588,6 +1593,21 @@ mod ui_tests {
         }
         assert_eq!(app.auto.roll_pass, auto::RollPass::Done);
         assert!(app.convert_dialog.is_none() && app.exposure_prompt.is_none());
+
+        // A paste to the whole roll undoes and redoes in one step.
+        let app = h.state_mut();
+        let before: Vec<f32> = app.frames.iter().map(|f| f.sc.settings.brightness).collect();
+        let mut c = app.frames[0].sc.settings.clone();
+        c.brightness = 17.0;
+        app.clipboard = Some(c);
+        app.selected = (0..3).collect();
+        app.paste_settings();
+        assert!(app.frames.iter().all(|f| f.sc.settings.brightness == 17.0));
+        assert!(app.history_step(true));
+        let undone: Vec<f32> = app.frames.iter().map(|f| f.sc.settings.brightness).collect();
+        assert_eq!(undone, before);
+        assert!(app.history_step(false));
+        assert!(app.frames.iter().all(|f| f.sc.settings.brightness == 17.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1663,6 +1683,7 @@ mod ui_tests {
             export_targets: None,
             convert_dialog: None,
             auto: Default::default(),
+            history: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1709,6 +1730,7 @@ mod ui_tests {
             export_targets: None,
             convert_dialog: None,
             auto: Default::default(),
+            history: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1748,6 +1770,7 @@ mod ui_tests {
             export_targets: None,
             convert_dialog: None,
             auto: Default::default(),
+            history: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1827,6 +1850,7 @@ mod ui_tests {
             export_targets: None,
             convert_dialog: None,
             auto: Default::default(),
+            history: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
