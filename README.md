@@ -31,6 +31,7 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
     - Presets: *Lab JPEG M/L* (3000/6000 px) and *Archive TIFF*, plus your own (*Save as…*).
     - Size: full or a long edge of 2000–6000 px.
     - File name template: `{name}`, `{suffix}`, `{n}` / `{n:03}` (position in the export), `{stock}`, `{iso}`, `{date}` (scan date). Clashing names get `-2`, `-3`, ….
+  - **Contact sheet**: the grid's "…" menu saves a JPEG of the selected frames (or all) to `NLP/<folder>_contact_sheet.jpg`: every frame landscape on black with its file name beneath.
 - Right-click a frame for open, convert, export, detect frame, copy/paste settings and unconvert.
 - Lab correction keys act on the selected converted frames; the offsets show under each thumbnail (see below).
 
@@ -87,6 +88,7 @@ The engine started as a port of the Lightroom plugin and now models the film its
 | `frame.rs` | Frame detection (crop and straighten) |
 | `sidecar.rs` | Sidecars, roll info, defaults |
 | `export.rs` | Positive copies with ICC and EXIF, TIF scan prep |
+| `contact.rs` | Contact sheet JPEG (landscape tiles, file names) |
 
 The GUI is in `src/app` (eframe/egui); `gpu.rs` and `preview.wgsl` draw the editor preview.
 
