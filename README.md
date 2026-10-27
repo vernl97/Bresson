@@ -80,6 +80,7 @@ The engine started as a port of the Lightroom plugin and now models the film its
 | `export.rs` | Positive copies with ICC and EXIF, TIF scan prep |
 
 ### Notes
+- **GPU preview.** With wgpu (the default), the editor draws its preview in a fragment shader (`app/gpu.rs`, `app/preview.wgsl`): the density image is a texture, the print curves and the native look are buffers. It matches the CPU renderer within 0.04/255 and stays at full editor resolution while sliders move. The histogram, readout and clipping view come from a 1024 px CPU render. Exports, thumbnails and the no-wgpu fallback use the CPU renderer. The preview leaves out output sharpening.
 - **Raw processing.** `rawler` decodes the raw files and supplies the camera matrix.
 - **No plugin assets.** The conversion uses no camera profiles (DCP) or look files (XMP). VueScan / SilverFast DNGs are set as the scan source by hand.
 - **Film base.** *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper. In density a wrong base is a constant per-channel offset that the levels absorb, so the conversion barely depends on it (tested on a chart cropped tight with no rebate).

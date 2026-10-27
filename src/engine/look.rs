@@ -84,6 +84,17 @@ fn grey_curve(k: &[f32; 11], v: f32) -> f32 {
     k[i] * a + k[j] * b
 }
 
+/// A look as the GPU preview needs it: the hue / saturation / value map
+/// flattened as `[hue][saturation][value]` (xyz = hue shift, saturation
+/// scale, value shift) and the grey curves.
+pub struct LookTables {
+    pub grid: Vec<[f32; 4]>,
+    pub grey: [[f32; 11]; 3],
+}
+
+/// Map size the GPU preview indexes with: hues, saturations, values.
+pub const LOOK_GRID: [usize; 3] = [HUES, SATS, VALUES];
+
 /// A prepared look (strength and saturation folded in).
 #[derive(Clone, Copy)]
 pub struct Look {
@@ -120,6 +131,26 @@ impl Look {
             saturation,
             identity,
         }
+    }
+
+    /// Strength, saturation and whether the look changes anything.
+    pub fn params(&self) -> (f32, f32, bool) {
+        (self.k, self.saturation, self.identity)
+    }
+
+    /// The look's tables, when one is selected.
+    pub fn tables(&self) -> Option<LookTables> {
+        let d = self.data?;
+        Some(LookTables {
+            grid: d
+                .grid
+                .iter()
+                .flatten()
+                .flatten()
+                .map(|g| [g[0], g[1], g[2], 0.0])
+                .collect(),
+            grey: d.grey,
+        })
     }
 
     /// Apply to an encoded positive MelissaRGB pixel.

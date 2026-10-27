@@ -3,6 +3,7 @@
 
 mod editor;
 mod folder;
+mod gpu;
 mod jobs;
 mod picker;
 mod roll;
@@ -188,6 +189,8 @@ pub struct NlpApp {
     pub preset_draft: Option<String>,
     /// Roll info, its dialog and the Projects screen.
     pub roll: roll::RollState,
+    /// The editor preview is drawn on the GPU (wgpu available).
+    pub gpu: bool,
 }
 
 impl NlpApp {
@@ -221,6 +224,7 @@ impl NlpApp {
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
+            gpu: gpu::install(cc),
         };
         if open.is_none() {
             app.show_projects();
@@ -1529,6 +1533,7 @@ mod ui_tests {
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
+            gpu: false,
         };
         // (open_folder would also write the user's defaults.json.)
         app.load_frames(vec![img.clone()], &dir);
@@ -1573,6 +1578,7 @@ mod ui_tests {
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
+            gpu: false,
         };
 
         // Empty targets is a no-op
@@ -1610,6 +1616,7 @@ mod ui_tests {
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
+            gpu: false,
         };
         app.open_convert_dialog(vec![], true);
         assert!(app.convert_dialog.is_none());
@@ -1687,6 +1694,7 @@ mod ui_tests {
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
+            gpu: false,
         };
 
         let tmp = std::env::temp_dir().join("test_picker_single.tif");

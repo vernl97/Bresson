@@ -39,8 +39,8 @@ pub const PAPER_RANGE: f64 = 1.05;
 pub const CC: f64 = 0.01;
 
 /// Density range the lookup tables cover.
-const LUT_DMIN: f64 = -0.5;
-const LUT_DMAX: f64 = 4.5;
+pub const LUT_DMIN: f64 = -0.5;
+pub const LUT_DMAX: f64 = 4.5;
 pub const LUT_SIZE: usize = 8192;
 
 /// Number of knots of a tone curve, evenly spaced over normalised density.

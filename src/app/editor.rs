@@ -12,7 +12,7 @@ use super::folder::source_instructions;
 use super::widgets::{
     self, Icon, fl_combo, fl_slider, fl_slider_u8, grad, icon_button, pill, segmented, theme,
 };
-use super::{NlpApp, View, to_color_image};
+use super::{NlpApp, View, gpu, to_color_image};
 use crate::engine::decode::{self, SourceImage};
 use crate::engine::pipeline::{self, Negative, Renderer};
 use crate::engine::settings::*;
@@ -84,7 +84,14 @@ pub struct Editor {
     neg: Option<Negative>,
     neg_small: Option<Negative>,
     neg_key: Option<(AnalysisKey, [i32; 4], i32, u8, bool, [i32; 3])>,
+    /// CPU-rendered preview (without wgpu).
     tex: Option<egui::TextureHandle>,
+    /// Size of the shown negative in pixels; `None` until the first render.
+    size: Option<[usize; 2]>,
+    /// GPU preview: the negative, and how to draw it and its "before" side.
+    gpu_neg: Option<Arc<gpu::NegData>>,
+    gpu_view: Option<Arc<gpu::ViewData>>,
+    gpu_before: Option<Arc<gpu::ViewData>>,
     dirty: bool,
     pub before: bool,
     color_tab: ColorTab,
@@ -104,7 +111,8 @@ pub struct Editor {
     /// The Border buffer slider is held: outline the analysis area.
     border_preview: bool,
     /// The rendered preview (display sRGB, 0..1) and its size, for the
-    /// pixel readout.
+    /// pixel readout and clipping view (a 1024 px render when the preview
+    /// is drawn on the GPU).
     px: Vec<[f32; 3]>,
     px_size: [usize; 2],
     /// Paint clipped highlights red and blocked shadows blue (J).
@@ -138,6 +146,10 @@ impl Default for Editor {
             neg_small: None,
             neg_key: None,
             tex: None,
+            size: None,
+            gpu_neg: None,
+            gpu_view: None,
+            gpu_before: None,
             dirty: true,
             before: false,
             color_tab: ColorTab::Mids,
@@ -305,12 +317,16 @@ impl NlpApp {
         s
     }
 
-    /// (Re)render the preview texture if needed.
+    /// (Re)render the preview if needed. With wgpu the full-size preview is
+    /// drawn by the GPU on every frame, and the CPU only renders a 1024 px
+    /// copy for the histogram, readout and clipping view; without it the
+    /// CPU renders the preview itself (from the 1024 px copy while a slider
+    /// is dragged).
     fn update_preview(&mut self, ctx: &egui::Context, i: usize, dragging: bool) {
         let Some(src) = self.editor.src.clone() else {
             return;
         };
-        if !self.editor.dirty && self.editor.tex.is_some() {
+        if !self.editor.dirty && self.editor.size.is_some() {
             return;
         }
         let s = self.preview_settings(i);
@@ -332,21 +348,14 @@ impl NlpApp {
                 height: h,
                 data: d,
             });
+            self.editor.gpu_neg = self.gpu.then(|| gpu::NegData::new(&neg));
             self.editor.neg = Some(neg);
             self.editor.neg_key = Some(key);
         }
-        let use_small = dragging
-            && self
-                .editor
-                .neg
-                .as_ref()
-                .map(|n| n.width.max(n.height) > 1100)
-                .unwrap_or(false);
-        let neg = if use_small {
-            self.editor.neg_small.as_ref().unwrap()
-        } else {
-            self.editor.neg.as_ref().unwrap()
-        };
+        let full = self.editor.neg.as_ref().unwrap();
+        let small = self.editor.neg_small.as_ref().unwrap();
+        let use_small = !self.gpu && dragging && full.width.max(full.height) > 1100;
+        let cpu_neg = if self.gpu || use_small { small } else { full };
         let origins = if self.editor.before {
             None
         } else {
@@ -356,36 +365,50 @@ impl NlpApp {
         let r = Renderer::new(&s, origins.as_ref(), OutputSpace::Srgb).with_megapixels(mp);
         let full_long = src.info.full_width.max(src.info.full_height).max(1) as f32;
         let crop_frac = 1.0 - (s.crop[0] + s.crop[2]).max(s.crop[1] + s.crop[3]) / 100.0;
-        let scale = neg.width.max(neg.height) as f32 / (full_long * crop_frac.max(0.1));
-        let px = r.render(neg, scale.min(1.0));
+        let scale = cpu_neg.width.max(cpu_neg.height) as f32 / (full_long * crop_frac.max(0.1));
+        let px = r.render(cpu_neg, scale.min(1.0));
         let mut hist = [[0u32; 256]; 3];
-        for p in px.iter().step_by(3) {
+        let step = if self.gpu { 1 } else { 3 };
+        for p in px.iter().step_by(step) {
             for c in 0..3 {
                 hist[c][(p[c].clamp(0.0, 1.0) * 255.0) as usize] += 1;
             }
         }
         self.editor.hist = hist;
         self.editor.curves = r.curve_lut().map(|l| l.sample(96)).unwrap_or_default();
-        let img = to_color_image(&px, neg.width, neg.height);
-        set_texture(ctx, &mut self.editor.tex, "editor-preview", img);
+        let (w, h) = (cpu_neg.width, cpu_neg.height);
+        if self.gpu {
+            self.editor.gpu_view = Some(gpu::ViewData::new(&r));
+            self.editor.tex = None;
+        } else {
+            set_texture(
+                ctx,
+                &mut self.editor.tex,
+                "editor-preview",
+                to_color_image(&px, w, h),
+            );
+        }
         let cropping = self.editor.crop.is_some();
         if self.editor.clip_view && !self.editor.before && !cropping {
-            let img = clip_image(&px, neg.width, neg.height);
+            let img = clip_image(&px, w, h);
             set_texture(ctx, &mut self.editor.clip_tex, "editor-clipping", img);
         } else {
             self.editor.clip_tex = None;
         }
+        self.editor.gpu_before = None;
+        self.editor.before_tex = None;
         if self.editor.split && !self.editor.before && !cropping {
-            let before = Renderer::new(&s, None, OutputSpace::Srgb)
-                .with_megapixels(mp)
-                .render(neg, scale.min(1.0));
-            let img = to_color_image(&before, neg.width, neg.height);
-            set_texture(ctx, &mut self.editor.before_tex, "editor-before", img);
-        } else {
-            self.editor.before_tex = None;
+            let before = Renderer::new(&s, None, OutputSpace::Srgb).with_megapixels(mp);
+            if self.gpu {
+                self.editor.gpu_before = Some(gpu::ViewData::new(&before));
+            } else {
+                let img = to_color_image(&before.render(cpu_neg, scale.min(1.0)), w, h);
+                set_texture(ctx, &mut self.editor.before_tex, "editor-before", img);
+            }
         }
+        self.editor.size = Some([full.width, full.height]);
         self.editor.px = px;
-        self.editor.px_size = [neg.width, neg.height];
+        self.editor.px_size = [w, h];
         self.editor.dirty = use_small;
     }
 
@@ -1520,7 +1543,7 @@ impl NlpApp {
 
     fn canvas(&mut self, ui: &mut egui::Ui, i: usize) {
         let avail = ui.max_rect();
-        let Some(tex) = self.editor.tex.clone() else {
+        let Some([tw, th]) = self.editor.size else {
             ui.centered_and_justified(|ui| {
                 ui.add(egui::Spinner::new().size(24.0).color(theme::MUTED));
             });
@@ -1532,7 +1555,7 @@ impl NlpApp {
         } else {
             vec2(32.0, 32.0)
         };
-        let ts = tex.size_vec2();
+        let ts = vec2(tw as f32, th as f32);
         let fit = ((avail.width() - margin.x) / ts.x)
             .min((avail.height() - margin.y) / ts.y)
             .max(0.01);
@@ -1634,12 +1657,20 @@ impl NlpApp {
             }
             .as_shape(rect, 0.0),
         );
-        p.image(
-            tex.id(),
-            rect,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        let full_uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        match (
+            &self.editor.gpu_neg,
+            &self.editor.gpu_view,
+            &self.editor.tex,
+        ) {
+            (Some(n), Some(v), _) if self.gpu => {
+                gpu::paint(&p, rect, 0, n, v, [0.0, 0.0, 1.0, 1.0])
+            }
+            (_, _, Some(t)) => {
+                p.image(t.id(), rect, full_uv, Color32::WHITE);
+            }
+            _ => {}
+        }
         if let Some(t) = self.editor.clip_tex.as_ref().filter(|_| !cropping) {
             p.image(
                 t.id(),
@@ -1648,17 +1679,28 @@ impl NlpApp {
                 Color32::WHITE,
             );
         }
-        let split = self.editor.before_tex.clone().filter(|_| !cropping);
-        if let Some(t) = &split {
+        let split =
+            !cropping && (self.editor.before_tex.is_some() || self.editor.gpu_before.is_some());
+        if split {
             let k = self.editor.split_pos;
             let x = rect.left() + rect.width() * k;
             let left = Rect::from_min_max(rect.min, pos2(x, rect.bottom()));
-            p.image(
-                t.id(),
-                left,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(k, 1.0)),
-                Color32::WHITE,
-            );
+            match (
+                &self.editor.gpu_neg,
+                &self.editor.gpu_before,
+                &self.editor.before_tex,
+            ) {
+                (Some(n), Some(b), _) => gpu::paint(&p, left, 1, n, b, [0.0, 0.0, k, 1.0]),
+                (_, _, Some(t)) => {
+                    p.image(
+                        t.id(),
+                        left,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(k, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+                _ => {}
+            }
             let shown = rect.intersect(avail);
             p.line_segment(
                 [pos2(x, shown.top()), pos2(x, shown.bottom())],
@@ -1765,7 +1807,7 @@ impl NlpApp {
         if self.editor.before && !cropping {
             pill(&p, pos2(avail.left() + 44.0, avail.top() + 22.0), "Before");
         }
-        if split.is_some() {
+        if split {
             pill(&p, pos2(avail.left() + 44.0, avail.top() + 22.0), "Before");
             pill(&p, pos2(avail.right() - 40.0, avail.top() + 22.0), "After");
         }

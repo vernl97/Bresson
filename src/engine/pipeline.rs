@@ -903,6 +903,13 @@ impl Renderer {
         self.converted.then_some(&self.lut)
     }
 
+    /// What a GPU renderer needs to draw the same image: the per-channel
+    /// curve tables (also for the unconverted view), the look, and the
+    /// linear MelissaRGB → sRGB matrix of a display preview.
+    pub fn gpu_parts(&self) -> (&CurveLut, Option<&Look>, [[f32; 3]; 3]) {
+        (&self.lut, self.converted.then_some(&self.look), self.out_m)
+    }
+
     /// Encoded MelissaRGB positive (before output conversion).
     #[inline]
     pub fn positive(&self, d: [f32; 3]) -> [f32; 3] {
