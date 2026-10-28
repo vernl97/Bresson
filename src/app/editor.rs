@@ -533,20 +533,20 @@ impl NlpApp {
         }
     }
 
-    /// Propose the detected frame as the pending crop.
+    /// Propose the detected frame as the pending crop. The frame is found
+    /// free-form and the aspect lock released, so the crop follows the frame.
     fn detect_frame(&mut self, i: usize) {
         let Some(src) = self.editor.src.clone() else {
             return;
         };
         let f = &self.frames[i];
         let mut settings = f.sc.settings.clone();
-        if let Some(c) = &self.editor.crop {
-            settings.crop_aspect = c.aspect;
-        }
+        settings.crop_aspect = CropAspect::Free;
         match crate::engine::frame::detect(&src, &settings, f.base_for(&src)) {
             Some(d) => {
                 if let Some(c) = &mut self.editor.crop {
                     (c.insets, c.angle) = (d.crop, d.straighten);
+                    c.aspect = CropAspect::Free;
                     self.editor.dirty = true;
                 }
             }

@@ -669,7 +669,7 @@ impl NlpApp {
         ctx.data_mut(|d| d.insert_temp(egui::Id::new(GRID_SCROLL_TO), next));
     }
 
-    /// Crop and straighten each frame to its detected frame.
+    /// Crop and straighten each frame to its detected frame, free-form.
     pub fn detect_frames(&mut self, idx: &[usize]) {
         self.record(idx);
         let mut missed = 0;
@@ -679,10 +679,13 @@ impl NlpApp {
                 missed += 1;
                 continue;
             };
-            match crate::engine::frame::detect(&src, &f.sc.settings, f.base_for(&src)) {
+            let mut settings = f.sc.settings.clone();
+            settings.crop_aspect = CropAspect::Free;
+            match crate::engine::frame::detect(&src, &settings, f.base_for(&src)) {
                 Some(d) => {
                     let s = &mut self.frames[i].sc.settings;
                     (s.crop, s.straighten) = (d.crop, d.straighten);
+                    s.crop_aspect = CropAspect::Free;
                     self.mark_changed(i);
                 }
                 None => missed += 1,

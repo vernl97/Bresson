@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::decode::{self, SourceImage, SourceInfo};
 use crate::engine::frame::{self, Detected};
 use crate::engine::pipeline::{self, Analysis};
-use crate::engine::settings::Settings;
+use crate::engine::settings::{CropAspect, Settings};
 use crate::engine::sidecar::{self, RollData};
 
 /// Long edge of the per-frame proxy used for thumbnails and analysis.
@@ -177,11 +177,16 @@ fn wants_auto_crop(s: &Settings) -> bool {
     s.auto_crop && s.crop == [0.0; 4] && s.straighten == 0.0
 }
 
-/// Frame detection for a frame that [`wants_auto_crop`].
+/// Frame detection for a frame that [`wants_auto_crop`], free-form: the crop
+/// follows the frame rather than the aspect ratio.
 pub fn auto_crop(src: &SourceImage, s: &Settings) -> Option<Detected> {
     if !wants_auto_crop(s) {
         return None;
     }
+    let s = &Settings {
+        crop_aspect: CropAspect::Free,
+        ..s.clone()
+    };
     frame::detect(src, s, pipeline::resolve_base(src, s, None))
 }
 

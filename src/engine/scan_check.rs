@@ -27,7 +27,7 @@ use super::color;
 use super::decode::{self, SourceImage};
 use super::frame;
 use super::pipeline::{self, Analysis, Renderer};
-use super::settings::{OutputSpace, Settings};
+use super::settings::{CropAspect, OutputSpace, Settings};
 use super::sidecar::RollData;
 
 /// Long edge the app analyses at (`app::jobs::PROXY_SIZE`).
@@ -127,6 +127,7 @@ fn convert_roll(files: &[PathBuf]) -> Vec<(PathBuf, Settings, Analysis, SourceIm
                         let s = Settings {
                             source: pipeline::detect_source(&src),
                             auto_crop: true,
+                            crop_aspect: CropAspect::Free,
                             ..Settings::default()
                         };
                         let found = frame::detect(&src, &s, pipeline::resolve_base(&src, &s, None));

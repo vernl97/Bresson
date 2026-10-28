@@ -20,7 +20,8 @@ use eframe::egui;
 use crate::engine::decode::{self, SourceImage};
 use crate::engine::pipeline::{self, AutoWb, Renderer};
 use crate::engine::settings::{
-    ExportFormat, ExportPreset, ExportSettings, OutputSpace, Placement, Settings, WbMode, lab,
+    CropAspect, ExportFormat, ExportPreset, ExportSettings, OutputSpace, Placement, Settings,
+    WbMode, lab,
 };
 use crate::engine::sidecar::{self, Defaults, Sidecar};
 use jobs::{JobResult, Jobs};
@@ -1129,6 +1130,7 @@ impl NlpApp {
                         }
                         if let Some(d) = detected {
                             (f.sc.settings.crop, f.sc.settings.straighten) = (d.crop, d.straighten);
+                            f.sc.settings.crop_aspect = CropAspect::Free;
                         }
                         f.sc.analysis = Some(a);
                         f.sc.roll = roll.clone();
