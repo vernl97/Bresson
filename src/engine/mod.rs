@@ -13,6 +13,8 @@ pub mod frame;
 pub mod look;
 pub mod pipeline;
 pub mod presets;
+#[cfg(test)]
+mod scan_check;
 pub mod settings;
 pub mod sidecar;
 pub mod skin;
