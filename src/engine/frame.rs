@@ -167,6 +167,43 @@ fn insets(px: &[Px], w: usize, h: usize) -> Option<[f32; 4]> {
     (keep >= 0.3).then_some(out)
 }
 
+/// Fewest frames of a roll whose geometry makes a roll crop.
+const ROLL_FRAMES: usize = 3;
+/// How far (percent) a frame's detected side may lie from the roll's before
+/// the detection counts as implausible.
+const ROLL_DEVIATION: f32 = 10.0;
+
+/// The geometry frames of one roll share: a scanner holds every frame in the
+/// same place, so the median of the frames' sides and angle. `None` with
+/// fewer than [`ROLL_FRAMES`] frames.
+pub fn roll_geometry(frames: &[Detected]) -> Option<Detected> {
+    if frames.len() < ROLL_FRAMES {
+        return None;
+    }
+    let median = |f: &dyn Fn(&Detected) -> f32| {
+        let mut v: Vec<f32> = frames.iter().map(f).collect();
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    Some(Detected {
+        crop: std::array::from_fn(|k| median(&|d| d.crop[k])),
+        straighten: median(&|d| d.straighten),
+    })
+}
+
+/// A frame's detection, or the roll's geometry where it found nothing or
+/// something far from the rest. On a night scene most of the image is as
+/// clear as the base, so the rebate's edge disappears into it.
+pub fn settle(found: Option<Detected>, roll: Option<Detected>) -> Option<Detected> {
+    match (found, roll) {
+        (Some(d), Some(r)) if (0..4).any(|k| (d.crop[k] - r.crop[k]).abs() > ROLL_DEVIATION) => {
+            Some(r)
+        }
+        (None, r) => r,
+        (d, _) => d,
+    }
+}
+
 /// Shrink `insets` (percent, [l, t, r, b]) around their centre to the crop
 /// ratio `ratio` (width : height in pixels) of a frame of aspect `frame`.
 pub fn fit_aspect(insets: [f32; 4], frame: f32, ratio: f32) -> [f32; 4] {
@@ -384,6 +421,40 @@ mod tests {
         }
         let d = detect(&src, &free(), BASE).expect("frame");
         assert!(d.crop[2] < 2.0, "{d:?}");
+    }
+
+    /// A night scene is mostly as clear as the base, so the rebate's edge
+    /// disappears into it (Budapest-p): it takes the geometry the roll's
+    /// other frames share, as does a detection far from theirs.
+    #[test]
+    fn night_frame_takes_the_roll_crop() {
+        let normal = detect(&scan(1200, 800, 60, 40, 0.0), &free(), BASE).expect("frame");
+        let mut night = scan(1200, 800, 60, 40, 0.0);
+        for p in night.data.iter_mut() {
+            if p[0] < BASE[0] && p[0] > 0.01 {
+                // Image: 0.96–1.0 of the base, barely textured.
+                let t = (p[0] / BASE[0] - 0.08) / 0.4;
+                *p = BASE.map(|b| b * (0.96 + 0.04 * t));
+            }
+        }
+        let found = detect(&night, &free(), BASE);
+        assert_ne!(found.map(|d| d.crop), Some(normal.crop), "{found:?}");
+        let roll = roll_geometry(&[normal; 3]);
+        assert_eq!(settle(found, roll), Some(normal));
+        // A detection far from the roll's is replaced, a near one kept.
+        let stray = Detected {
+            crop: [38.0, 30.0, 7.0, 15.0],
+            straighten: 0.0,
+        };
+        assert_eq!(settle(Some(stray), roll), Some(normal));
+        let near = Detected {
+            crop: normal.crop.map(|v| v + 2.0),
+            straighten: 0.5,
+        };
+        assert_eq!(settle(Some(near), roll), Some(near));
+        // Too few frames make no roll crop.
+        assert_eq!(roll_geometry(&[normal; 2]), None);
+        assert_eq!(settle(None, None), None);
     }
 
     #[test]

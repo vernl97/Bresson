@@ -115,30 +115,31 @@ fn convert(args: Vec<String>) -> Result<()> {
     let roll = roll && files.len() > 1;
     // Analyse every frame on its proxy.
     let mut frames = Vec::new();
+    let mut found = Vec::new();
     for f in &files {
         let src = decode::load(f, Some(1200)).with_context(|| format!("load {}", f.display()))?;
         let base = pipeline::resolve_base(&src, &s, None);
-        let mut fs = s.clone();
-        if fs.auto_crop {
-            match frame::detect(&src, &fs, base) {
+        found.push(s.auto_crop.then(|| frame::detect(&src, &s, base)).flatten());
+        frames.push((f.clone(), src, base, s.clone()));
+    }
+    // Frames whose edge isn't found, or is far from the rest, take the
+    // geometry the others share.
+    let shared = frame::roll_geometry(&found.iter().flatten().copied().collect::<Vec<_>>());
+    if s.auto_crop {
+        for ((f, _, _, fs), d) in frames.iter_mut().zip(found) {
+            match frame::settle(d, shared) {
                 Some(d) => (fs.crop, fs.straighten) = (d.crop, d.straighten),
                 None => eprintln!("warning: no frame edge found in {}", f.display()),
             }
         }
-        frames.push((f.clone(), src, base, fs));
     }
     let roll_base = (roll && s.film_base == FilmBase::Auto).then(|| {
-        let mut b = [0.0f32; 3];
-        for c in 0..3 {
-            let mut v: Vec<f32> = frames.iter().map(|f| f.2[c]).collect();
-            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            b[c] = v[v.len() / 2];
-        }
-        b
+        let bases: Vec<[f32; 3]> = frames.iter().map(|f| f.2).collect();
+        pipeline::roll_base(&bases)
     });
     let mut analyses = Vec::new();
     for (_, src, base, fs) in &frames {
-        let base = roll_base.unwrap_or(*base);
+        let base = roll_base.map_or(*base, |r| pipeline::base_at_exposure(r, *base));
         let neg = pipeline::prepare_negative(src, fs, base);
         analyses.push(pipeline::analyze(
             &neg,

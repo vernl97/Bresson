@@ -110,13 +110,40 @@ pub fn auto_base(src: &SourceImage, _s: &Settings) -> [f32; 3] {
     acc.map(|v| ((v / k) as f32).max(1e-4))
 }
 
-/// Resolve the base colour for a frame (roll base takes precedence for Auto).
+/// Resolve the base colour for a frame (for Auto, the roll base at the
+/// frame's scan exposure takes precedence).
 pub fn resolve_base(src: &SourceImage, s: &Settings, roll_base: Option<[f32; 3]>) -> [f32; 3] {
     match s.film_base {
         FilmBase::Sampled => s.film_base_sample.map(|v| v.max(1e-4)),
-        FilmBase::Auto => roll_base.unwrap_or_else(|| auto_base(src, s)),
+        FilmBase::Auto => {
+            let own = auto_base(src, s);
+            roll_base.map_or(own, |r| base_at_exposure(r, own))
+        }
         FilmBase::AsShot | FilmBase::Off => auto_base(src, s),
     }
+}
+
+/// The roll's film base: the median of its frames' bases.
+pub fn roll_base(bases: &[[f32; 3]]) -> [f32; 3] {
+    std::array::from_fn(|c| {
+        let mut v: Vec<f32> = bases.iter().map(|b| b[c]).collect();
+        v.sort_by(f32::total_cmp);
+        v.get(v.len() / 2).copied().unwrap_or(1.0)
+    })
+}
+
+/// The roll's base colour at the scan exposure of a frame whose own base
+/// reads `own`. A scanner that exposes every frame for itself (VueScan does)
+/// reads the same film base up to 3× brighter on one frame than on the
+/// next; against the roll's median base, a thin (night) frame then reads
+/// thinner than the base and is taken for flare. Scaled by the channel
+/// that brightened most, the base is at least as bright as the frame's own
+/// reading in every channel, so no image reads thinner than it.
+pub fn base_at_exposure(roll: [f32; 3], own: [f32; 3]) -> [f32; 3] {
+    let k = (0..3)
+        .map(|c| own[c] / roll[c].max(1e-6))
+        .fold(0.0f32, f32::max);
+    if k > 0.0 { roll.map(|v| v * k) } else { roll }
 }
 
 /// Source-space multipliers from a base colour.
@@ -402,6 +429,11 @@ const DARK_SHARE: f64 = 0.25;
 /// that marks the area above the white-end cap as a lit subject.
 const LIT_SPREAD: f64 = 0.1;
 
+/// Smallest green density range a negative is printed over. Real scans
+/// span 0.6–1.0 D (10th–90th percentile of 189 frames) and underexposed
+/// night scenes from 0.3 D; nearly unexposed frames reach only 0.1 D.
+const MIN_RANGE: f64 = 0.3;
+
 /// Smallest green density range skin is looked for in: a frame mostly at
 /// its black end (a flash at night) has its white end capped close to the
 /// black, with a flashed face far beyond it.
@@ -487,6 +519,17 @@ pub fn levels_from_buffer(buf: &Negative, t: ImageType) -> (Levels, Option<Neutr
         let f = ((cap - g.lo) / (g.hi - g.lo).max(1e-6)).min(1.0);
         for c in l.iter_mut() {
             c.hi = c.lo + (c.hi - c.lo) * f;
+        }
+        // A nearly unexposed frame has almost no density above the base:
+        // stretched over the paper's whole range, its fog and grain print
+        // as a full-range image of noise. Printed over at least
+        // `MIN_RANGE`, what little it has prints dark.
+        let span = l[1].hi - l[1].lo;
+        if span < MIN_RANGE {
+            let f = MIN_RANGE / span.max(1e-3);
+            for c in l.iter_mut() {
+                c.hi = c.lo + (c.hi - c.lo) * f;
+            }
         }
     }
     let own = l;
@@ -1703,6 +1746,70 @@ mod tests {
         );
         // Image areas are denser.
         assert!(neg.data[150 * 300 + 150].iter().all(|d| *d > 0.1));
+    }
+
+    /// A nearly unexposed frame (Budapest-p raw0028: 0.1 D of fog and
+    /// grain) prints dark rather than stretched into full-range noise; a
+    /// frame with a real density range keeps it.
+    #[test]
+    fn nearly_unexposed_frames_print_dark() {
+        let frame = |range: f32| {
+            let (w, h) = (200usize, 100usize);
+            let data = (0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as f32, (i / w) as f32);
+                    let t =
+                        x / w as f32 * 0.8 + 0.2 * ((x / 3.0).sin() * (y / 5.0).cos() * 0.5 + 0.5);
+                    [range * t * 0.9, range * t, range * t * 1.1]
+                })
+                .collect();
+            Negative {
+                width: w,
+                height: h,
+                data,
+            }
+        };
+        let (l, _) = levels_from_buffer(&frame(0.1), ImageType::Negative);
+        assert!(l[1].hi - l[1].lo >= MIN_RANGE - 1e-9, "{l:?}");
+        let s = chart_settings();
+        let px = Renderer::new(&s, Some(&l), OutputSpace::Srgb).render(&frame(0.1), 0.0);
+        let mut g: Vec<f32> = px.iter().map(|p| p[1]).collect();
+        g.sort_by(f32::total_cmp);
+        assert!(g[g.len() / 2] < 0.3, "median {}", g[g.len() / 2]);
+        let (l, _) = levels_from_buffer(&frame(0.8), ImageType::Negative);
+        assert!(l[1].hi - l[1].lo < 0.8, "{l:?}");
+    }
+
+    /// A scanner that exposes every frame for itself reads one frame's base
+    /// brighter than the next (Budapest-p: up to 3×, unevenly by channel).
+    /// Against the roll's base, a frame scanned brighter must still read no
+    /// image thinner than the base: a night scene is mostly that thin, and
+    /// pixels thinner than the base are dropped as flare (it printed black).
+    #[test]
+    fn roll_base_follows_each_frames_scan_exposure() {
+        let (src, _) = synthetic_negative();
+        let s = Settings::default();
+        let own = resolve_base(&src, &s, None);
+        let mut bright = src.clone();
+        let gain = [1.5f32, 1.7, 1.6];
+        for p in bright.data.iter_mut() {
+            *p = std::array::from_fn(|c| p[c] * gain[c]);
+        }
+        let roll = roll_base(&[own, own, resolve_base(&bright, &s, None)]);
+        let thinnest = |src: &SourceImage, base: [f32; 3]| {
+            prepare_negative(src, &s, base)
+                .data
+                .iter()
+                .flatten()
+                .fold(f32::MAX, |a, &d| a.min(d))
+        };
+        let base = resolve_base(&bright, &s, Some(roll));
+        assert!(thinnest(&bright, base) > -0.01, "base {base:?}");
+        // The roll's base as it is reads the whole frame thinner.
+        assert!(thinnest(&bright, roll) < -0.15);
+        // Frames scanned at the roll's exposure keep the roll's base.
+        let base = resolve_base(&src, &s, Some(roll));
+        assert!((0..3).all(|c| (base[c] - roll[c]).abs() < 1e-6), "{base:?}");
     }
 
     #[test]

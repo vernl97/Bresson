@@ -118,45 +118,55 @@ fn convert_roll(files: &[PathBuf]) -> Vec<(PathBuf, Settings, Analysis, SourceIm
         .num_threads(PARALLEL)
         .build()
         .unwrap();
-    let loaded: Vec<(PathBuf, SourceImage, Settings)> = pool.install(|| {
-        files
-            .par_iter()
-            .filter_map(|f| match decode::load(f, Some(PROXY)) {
-                Ok(src) => {
-                    let mut s = Settings {
-                        source: pipeline::detect_source(&src),
-                        auto_crop: true,
-                        ..Settings::default()
-                    };
-                    if let Some(d) = frame::detect(&src, &s, pipeline::resolve_base(&src, &s, None))
-                    {
-                        (s.crop, s.straighten) = (d.crop, d.straighten);
+    let loaded: Vec<(PathBuf, SourceImage, Settings, Option<frame::Detected>)> =
+        pool.install(|| {
+            files
+                .par_iter()
+                .filter_map(|f| match decode::load(f, Some(PROXY)) {
+                    Ok(src) => {
+                        let s = Settings {
+                            source: pipeline::detect_source(&src),
+                            auto_crop: true,
+                            ..Settings::default()
+                        };
+                        let found = frame::detect(&src, &s, pipeline::resolve_base(&src, &s, None));
+                        Some((f.clone(), src, s, found))
                     }
-                    Some((f.clone(), src, s))
-                }
-                Err(e) => {
-                    eprintln!("skip {}: {e:#}", f.display());
-                    None
-                }
-            })
-            .collect()
-    });
+                    Err(e) => {
+                        eprintln!("skip {}: {e:#}", f.display());
+                        None
+                    }
+                })
+                .collect()
+        });
+    // Frames whose edge isn't found, or is far from the rest, take the
+    // geometry the others share.
+    let shared: Vec<frame::Detected> = loaded.iter().filter_map(|l| l.3).collect();
+    let shared = frame::roll_geometry(&shared);
+    let loaded: Vec<(PathBuf, SourceImage, Settings)> = loaded
+        .into_iter()
+        .map(|(f, src, mut s, found)| {
+            if let Some(d) = frame::settle(found, shared) {
+                (s.crop, s.straighten) = (d.crop, d.straighten);
+            }
+            (f, src, s)
+        })
+        .collect();
     let bases: Vec<[f32; 3]> = loaded
         .iter()
         .map(|(_, src, s)| pipeline::resolve_base(src, s, None))
         .collect();
-    // The roll's base: the median of the frames'.
-    let roll_base: [f32; 3] = std::array::from_fn(|c| {
-        let mut v: Vec<f32> = bases.iter().map(|b| b[c]).collect();
-        v.sort_by(f32::total_cmp);
-        v[v.len() / 2]
-    });
+    let roll_base = pipeline::roll_base(&bases);
     let as_roll = loaded.len() > 1;
     loaded
         .into_par_iter()
         .zip(bases)
         .map(|((f, src, s), base)| {
-            let base = if as_roll { roll_base } else { base };
+            let base = if as_roll {
+                pipeline::base_at_exposure(roll_base, base)
+            } else {
+                base
+            };
             let neg = pipeline::prepare_negative(&src, &s, base);
             let a = pipeline::analyze(&neg, &s, base, pipeline::frame_ev(&src.info));
             (f, s, a, src)
@@ -326,9 +336,23 @@ fn compare(stats: &[FrameStats], baseline: &[FrameStats]) {
         d_c += s.chroma[0] - b.chroma[0];
         n += 1;
         if dc > MOVED_CAST || dl.abs() > MOVED_L {
+            let cast = |f: &FrameStats| {
+                f.band(3).map_or("none".into(), |c| {
+                    format!("a* {:+.1} b* {:+.1}", c[0], c[1])
+                })
+            };
+            let moved_by = if dc.is_finite() {
+                format!("{dc:.2}")
+            } else {
+                "n/a".into()
+            };
             moved.push(format!(
-                "  {}/{}: cast moved {dc:.2} (a* {:+.1} b* {:+.1} -> a* {:+.1} b* {:+.1}), L50 {:+.1}",
-                s.roll, s.file, b.cast[3][0], b.cast[3][1], s.cast[3][0], s.cast[3][1], dl
+                "  {}/{}: cast moved {moved_by} ({} -> {}), L50 {:+.1}",
+                s.roll,
+                s.file,
+                cast(b),
+                cast(s),
+                dl
             ));
         }
     }

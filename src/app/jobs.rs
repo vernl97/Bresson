@@ -171,10 +171,15 @@ pub fn load_proxy(path: &Path) -> anyhow::Result<SourceImage> {
 
 // ---- conversion ------------------------------------------------------------------
 
-/// Frame detection for a frame converted with `auto_crop` that has no crop
-/// or straighten of its own yet.
+/// Whether a frame converted with `auto_crop` has no crop or straighten of
+/// its own yet.
+fn wants_auto_crop(s: &Settings) -> bool {
+    s.auto_crop && s.crop == [0.0; 4] && s.straighten == 0.0
+}
+
+/// Frame detection for a frame that [`wants_auto_crop`].
 pub fn auto_crop(src: &SourceImage, s: &Settings) -> Option<Detected> {
-    if !s.auto_crop || s.crop != [0.0; 4] || s.straighten != 0.0 {
+    if !wants_auto_crop(s) {
         return None;
     }
     frame::detect(src, s, pipeline::resolve_base(src, s, None))
@@ -214,12 +219,31 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
             errors,
         };
     }
-    // Crop before analysing, so the analysis sees only the image.
+    // Crop before analysing, so the analysis sees only the image. A frame
+    // whose detection finds nothing, or something far from the rest, takes
+    // the geometry the auto-cropped frames share (`frame::settle`).
+    let found: Vec<Option<Option<Detected>>> = ok
+        .par_iter()
+        .map(|(_, src, s)| wants_auto_crop(s).then(|| auto_crop(src, s)))
+        .collect();
+    let shared: Vec<Detected> = ok
+        .iter()
+        .zip(&found)
+        .filter_map(|((_, _, s), f)| match f {
+            Some(d) => *d,
+            None => s.auto_crop.then_some(Detected {
+                crop: s.crop,
+                straighten: s.straighten,
+            }),
+        })
+        .collect();
+    let shared = frame::roll_geometry(&shared);
     let detected: Vec<Option<Detected>> = ok
-        .par_iter_mut()
-        .map(|(_, src, s)| {
-            if let Some(found) = auto_crop(src, s) {
-                (s.crop, s.straighten) = (found.crop, found.straighten);
+        .iter_mut()
+        .zip(found)
+        .map(|((_, _, s), f)| {
+            if let Some(d) = f.and_then(|f| frame::settle(f, shared)) {
+                (s.crop, s.straighten) = (d.crop, d.straighten);
             }
             // Also report geometry detected by an earlier pass (the exposure
             // variance prompt re-runs the conversion with it).
@@ -235,21 +259,13 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
         .par_iter()
         .map(|(_, src, s)| pipeline::resolve_base(src, s, None))
         .collect();
-    let roll_base = as_roll.then(|| {
-        let mut b = [0.0f32; 3];
-        for c in 0..3 {
-            let mut v: Vec<f32> = bases.iter().map(|x| x[c]).collect();
-            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            b[c] = v[v.len() / 2];
-        }
-        b
-    });
+    let roll_base = as_roll.then(|| pipeline::roll_base(&bases));
     let analyses: Vec<Analysis> = ok
         .par_iter()
         .zip(bases.par_iter())
         .map(|((_, src, s), base)| {
             let base = if as_roll && s.film_base == crate::engine::settings::FilmBase::Auto {
-                roll_base.unwrap()
+                pipeline::base_at_exposure(roll_base.unwrap(), *base)
             } else {
                 *base
             };
