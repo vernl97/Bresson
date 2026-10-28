@@ -40,7 +40,7 @@ NLP_SCAN_DIRS=<rolls>:<folder of rolls> NLP_SCAN_OUT=<dir> [NLP_SCAN_BASELINE=<o
 
 ## Architecture
 
-**`src/engine/`**: pure image processing, no UI. The pipeline for one frame:
+**`src/engine/`**: pure image processing, no UI. `docs/conversion-engine.md` walks through it stage by stage with the functions, constants and formulas; read it before changing the engine and keep it in step with the code. The pipeline for one frame:
 
 1. `decode::load(path, max_long_edge)` → `SourceImage` (linear camera RGB). `rawler` handles RAW files; with a size limit, the CFA is binned instead of demosaiced. Full resolution uses `demosaic.rs` (RCD-style) for Bayer and rawler's Markesteijn for X-Trans; scanner DNGs (LinearRaw) need none.
 2. `pipeline::resolve_base` finds the film base: the 98.5–99.5 percentile of the *uncropped* frame, or an eyedropper sample, or the roll base.
