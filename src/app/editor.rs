@@ -1402,6 +1402,7 @@ impl NlpApp {
             {
                 s.apply_mono_defaults();
             }
+            super::folder::crosstalk_ui(ui, s);
             ui.label(RichText::new("Film base").small().color(theme::MUTED))
                 .on_hover_text("Neutralises the orange mask before analysis");
             self.combo_with_picker(

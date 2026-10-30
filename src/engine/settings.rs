@@ -218,6 +218,11 @@ pub struct Settings {
     pub color_model: ColorModel,
     /// 1..=5, "3 - Default".
     pub pre_saturation: u8,
+    /// Dye crosstalk matrix: a bundled film's id (`presets::crosstalk_profile`),
+    /// or empty for the generic C-41 crosstalk.
+    pub crosstalk: String,
+    /// How much of the crosstalk correction applies, in percent (100 = all).
+    pub crosstalk_strength: f32,
     /// Border buffer in percent (`filmBorder`).
     pub border_buffer: f32,
     pub film_base: FilmBase,
@@ -306,6 +311,8 @@ impl Default for Settings {
             image_type: ImageType::Negative,
             color_model: ColorModel::Basic,
             pre_saturation: 3,
+            crosstalk: String::new(),
+            crosstalk_strength: 100.0,
             border_buffer: 5.0,
             film_base: FilmBase::Auto,
             film_base_sample: [1.0, 1.0, 1.0],
@@ -384,6 +391,8 @@ impl Settings {
             image_type: self.image_type,
             color_model: self.color_model,
             pre_saturation: self.pre_saturation,
+            crosstalk: self.crosstalk.clone(),
+            crosstalk_strength: (self.crosstalk_strength * 10.0).round() as i32,
             border_buffer: (self.border_buffer * 100.0).round() as i32,
             film_base: self.film_base,
             film_base_sample: self.film_base_sample.map(|v| (v * 10000.0).round() as i32),
@@ -419,6 +428,7 @@ impl Settings {
             (k.rotation, k.flip_h, k.straighten, k.crop);
         self.crop_aspect = k.crop_aspect;
         self.flat_field = k.flat_field.clone();
+        (self.crosstalk, self.crosstalk_strength) = (k.crosstalk.clone(), k.crosstalk_strength);
     }
 
     /// Copy only the adjustment parameters (used by paste/sync). Like the
@@ -443,11 +453,21 @@ pub struct AnalysisKey {
     pub image_type: ImageType,
     pub color_model: ColorModel,
     pub pre_saturation: u8,
+    /// Crosstalk matrix and strength (tenths of a percent); sidecars from
+    /// before them used the generic matrix at full strength.
+    #[serde(default)]
+    pub crosstalk: String,
+    #[serde(default = "full_strength")]
+    pub crosstalk_strength: i32,
     pub border_buffer: i32,
     pub film_base: FilmBase,
     pub film_base_sample: [i32; 3],
     #[serde(default)]
     pub flat_field: Option<PathBuf>,
+}
+
+fn full_strength() -> i32 {
+    1000
 }
 
 /// Positive copy settings (Advanced tab).

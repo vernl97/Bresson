@@ -24,6 +24,9 @@ CONVERT OPTIONS:
   --wb NAME            White balance (Auto-Neutral, Kodak, Fuji, ...)
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
   --border PCT         Border buffer percent (default 5)
+  --crosstalk NAME     Dye crosstalk matrix: a film from crosstalk/ (e.g. kodak_gold_200,
+                       \"Kodak Gold 200\"), default the generic C-41 matrix
+  --crosstalk-strength PCT  Share of the crosstalk correction (default 100)
   --auto-crop          Crop and straighten each frame to its detected frame
   --aspect NAME        Crop shape for --auto-crop: Original (default), Free, 1:1, 2:3, 4:5, ...
   --flat FILE          Flat-field frame (bare light or clear film leader, shot like the negatives)
@@ -33,6 +36,20 @@ CONVERT OPTIONS:
                        (default \"{name}{suffix}\")
   --out DIR            Output folder (default: <source>/Positives)
 ";
+
+/// The bundled crosstalk matrix named `name`: its id, or its name with or
+/// without the "(approx)" suffix.
+fn crosstalk_id(name: &str) -> Result<String> {
+    let n = name.to_ascii_lowercase();
+    crate::engine::presets::crosstalk_profiles()
+        .iter()
+        .find(|p| {
+            let l = p.name.to_ascii_lowercase();
+            p.id == n || l == n || l.trim_end_matches(" (approx)") == n
+        })
+        .map(|p| p.id.to_string())
+        .with_context(|| format!("unknown crosstalk matrix '{name}'"))
+}
 
 /// The first choice whose label is `name`, starts with `name` and a space
 /// ("Lab" for "Lab (per frame)") or ends with a space and `name` ("Rich"
@@ -96,6 +113,8 @@ fn convert(args: Vec<String>) -> Result<()> {
             "--wb" => s.wb_mode = find(WbMode::ALL, WbMode::label, &val()?)?,
             "--lut" => s.lut = find(Lut::ALL, Lut::label, &val()?)?,
             "--border" => s.border_buffer = val()?.parse()?,
+            "--crosstalk" => s.crosstalk = crosstalk_id(&val()?)?,
+            "--crosstalk-strength" => s.crosstalk_strength = val()?.parse()?,
             "--auto-crop" => s.auto_crop = true,
             "--aspect" => s.crop_aspect = find(CropAspect::ALL, CropAspect::label, &val()?)?,
             "--flat" => s.flat_field = Some(PathBuf::from(val()?)),

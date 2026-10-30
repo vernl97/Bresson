@@ -211,17 +211,21 @@ fn mat_mul_f32(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
     std::array::from_fn(|r| std::array::from_fn(|c| (0..3).map(|k| a[r][k] * b[k][c]).sum()))
 }
 
-/// Dye crosstalk correction: the inverse of the dye mixing, with its rows
-/// normalised so a neutral density stays neutral.
-fn crosstalk_correction() -> [[f32; 3]; 3] {
-    let mut m = color::mat_inv(&C41_CROSSTALK);
-    for row in m.iter_mut() {
-        let sum: f64 = row.iter().sum();
-        for v in row.iter_mut() {
-            *v /= sum;
-        }
-    }
-    color::to_f32(&m)
+/// Dye crosstalk correction: the film's bundled matrix, or the inverse of
+/// the generic C-41 mixing, blended with the identity by its strength. Rows
+/// are normalised so a neutral density stays neutral.
+fn crosstalk_correction(s: &Settings) -> [[f32; 3]; 3] {
+    let full = match presets::crosstalk_profile(&s.crosstalk) {
+        Some(p) => p.matrix,
+        None => color::to_f32(&color::mat_inv(&C41_CROSSTALK)),
+    };
+    let k = (s.crosstalk_strength / 100.0).max(0.0);
+    std::array::from_fn(|r| {
+        let row: [f32; 3] =
+            std::array::from_fn(|c| full[r][c] * k + if r == c { 1.0 - k } else { 0.0 });
+        let sum: f32 = row.iter().sum();
+        row.map(|v| v / sum)
+    })
 }
 
 /// Density-space matrix of a frame: crosstalk correction (colour negatives),
@@ -229,7 +233,7 @@ fn crosstalk_correction() -> [[f32; 3]; 3] {
 fn density_matrix(s: &Settings) -> [[f32; 3]; 3] {
     let cal = calibration_matrix(s);
     if s.image_type == ImageType::Negative && !s.is_monochrome() {
-        mat_mul_f32(&cal, &crosstalk_correction())
+        mat_mul_f32(&cal, &crosstalk_correction(s))
     } else {
         cal
     }
@@ -1353,6 +1357,34 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crosstalk_strength_blends_towards_identity() {
+        let mut s = Settings::default();
+        // The default is the generic matrix at full strength, as before.
+        let generic = crosstalk_correction(&s);
+        let inv = color::mat_inv(&C41_CROSSTALK);
+        for r in 0..3 {
+            let sum: f64 = inv[r].iter().sum();
+            for c in 0..3 {
+                assert!((generic[r][c] as f64 - inv[r][c] / sum).abs() < 1e-5);
+            }
+        }
+        s.crosstalk_strength = 0.0;
+        let off = crosstalk_correction(&s);
+        for r in 0..3 {
+            for c in 0..3 {
+                assert!((off[r][c] - if r == c { 1.0 } else { 0.0 }).abs() < 1e-6);
+            }
+        }
+        s.crosstalk = "kodak_gold_200".into();
+        s.crosstalk_strength = 50.0;
+        let half = crosstalk_correction(&s);
+        let gold = presets::crosstalk_profile("kodak_gold_200").unwrap().matrix;
+        assert!((half[0][1] - gold[0][1] * 0.5 / (1.0 + 0.5 * (gold[0].iter().sum::<f32>() - 1.0))).abs() < 1e-5);
+        assert!(half.iter().all(|row| (row.iter().sum::<f32>() - 1.0).abs() < 1e-5));
+        assert_ne!(Settings::default().analysis_key(), s.analysis_key());
+    }
 
     #[test]
     fn detect_source_from_the_file() {

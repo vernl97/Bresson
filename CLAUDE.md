@@ -73,4 +73,4 @@ New `Settings` fields need `#[serde(default)]` compatibility so existing sidecar
 
 ## External assets
 
-None at runtime. The looks are native data in `assets/looks.json` (embedded with `include_str!`), measured from the plugin's enhanced looks; the plugin's tone profiles are fitted curves in `curve.rs`. VueScan / SilverFast DNGs are set as the scan source by hand.
+None at runtime. The looks are native data in `assets/looks.json` (embedded with `include_str!`), measured from the plugin's enhanced looks; the plugin's tone profiles are fitted curves in `curve.rs`. The film crosstalk matrices in `crosstalk/*.toml` (from NegPy, GPL-3, for personal use; see `crosstalk/README.md`) are embedded the same way and picked by `Settings::crosstalk`. VueScan / SilverFast DNGs are set as the scan source by hand.

@@ -16,7 +16,11 @@
 //! Every folder with scans directly inside is a roll; a folder without any
 //! is searched one level down. Sidecars are neither read nor written.
 //! `NLP_SCAN_OUT` gets `stats.json` and a JPEG of each print; with
-//! `NLP_SCAN_BASELINE` the frames that moved are listed.
+//! `NLP_SCAN_BASELINE` the frames that moved are listed. `NLP_SCAN_DUMP=<dir>`
+//! writes each roll's density above the base in the scanner's own channels
+//! (before any matrix), for studying the scanner's colour offline.
+//! `NLP_SCAN_CROSSTALK=<id>` and `NLP_SCAN_CROSSTALK_STRENGTH=<pct>` convert
+//! with a bundled crosstalk matrix (`crosstalk/`) instead of the generic one.
 
 use std::path::{Path, PathBuf};
 
@@ -128,6 +132,11 @@ fn convert_roll(files: &[PathBuf]) -> Vec<(PathBuf, Settings, Analysis, SourceIm
                             source: pipeline::detect_source(&src),
                             auto_crop: true,
                             crop_aspect: CropAspect::Free,
+                            crosstalk: std::env::var("NLP_SCAN_CROSSTALK").unwrap_or_default(),
+                            crosstalk_strength: std::env::var("NLP_SCAN_CROSSTALK_STRENGTH")
+                                .ok()
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(100.0),
                             ..Settings::default()
                         };
                         let found = frame::detect(&src, &s, pipeline::resolve_base(&src, &s, None));
@@ -173,6 +182,49 @@ fn convert_roll(files: &[PathBuf]) -> Vec<(PathBuf, Settings, Analysis, SourceIm
             (f, s, a, src)
         })
         .collect()
+}
+
+/// Long edge of the dumped density images: averaging down to it smooths
+/// the grain, which would otherwise blur the dyes' directions.
+const DUMP_EDGE: usize = 300;
+
+/// Write a roll's cropped frames as scanner-channel density above the base
+/// (`<roll>.f32`: little-endian f32 triplets) with `<roll>.json` describing
+/// the frames and the source → MelissaRGB matrix.
+fn dump_roll(dir: &Path, roll: &str, frames: &[(PathBuf, Settings, Analysis, SourceImage)]) {
+    let mut bytes = Vec::new();
+    let mut meta = Vec::new();
+    for (path, s, a, src) in frames {
+        let (d, w, h) = decode::geometry(
+            &src.data,
+            src.width,
+            src.height,
+            s.rotation,
+            s.flip_h,
+            s.straighten,
+            s.crop,
+        );
+        let (d, w, h) = decode::downscale(&d, w, h, DUMP_EDGE);
+        let start = bytes.len() / 12;
+        for p in &d {
+            for c in 0..3 {
+                let v = (a.base[c] / p[c].max(1e-6)).log10();
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        meta.push(serde_json::json!({
+            "file": path.file_name().unwrap().to_string_lossy(),
+            "start": start, "width": w, "height": h,
+            "base": a.base, "confidence": a.auto_wb.confidence,
+        }));
+    }
+    let info = serde_json::json!({
+        "to_melissa": frames.first().map(|f| f.3.to_melissa),
+        "frames": meta,
+    });
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join(format!("{roll}.f32")), bytes).unwrap();
+    std::fs::write(dir.join(format!("{roll}.json")), info.to_string()).unwrap();
 }
 
 fn percentile(v: &mut [f64], q: f64) -> f64 {
@@ -390,6 +442,9 @@ fn real_scans() {
         let roll_name = roll_dir.file_name().unwrap().to_string_lossy().to_string();
         eprintln!("{roll_name}: {} scans", files.len());
         let frames = convert_roll(&files);
+        if let Ok(d) = std::env::var("NLP_SCAN_DUMP") {
+            dump_roll(Path::new(&d), &roll_name, &frames);
+        }
         let analyses: Vec<Analysis> = frames.iter().map(|f| f.2.clone()).collect();
         let roll = (frames.len() > 1).then(|| {
             let (agg, excluded) = pipeline::aggregate_roll(&analyses, None);

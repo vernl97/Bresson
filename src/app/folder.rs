@@ -139,6 +139,45 @@ impl NlpApp {
     }
 }
 
+/// The dye crosstalk matrix (generic C-41 or a bundled film) and its
+/// strength. Colour negatives only.
+pub fn crosstalk_ui(ui: &mut egui::Ui, s: &mut Settings) {
+    if s.image_type != ImageType::Negative || s.is_monochrome() {
+        return;
+    }
+    let films = crate::engine::presets::crosstalk_profiles();
+    let mut pick = films
+        .iter()
+        .position(|p| p.id == s.crosstalk)
+        .map_or(0, |i| i + 1);
+    let all: Vec<usize> = (0..=films.len()).collect();
+    if widgets::fl_combo(
+        ui,
+        "Crosstalk",
+        &mut pick,
+        &all,
+        |i| if i == 0 { "Generic C-41" } else { films[i - 1].name },
+        "Unmixes the dyes' leakage into each other's channels. Film matrices are read off \
+         spec sheets for a narrowband scanner (approx); Generic is the engine's own.",
+    ) {
+        s.crosstalk = if pick == 0 {
+            String::new()
+        } else {
+            films[pick - 1].id.to_string()
+        };
+    }
+    widgets::fl_slider(
+        ui,
+        "Crosstalk strength",
+        &mut s.crosstalk_strength,
+        0.0..=150.0,
+        100.0,
+        0,
+        "Percent of the crosstalk correction: 0 is off, more separates colours further",
+        None,
+    );
+}
+
 /// The flat-field input: a frame of the bare light source or clear film
 /// leader, shot like the negatives. Shows the file name with Choose / Clear.
 pub fn flat_field_ui(
@@ -1041,6 +1080,7 @@ pub fn conversion_fields(ui: &mut egui::Ui, s: &mut Settings, start: Option<&std
         ColorModel::label,
         "Basic: neutral · Frontier: teal-blues, golden yellows, warm skin · Noritsu: cleaner and cooler · B+W: monochrome · None: no calibration",
     );
+    crosstalk_ui(ui, s);
     widgets::fl_combo(
         ui,
         "Film base",
@@ -1173,6 +1213,7 @@ impl NlpApp {
         (s.image_type, s.source, s.color_model, s.film_base) =
             (o.image_type, o.source, o.color_model, o.film_base);
         s.flat_field = o.flat_field.clone();
+        (s.crosstalk, s.crosstalk_strength) = (o.crosstalk.clone(), o.crosstalk_strength);
         (
             s.pre_saturation,
             s.border_buffer,

@@ -181,6 +181,11 @@ For every pixel, in this order:
                       [0.04, 0.15, 1.00]]   B   (columns: C, M, Y dye)
      ```
      with each row normalised to sum 1, so neutral density stays neutral.
+     `Settings::crosstalk` can name a film's matrix from `crosstalk/` instead
+     (`presets::crosstalk_profiles`: NegPy's spec‑sheet matrices, already
+     inverted, for a narrowband scanner). `crosstalk_strength` (%, default
+     100) blends the correction with the identity, `I·(1 − k) + M·k`, and the
+     rows are normalised again (`crosstalk_correction`).
    - **Colour model calibration** (`calibration_matrix`, values from
      `presets::calibration`): Lightroom‑style red/green/blue *hue* and
      *saturation* per model (Basic / Frontier / Noritsu, different for camera
@@ -624,7 +629,8 @@ Where it runs:
 
 `Settings::analysis_key()` → `AnalysisKey`: engine version
 (`ENGINE_VERSION = 4`), source, image type, colour model, pre‑saturation,
-border buffer, film base mode and sample, flat field. These change the
+crosstalk matrix and strength, border buffer, film base mode and sample,
+flat field. These change the
 density image or how it is measured, so changing any of them needs
 **Convert** again. Everything else — tone, WB, filtration, print exposure,
 looks, Hyper Tone, sharpening, geometry, roll mode — only rebuilds the
