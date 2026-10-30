@@ -606,6 +606,46 @@ pub fn fl_combo<T: Copy + PartialEq>(
     changed
 }
 
+/// A film stock field: free text with a dropdown of the bundled films
+/// (the crosstalk folder). Typing filters the list; any text is allowed.
+pub fn stock_combo(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> egui::Response {
+    let mut changed = false;
+    let mut out = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let edit = ui.add(
+            egui::TextEdit::singleline(value)
+                .hint_text(hint)
+                .desired_width((width - 24.0).max(40.0)),
+        );
+        changed |= edit.changed();
+        let arrow = ui.add(
+            egui::Button::new(egui::RichText::new("▾").small().color(theme::MUTED))
+                .min_size(egui::vec2(20.0, edit.rect.height())),
+        );
+        let names = crate::engine::presets::film_stock_names();
+        let q = value.trim().to_lowercase();
+        let typed = !q.is_empty() && !names.iter().any(|n| n.to_lowercase() == q);
+        egui::Popup::menu(&arrow).show(|ui| {
+            ui.set_min_width(220.0);
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                for n in names.iter().filter(|n| !typed || n.to_lowercase().contains(&q)) {
+                    if ui.selectable_label(*value == *n, n).clicked() {
+                        *value = n.clone();
+                        changed = true;
+                    }
+                }
+            });
+        });
+        out = Some(edit);
+    });
+    let mut r = out.expect("text edit was added");
+    if changed {
+        r.mark_changed();
+    }
+    r
+}
+
 /// Slim slider: label + value on one row, track below. Double-click the
 /// track or click the label to reset; the value can be typed past the range.
 /// `origin` optionally defines where the track fill highlight starts (defaulting to `default`).

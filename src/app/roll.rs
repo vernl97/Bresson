@@ -55,13 +55,18 @@ pub fn film_fields(ui: &mut egui::Ui, id: &str, m: &mut FilmMetadata, notes: boo
         .show(ui, |ui| {
             for (label, v, hint) in fields {
                 ui.label(RichText::new(label).small().color(theme::MUTED));
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(v)
-                            .hint_text(hint)
-                            .desired_width(ui.available_width()),
-                    )
-                    .changed();
+                if label == "Film stock" {
+                    let w = ui.available_width();
+                    changed |= widgets::stock_combo(ui, v, hint, w).changed();
+                } else {
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(v)
+                                .hint_text(hint)
+                                .desired_width(ui.available_width()),
+                        )
+                        .changed();
+                }
                 ui.end_row();
             }
         });
@@ -127,10 +132,11 @@ impl NlpApp {
                             .desired_width(160.0),
                     );
                     save |= enter(&r);
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut d.info.metadata.film_stock)
-                            .hint_text("Film stock, e.g. Portra 400")
-                            .desired_width(180.0),
+                    let r = widgets::stock_combo(
+                        ui,
+                        &mut d.info.metadata.film_stock,
+                        "Film stock, e.g. Portra 400",
+                        200.0,
                     );
                     save |= enter(&r);
                     save |= ui.add(widgets::primary("Save")).clicked();
@@ -199,11 +205,23 @@ impl NlpApp {
             .as_ref()
             .map(|r| r.metadata.clone())
             .unwrap_or_default();
+        // A stock from the list also selects that film's crosstalk matrix.
+        let crosstalk = (info.metadata.film_stock != old.film_stock)
+            .then(|| crate::engine::presets::crosstalk_id_for_stock(&info.metadata.film_stock))
+            .flatten();
         for f in &mut self.frames {
             if f.sc.metadata == FilmMetadata::default() || f.sc.metadata == old {
                 f.sc.metadata = info.metadata.clone();
                 f.dirty_since = Some(self.time);
+                if let Some(id) = crosstalk {
+                    f.sc.settings.crosstalk = id.to_string();
+                    f.thumb_dirty = true;
+                }
             }
+        }
+        if crosstalk.is_some() {
+            // The frame open in the editor re-prepares with the new matrix.
+            self.editor.invalidate();
         }
         self.roll
             .cache

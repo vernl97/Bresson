@@ -1100,6 +1100,17 @@ impl NlpApp {
             super::roll::film_fields(ui, "film_meta", &mut self.frames[i].sc.metadata, true);
         if changed {
             self.frames[i].dirty_since = Some(self.time);
+            // A stock from the list selects that film's crosstalk matrix.
+            let id = crate::engine::presets::crosstalk_id_for_stock(
+                &self.frames[i].sc.metadata.film_stock,
+            );
+            if let Some(id) = id {
+                if self.frames[i].sc.settings.crosstalk != id {
+                    self.frames[i].sc.settings.crosstalk = id.to_string();
+                    self.mark_changed(i);
+                    self.editor.invalidate();
+                }
+            }
         }
         // Copy to the frame's roll, or to the whole folder.
         let roll = self.frames[i].sc.roll.as_ref().map(|r| r.id.clone());
@@ -1125,9 +1136,16 @@ impl NlpApp {
                 .clicked()
             {
                 let m = self.frames[i].sc.metadata.clone();
+                let crosstalk = self.frames[i].sc.settings.crosstalk.clone();
+                let matched =
+                    crate::engine::presets::crosstalk_id_for_stock(&m.film_stock).is_some();
                 for &k in &others {
                     self.frames[k].sc.metadata = m.clone();
                     self.frames[k].dirty_since = Some(self.time);
+                    if matched {
+                        self.frames[k].sc.settings.crosstalk = crosstalk.clone();
+                        self.frames[k].thumb_dirty = true;
+                    }
                 }
                 self.toast(
                     format!("Film details copied to {} frame(s)", others.len()),

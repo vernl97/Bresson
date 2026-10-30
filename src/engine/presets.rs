@@ -214,6 +214,25 @@ pub fn crosstalk_profiles() -> &'static [Crosstalk] {
     })
 }
 
+/// Film stock names for the metadata dropdown: the bundled films' names
+/// without the "(approx)" note, sorted.
+pub fn film_stock_names() -> Vec<String> {
+    crosstalk_profiles()
+        .iter()
+        .map(|p| p.name.trim_end_matches("(approx)").trim().to_string())
+        .collect()
+}
+
+/// The crosstalk id of the bundled film whose stock name (see
+/// `film_stock_names`) equals `stock`, ignoring case; `None` if none does.
+pub fn crosstalk_id_for_stock(stock: &str) -> Option<&'static str> {
+    let stock = stock.trim();
+    crosstalk_profiles()
+        .iter()
+        .find(|p| p.name.trim_end_matches("(approx)").trim().eq_ignore_ascii_case(stock))
+        .map(|p| p.id)
+}
+
 /// The bundled matrix with this id; `None` for the generic C-41 crosstalk.
 pub fn crosstalk_profile(id: &str) -> Option<&'static Crosstalk> {
     crosstalk_profiles().iter().find(|p| p.id == id)
@@ -256,6 +275,16 @@ fn parse_crosstalk(id: &'static str, text: &'static str) -> Option<Crosstalk> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn film_stock_names_drop_the_approx_note() {
+        let names = film_stock_names();
+        assert_eq!(names.len(), CROSSTALK_FILES.len());
+        assert!(names.iter().all(|n| !n.is_empty() && !n.contains("(approx)")));
+        assert!(names.iter().any(|n| n == "Kodak Gold 200"));
+        assert_eq!(crosstalk_id_for_stock("kodak gold 200"), Some("kodak_gold_200"));
+        assert_eq!(crosstalk_id_for_stock("Cinestill 800T"), None);
+    }
 
     #[test]
     fn every_bundled_crosstalk_matrix_loads() {
