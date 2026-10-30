@@ -613,6 +613,16 @@ two qualify).
   neutral steps prints exactly as it converts alone; one with ≤ 4 takes the
   film's slopes and the roll's filtration at its own density. `auto_wb_for`
   blends the grey the same way, so Auto‑Neutral matches the chosen levels.
+  **Fog** (`roll_levels_at`): a frame that is mostly fog, a thin night frame,
+  keeps its own black point in red and blue. Its thinnest density is fog over
+  the base and must print neutral, but the roll's offset comes from other
+  frames, and each scan reads the base slightly differently (the residue of
+  `base_at_exposure`, up to 0.06 D per channel). Against the roll's offset
+  that residue printed the fog maroon. Red and blue are moved as a whole
+  (`lo`, `hi`, `mid`, so the roll's slopes stay) by the gap between the
+  frame's own `lo` and the roll's. The share of the move is 1 while green's
+  median sits within `FOG_SHARE = 0.1` of its range above the black end, and
+  fades to 0 at `DARK_SHARE = 0.25`.
 
 ---
 

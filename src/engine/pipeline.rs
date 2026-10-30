@@ -1186,6 +1186,30 @@ fn roll_balance_for(frame: Option<&Analysis>, roll: &RollData) -> (RollBalance, 
     (roll.balance.shifted(d), d)
 }
 
+/// Median position (share of the range) up to which a frame is mostly fog:
+/// below it its thinnest density is film base and fog, not scene.
+const FOG_SHARE: f64 = 0.1;
+
+/// The roll's balance at a frame's own green levels (Lab mode). A frame
+/// that is mostly fog (a thin night frame) keeps its own black point in
+/// red and blue: its thinnest density is fog over the base, which must
+/// print neutral, while the roll's offset is measured on other frames whose
+/// scan read the base slightly differently (up to 0.06 D per channel). The
+/// shift fades out as the median rises to [`DARK_SHARE`] of the range.
+fn roll_levels_at(balance: &RollBalance, f: &Analysis) -> Levels {
+    let mut l = balance.levels(f.levels[1]);
+    let g = f.levels[1];
+    let share = (g.mid - g.lo) / (g.hi - g.lo).max(1e-6);
+    let fog = ((DARK_SHARE - share) / (DARK_SHARE - FOG_SHARE)).clamp(0.0, 1.0);
+    if fog > 0.0 && f.key.image_type == ImageType::Negative {
+        for c in [0, 2] {
+            let d = fog * (f.levels[c].lo - l[c].lo);
+            (l[c].lo, l[c].hi, l[c].mid) = (l[c].lo + d, l[c].hi + d, l[c].mid + d);
+        }
+    }
+    l
+}
+
 /// Pick the levels a frame renders with: its own analysis, or the roll's.
 /// In Lab mode a frame with a reliable neutral axis prints exactly as it
 /// would alone (the light changes from frame to frame: daylight, shade,
@@ -1206,7 +1230,7 @@ pub fn levels_for(
         return Some(balance.levels(shift_levels(&roll.levels, d)[1]));
     };
     let trust = lab_trust(f);
-    let from_roll = balance.levels(f.levels[1]);
+    let from_roll = roll_levels_at(&balance, f);
     let mix = |a: f64, b: f64| a + trust * (b - a);
     Some(std::array::from_fn(|c| {
         let (r, o) = (from_roll[c], f.levels[c]);
@@ -1239,7 +1263,7 @@ pub fn auto_wb_for(
     }
     let l = levels_for(s, Some(f), Some(roll))?;
     let (balance, _) = roll_balance_for(frame, roll);
-    let roll_grey = balance.levels(f.levels[1]).map(|c| c.mid);
+    let roll_grey = roll_levels_at(&balance, f).map(|c| c.mid);
     let grey = std::array::from_fn(|c| roll_grey[c] + trust * (f.auto_wb.grey[c] - roll_grey[c]));
     Some(auto_wb_from(
         &l,
@@ -1572,6 +1596,43 @@ mod tests {
         }
         s.use_roll = false;
         assert_eq!(get(&s), frames[1].levels);
+    }
+
+    #[test]
+    fn lab_keeps_the_fog_of_a_night_frame_neutral() {
+        let frames = [
+            frame([0.10, 0.15, 0.20], [1.00, 1.10, 1.20]),
+            frame([0.20, 0.27, 0.36], [1.20, 1.28, 1.42]),
+        ];
+        let (agg, _) = aggregate_roll(&frames, None);
+        let roll = roll_of(&agg, 2);
+        let s = Settings {
+            use_roll: true,
+            roll_mode: RollMode::Lab,
+            ..Settings::default()
+        };
+        // A thin night frame: mostly fog, its median just above its black
+        // end, and no neutral axis. Its black point reads redder than the
+        // roll's axis puts it (the scan read the base slightly differently).
+        let mut night = frame([0.054, 0.032, -0.001], [0.354, 0.332, 0.299]);
+        for (c, l) in night.levels.iter_mut().enumerate() {
+            l.mid = [0.061, 0.041, 0.010][c];
+        }
+        let roll_at = agg.balance.levels(night.levels[1]);
+        let lab = levels_for(&s, Some(&night), Some(&roll)).unwrap();
+        for c in [0, 2] {
+            assert!((lab[c].lo - night.levels[c].lo).abs() < 1e-9, "{lab:?}");
+            // The roll's slope is kept: the whole channel moves.
+            let shift = night.levels[c].lo - roll_at[c].lo;
+            assert!((lab[c].hi - (roll_at[c].hi + shift)).abs() < 1e-9);
+            assert!((lab[c].mid - (roll_at[c].mid + shift)).abs() < 1e-9);
+        }
+        assert_eq!(lab[1], roll_at[1]);
+        // A frame with its median mid-range keeps the roll's balance.
+        assert_eq!(
+            levels_for(&s, Some(&frames[1]), Some(&roll)).unwrap(),
+            agg.balance.levels(frames[1].levels[1])
+        );
     }
 
     #[test]
