@@ -23,7 +23,13 @@ pub const EDITOR_SIZE: usize = 2048;
 pub enum JobResult {
     Proxy {
         path: PathBuf,
-        result: Result<Arc<SourceImage>, String>,
+        /// The proxy and its grid thumbnail source.
+        result: Result<(Arc<SourceImage>, SourceImage), String>,
+    },
+    /// The cached grid thumbnail source, ahead of the proxy; `None` on a miss.
+    Thumb {
+        path: PathBuf,
+        thumb: Option<SourceImage>,
     },
     Editor {
         path: PathBuf,
@@ -65,6 +71,10 @@ impl Jobs {
             ctx,
             active: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    pub fn ctx(&self) -> &egui::Context {
+        &self.ctx
     }
 
     pub fn busy(&self) -> usize {
@@ -167,6 +177,42 @@ pub fn load_proxy(path: &Path) -> anyhow::Result<SourceImage> {
         write_cache(c, &img);
     }
     Ok(img)
+}
+
+/// Downscale a proxy to the grid thumbnail source.
+pub fn make_thumb(p: &SourceImage) -> SourceImage {
+    let (data, width, height) = decode::downscale(&p.data, p.width, p.height, super::THUMB_SIZE);
+    SourceImage {
+        data,
+        width,
+        height,
+        to_melissa: p.to_melissa,
+        as_shot_wb: p.as_shot_wb,
+        is_raw: p.is_raw,
+        info: p.info.clone(),
+    }
+}
+
+fn thumb_cache_path(image: &Path) -> Option<PathBuf> {
+    sidecar::proxy_cache_path(image).map(|c| c.with_extension("thumb"))
+}
+
+/// The cached grid thumbnail source, if any: about 1 MB against the proxy's 8 MB.
+pub fn read_thumb(image: &Path) -> Option<SourceImage> {
+    read_cache(&thumb_cache_path(image)?)
+}
+
+/// Load the proxy and its thumbnail source, caching the thumbnail if it
+/// was not yet.
+pub fn load_proxy_and_thumb(path: &Path) -> anyhow::Result<(SourceImage, SourceImage)> {
+    let proxy = load_proxy(path)?;
+    let thumb = make_thumb(&proxy);
+    if let Some(c) = thumb_cache_path(path) {
+        if !c.exists() {
+            write_cache(&c, &thumb);
+        }
+    }
+    Ok((proxy, thumb))
 }
 
 // ---- conversion ------------------------------------------------------------------

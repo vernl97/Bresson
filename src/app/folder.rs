@@ -22,6 +22,8 @@ pub fn source_instructions(s: Source) -> &'static str {
 /// egui memory keys: the grid's column count (for the arrow keys) and the
 /// cell to scroll into view.
 const GRID_COLS: &str = "grid_cols";
+/// The frame indices the grid painted last, for visible-first loading.
+pub const GRID_VISIBLE: &str = "grid_visible";
 const GRID_SCROLL_TO: &str = "grid_scroll_to";
 
 /// Short name for the scan source chip.
@@ -800,6 +802,7 @@ impl NlpApp {
                 let scroll_to: Option<usize> =
                     ctx.data_mut(|d| d.remove_temp(egui::Id::new(GRID_SCROLL_TO)));
                 ctx.data_mut(|d| d.insert_temp(egui::Id::new(GRID_COLS), cols));
+                let mut visible: Vec<usize> = Vec::new();
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(14.0, 14.0);
                     for (i, f) in self.frames.iter().enumerate() {
@@ -812,6 +815,7 @@ impl NlpApp {
                         if !ui.is_rect_visible(rect) {
                             continue;
                         }
+                        visible.push(i);
                         let p = ui.painter();
                         let square = egui::Rect::from_min_size(rect.min, vec2(cell, cell));
                         if resp.hovered() && !sel {
@@ -980,6 +984,7 @@ impl NlpApp {
                         });
                     }
                 });
+                ctx.data_mut(|d| d.insert_temp(egui::Id::new(GRID_VISIBLE), visible));
                 // Clicking empty space below the grid clears the selection.
                 let rest = ui.available_rect_before_wrap();
                 if rest.height() > 0.0 && ui.allocate_rect(rest, Sense::click()).clicked() {

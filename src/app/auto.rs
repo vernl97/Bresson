@@ -62,6 +62,20 @@ impl NlpApp {
         }
     }
 
+    /// Whether every frame the grid shows has its proxy (or failed to load).
+    fn visible_loaded(&self) -> bool {
+        let visible: Vec<usize> = self
+            .jobs
+            .ctx()
+            .data(|d| d.get_temp(eframe::egui::Id::new(super::folder::GRID_VISIBLE)))
+            .unwrap_or_default();
+        visible.iter().all(|&i| {
+            self.frames
+                .get(i)
+                .is_none_or(|f| !matches!(f.proxy, ProxyState::NotLoaded | ProxyState::Loading))
+        })
+    }
+
     /// Run queued conversions in batches, then the roll pass once the
     /// whole folder has loaded.
     pub fn auto_tick(&mut self) {
@@ -69,7 +83,9 @@ impl NlpApp {
             .auto
             .queued_since
             .is_some_and(|t| self.time - t > BATCH_WAIT || self.auto.queue.len() >= BATCH_SIZE);
-        if due {
+        // Conversion shares the pool with decoding: let the frames on screen
+        // load first.
+        if due && self.visible_loaded() {
             self.auto.queued_since = None;
             let paths = std::mem::take(&mut self.auto.queue);
             let idx: Vec<usize> = paths.iter().filter_map(|p| self.index_of(p)).collect();

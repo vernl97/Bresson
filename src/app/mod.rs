@@ -403,7 +403,38 @@ impl NlpApp {
         self.auto = Default::default();
         self.history = Default::default();
         for i in 0..self.frames.len() {
-            self.request_proxy(i);
+            self.request_thumb(i);
+        }
+        self.pump_proxies();
+    }
+
+    /// Start proxy loads for the frames the grid shows first, then the rest in
+    /// order, keeping only a few decodes in flight at once. Called every frame.
+    fn pump_proxies(&mut self) {
+        let cap = (rayon::current_num_threads() / 2).max(2);
+        let mut loading = self
+            .frames
+            .iter()
+            .filter(|f| matches!(f.proxy, ProxyState::Loading))
+            .count();
+        if loading >= cap {
+            return;
+        }
+        let visible: Vec<usize> = self
+            .jobs
+            .ctx()
+            .data(|d| d.get_temp(egui::Id::new(folder::GRID_VISIBLE)))
+            .unwrap_or_default();
+        let rest = (0..self.frames.len()).filter(|i| !visible.contains(i));
+        let order: Vec<usize> = visible.iter().copied().chain(rest).collect();
+        for i in order {
+            if loading >= cap {
+                break;
+            }
+            if matches!(self.frames.get(i).map(|f| &f.proxy), Some(ProxyState::NotLoaded)) {
+                self.request_proxy(i);
+                loading += 1;
+            }
         }
     }
 
@@ -415,10 +446,20 @@ impl NlpApp {
         f.proxy = ProxyState::Loading;
         let path = f.path.clone();
         self.jobs.spawn(move || {
-            let result = jobs::load_proxy(&path)
-                .map(Arc::new)
+            let result = jobs::load_proxy_and_thumb(&path)
+                .map(|(p, t)| (Arc::new(p), t))
                 .map_err(|e| format!("{e:#}"));
             JobResult::Proxy { path, result }
+        });
+    }
+
+    /// Read the cached thumbnail source of a frame. These jobs are cheap, so
+    /// they are queued ahead of the proxies and the grid fills in first.
+    fn request_thumb(&self, i: usize) {
+        let path = self.frames[i].path.clone();
+        self.jobs.spawn(move || {
+            let thumb = jobs::read_thumb(&path);
+            JobResult::Thumb { path, thumb }
         });
     }
 
@@ -1060,23 +1101,29 @@ impl NlpApp {
                         self.exposure_prompt = Some((items, spread));
                     }
                 }
+                JobResult::Thumb { path, thumb } => {
+                    let (Some(i), Some(thumb)) = (self.index_of(&path), thumb) else {
+                        continue;
+                    };
+                    if self.frames[i].thumb_src.is_none() {
+                        self.auto_source(i, &thumb);
+                        self.frames[i].thumb_src = Some(thumb);
+                        self.frames[i].thumb_dirty = true;
+                    }
+                }
                 JobResult::Proxy { path, result } => {
                     let Some(i) = self.index_of(&path) else {
                         continue;
                     };
                     match result {
-                        Ok(p) => {
+                        Ok((p, thumb)) => {
                             self.auto_source(i, &p);
-                            let (d, w, h) =
-                                decode::downscale(&p.data, p.width, p.height, THUMB_SIZE);
-                            self.frames[i].thumb_src = Some(SourceImage {
-                                data: d,
-                                width: w,
-                                height: h,
-                                ..(*p).clone()
-                            });
+                            // A cached thumbnail that arrived first is the same image.
+                            if self.frames[i].thumb_src.is_none() {
+                                self.frames[i].thumb_src = Some(thumb);
+                                self.frames[i].thumb_dirty = true;
+                            }
                             self.frames[i].proxy = ProxyState::Ready(p);
-                            self.frames[i].thumb_dirty = true;
                             self.auto_queue(i);
                         }
                         Err(e) => {
@@ -1355,6 +1402,7 @@ impl eframe::App for NlpApp {
             }
         }
         self.poll_jobs();
+        self.pump_proxies();
         self.auto_tick();
         self.render_thumbs(ctx);
         self.autosave();
