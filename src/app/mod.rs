@@ -363,14 +363,15 @@ impl NlpApp {
         self.frames = files
             .into_iter()
             .map(|path| {
-                let source_auto = sidecar::load(&path).is_none();
-                let mut sc = sidecar::load(&path).unwrap_or_else(|| Sidecar {
+                let loaded = sidecar::load(&path);
+                let source_auto = loaded.is_none();
+                let mut sc = loaded.unwrap_or_else(|| Sidecar {
                     settings: self.defaults.settings.clone(),
                     metadata: roll_meta.clone().unwrap_or_default(),
                     ..Default::default()
                 });
                 if decode::is_raw(&path) || sc.analysis.is_some() {
-                } else if sidecar::load(&path).is_none() {
+                } else if source_auto {
                     // Bitmap scans: Lightroom WB must not be applied; mirror that default.
                     sc.settings.film_base = crate::engine::settings::FilmBase::Off;
                     sc.settings.source = crate::engine::settings::Source::TifScan;

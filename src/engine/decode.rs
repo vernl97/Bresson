@@ -128,6 +128,7 @@ fn load_bitmap(path: &Path) -> Result<SourceImage> {
         .and_then(|b| icc::parse(&b));
     let dynimg = image::DynamicImage::from_decoder(decoder)
         .with_context(|| format!("decode {}", path.display()))?;
+    use rayon::prelude::*;
     let (w, h) = (dynimg.width() as usize, dynimg.height() as usize);
     let rgb = dynimg.into_rgb32f();
     // Scans are read in their embedded profile's primaries and tone curve.
@@ -141,8 +142,9 @@ fn load_bitmap(path: &Path) -> Result<SourceImage> {
     let data: Vec<[f32; 3]> = match &trc {
         None => {
             let dec = color::srgb_decode_lut();
-            rgb.pixels()
-                .map(|p| [dec.get(p.0[0]), dec.get(p.0[1]), dec.get(p.0[2])])
+            rgb.as_raw()
+                .par_chunks_exact(3)
+                .map(|p| [dec.get(p[0]), dec.get(p[1]), dec.get(p[2])])
                 .collect()
         }
         Some(trc) => {
@@ -156,8 +158,9 @@ fn load_bitmap(path: &Path) -> Result<SourceImage> {
                 let i = (x as usize).min(N - 1);
                 luts[c][i] + (luts[c][i + 1] - luts[c][i]) * (x - i as f32)
             };
-            rgb.pixels()
-                .map(|p| [dec(0, p.0[0]), dec(1, p.0[1]), dec(2, p.0[2])])
+            rgb.as_raw()
+                .par_chunks_exact(3)
+                .map(|p| [dec(0, p[0]), dec(1, p[1]), dec(2, p[2])])
                 .collect()
         }
     };
@@ -279,7 +282,7 @@ fn camera_matrix(raw: &rawler::RawImage) -> Mat3 {
 }
 
 fn load_raw(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
-    let raw = rawler::decode_file(path).map_err(|e| anyhow!("{}: {e}", path.display()))?;
+    let mut raw = rawler::decode_file(path).map_err(|e| anyhow!("{}: {e}", path.display()))?;
     let cam2mel = camera_matrix(&raw);
     let wb = if raw.wb_coeffs[0].is_nan() || raw.wb_coeffs[1] <= 0.0 {
         [1.0, 1.0, 1.0]
@@ -301,7 +304,7 @@ fn load_raw(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
     let fast = matches!(&raw.photometric, RawPhotometricInterpretation::Cfa(c) if c.cfa.is_rgb())
         && raw.cpp == 1;
     let (mut data, mut w, mut h) = match max_long_edge {
-        Some(m) if fast => bin_cfa(&raw, m)?,
+        Some(m) if fast => bin_cfa(&mut raw, m)?,
         _ => develop_full(&raw)?,
     };
     let orient = raw.orientation;
@@ -429,8 +432,10 @@ fn develop_rawler(raw: &rawler::RawImage) -> Result<(Vec<[f32; 3]>, usize, usize
 
 /// Fast proxy path: black/white scaling then per-colour block averaging of the
 /// CFA mosaic (no demosaic).
-fn bin_cfa(raw: &rawler::RawImage, max_long_edge: usize) -> Result<(Vec<[f32; 3]>, usize, usize)> {
-    let mut raw = raw.clone();
+fn bin_cfa(
+    raw: &mut rawler::RawImage,
+    max_long_edge: usize,
+) -> Result<(Vec<[f32; 3]>, usize, usize)> {
     raw.apply_scaling().map_err(|e| anyhow!("scaling: {e}"))?;
     let cfa = match &raw.photometric {
         RawPhotometricInterpretation::Cfa(c) => c.cfa.clone(),

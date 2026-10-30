@@ -859,7 +859,7 @@ impl NlpApp {
                                     as u8
                                     + 6;
                                 p.rect_filled(img_area, 3.0, Color32::from_white_alpha(a));
-                                ui.ctx().request_repaint();
+                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
                             }
                         }
                         if sel {
@@ -882,7 +882,7 @@ impl NlpApp {
                                 theme::WARN.gamma_multiply(a),
                             );
                             x -= 12.0;
-                            ui.ctx().request_repaint();
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
                         }
                         if f.is_roll() {
                             let g = p.layout_no_wrap(

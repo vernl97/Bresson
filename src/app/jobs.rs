@@ -123,10 +123,9 @@ fn read_cache(p: &Path) -> Option<SourceImage> {
     if body.len() != h.width * h.height * 12 {
         return None;
     }
-    let data = body
-        .chunks_exact(12)
-        .map(|c| [0, 1, 2].map(|i| f32::from_le_bytes(c[i * 4..i * 4 + 4].try_into().unwrap())))
-        .collect();
+    // Written as native f32, as on this (little-endian) host.
+    let mut data = vec![[0.0f32; 3]; h.width * h.height];
+    bytemuck::cast_slice_mut::<[f32; 3], u8>(&mut data).copy_from_slice(body);
     Some(SourceImage {
         width: h.width,
         height: h.height,
@@ -154,13 +153,15 @@ fn write_cache(p: &Path, s: &SourceImage) {
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&(hj.len() as u32).to_le_bytes());
     out.extend_from_slice(&hj);
-    for px in &s.data {
-        for v in px {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-    if let Ok(mut f) = std::fs::File::create(p) {
-        let _ = f.write_all(&out);
+    out.extend_from_slice(bytemuck::cast_slice(&s.data));
+    // Write beside and rename, so a reader never sees a half-written file.
+    let Some(name) = p.file_name() else { return };
+    let tmp = p.with_file_name(format!("{}.tmp", name.to_string_lossy()));
+    if std::fs::File::create(&tmp)
+        .and_then(|mut f| f.write_all(&out))
+        .is_ok()
+    {
+        let _ = std::fs::rename(&tmp, p);
     }
 }
 
