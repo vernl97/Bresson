@@ -57,7 +57,8 @@ pub struct ViewData {
     tables: Vec<[f32; 4]>,
     /// Look strength, saturation, has tables, identity.
     look: [f32; 4],
-    out: [[f32; 3]; 3],
+    /// Output matrix rows, luminance weights in w.
+    out: [[f32; 4]; 3],
     /// Dodge key, light and dark compression, knee²; channel gains.
     dodge: [f32; 4],
     gain: [f32; 4],
@@ -284,12 +285,11 @@ impl GpuPreview {
             queue.write_buffer(&s.tables, 0, bytemuck::cast_slice(&view.tables));
             s.view = view.id;
         }
-        let row = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
         let params = Params {
             uv,
-            out0: row(view.out[0]),
-            out1: row(view.out[1]),
-            out2: row(view.out[2]),
+            out0: view.out[0],
+            out1: view.out[1],
+            out2: view.out[2],
             look: view.look,
             lut: [
                 LUT_DMIN as f32,

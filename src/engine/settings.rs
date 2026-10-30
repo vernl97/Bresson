@@ -206,7 +206,7 @@ choice_enum!(
 );
 
 /// Version of the conversion engine; part of [`AnalysisKey`].
-pub const ENGINE_VERSION: u32 = 4;
+pub const ENGINE_VERSION: u32 = 5;
 
 /// Every parameter that influences how a frame is rendered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -4,7 +4,7 @@
 struct Params {
     // Part of the negative to draw: u0, v0, u1, v1.
     uv: vec4<f32>,
-    // Linear MelissaRGB → linear sRGB, rows.
+    // Linear MelissaRGB → linear sRGB, rows; w: sRGB luminance weights.
     out0: vec4<f32>,
     out1: vec4<f32>,
     out2: vec4<f32>,
@@ -195,6 +195,29 @@ fn srgb_encode(v: f32) -> f32 {
     return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
 }
 
+// Soft gamut compression towards the grey of the same luminance
+// (color::compress_gamut).
+const GAMUT_KNEE: f32 = 0.8;
+
+fn compress_gamut(o: vec3<f32>) -> vec3<f32> {
+    let g = clamp(dot(vec3<f32>(p.out0.w, p.out1.w, p.out2.w), o), 0.0, 1.0);
+    var d = 0.0;
+    for (var c = 0u; c < 3u; c++) {
+        let v = o[c];
+        if (v < g) {
+            d = max(d, (g - v) / max(g, 1e-6));
+        } else if (v > g) {
+            d = max(d, (v - g) / max(1.0 - g, 1e-6));
+        }
+    }
+    if (d <= GAMUT_KNEE) {
+        return o;
+    }
+    let x = (d - GAMUT_KNEE) / (1.0 - GAMUT_KNEE);
+    let k = (GAMUT_KNEE + (1.0 - GAMUT_KNEE) * x / (1.0 + x)) / d;
+    return vec3<f32>(g) + (o - vec3<f32>(g)) * k;
+}
+
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let uv = mix(p.uv.xy, p.uv.zw, in.uv);
@@ -212,7 +235,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let c = clamp(pos, vec3<f32>(0.0), vec3<f32>(1.0));
     let lin = vec3<f32>(srgb_decode(c.r), srgb_decode(c.g), srgb_decode(c.b));
     let o = clamp(
-        vec3<f32>(dot(p.out0.xyz, lin), dot(p.out1.xyz, lin), dot(p.out2.xyz, lin)),
+        compress_gamut(vec3<f32>(dot(p.out0.xyz, lin), dot(p.out1.xyz, lin), dot(p.out2.xyz, lin))),
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );

@@ -578,10 +578,12 @@ fn tone_matched(chart: &Chart, rgb: &[[f64; 3]]) -> f64 {
             let e = interp(&curves[c], r[c].log10()).clamp(0.0, 1.0);
             color::srgb_decode(e as f32) as f64
         });
-        // Clip to the sRGB output gamut like the rendered patch.
+        // Map into the sRGB output gamut like the rendered patch.
+        let luma = color::output_luma(crate::engine::settings::OutputSpace::Srgb);
+        let srgb = color::mat_vec(&to_srgb, ideal).map(|v| v as f32);
         let ideal = color::mat_vec(
             &to_pp,
-            color::mat_vec(&to_srgb, ideal).map(|v| v.clamp(0.0, 1.0)),
+            color::compress_gamut(srgb, luma).map(|v| v.clamp(0.0, 1.0) as f64),
         );
         sum += color::delta_e2000(
             color::rgb_to_lab(&PROPHOTO, ideal),

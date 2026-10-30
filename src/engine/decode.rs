@@ -13,6 +13,7 @@ use rawler::rawimage::RawPhotometricInterpretation;
 use serde::{Deserialize, Serialize};
 
 use super::color::{self, Mat3};
+use super::icc;
 
 pub const RAW_EXTENSIONS: &[&str] = &[
     "dng", "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf", "rw2", "pef",
@@ -65,7 +66,14 @@ pub struct SourceInfo {
     /// The TIFF/DNG Software tag (e.g. "VueScan 9.8", "SilverFast 9").
     #[serde(default)]
     pub software: String,
+    /// A bitmap linearised with its embedded profile's own (non-sRGB) tone
+    /// curves, so a Linear Scan source has no sRGB decode to undo.
+    #[serde(default)]
+    pub icc_trc: bool,
 }
+
+/// Bumped when decoding changes, so cached proxies are decoded again.
+pub const DECODE_VERSION: u32 = 1;
 
 /// Linear source pixels (camera RGB for RAW, linear RGB for bitmaps).
 #[derive(Clone, Serialize, Deserialize)]
@@ -107,25 +115,57 @@ pub fn load(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
 }
 
 fn load_bitmap(path: &Path) -> Result<SourceImage> {
-    let dynimg = image::ImageReader::open(path)
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::open(path)
         .with_context(|| format!("open {}", path.display()))?
         .with_guessed_format()?
-        .decode()
+        .into_decoder()
+        .with_context(|| format!("decode {}", path.display()))?;
+    let profile = decoder
+        .icc_profile()
+        .ok()
+        .flatten()
+        .and_then(|b| icc::parse(&b));
+    let dynimg = image::DynamicImage::from_decoder(decoder)
         .with_context(|| format!("decode {}", path.display()))?;
     let (w, h) = (dynimg.width() as usize, dynimg.height() as usize);
     let rgb = dynimg.into_rgb32f();
-    let dec = color::srgb_decode_lut();
-    let data: Vec<[f32; 3]> = rgb
-        .pixels()
-        .map(|p| [dec.get(p.0[0]), dec.get(p.0[1]), dec.get(p.0[2])])
-        .collect();
-    // Scans are assumed to be sRGB-primaried and gamma encoded.
-    let to_mel = color::to_f32(&color::rgb_to_rgb(&color::SRGB, &color::MELISSA));
+    // Scans are read in their embedded profile's primaries and tone curve.
+    // Without one (or with sRGB's) they are taken as sRGB.
+    let srgb = color::rgb_to_rgb(&color::SRGB, &color::MELISSA);
+    let to_mel = match &profile {
+        Some(p) if !p.is_srgb_primaries() => p.to_melissa(),
+        _ => srgb,
+    };
+    let trc = profile.filter(|p| !p.is_srgb_trc()).map(|p| p.trc);
+    let data: Vec<[f32; 3]> = match &trc {
+        None => {
+            let dec = color::srgb_decode_lut();
+            rgb.pixels()
+                .map(|p| [dec.get(p.0[0]), dec.get(p.0[1]), dec.get(p.0[2])])
+                .collect()
+        }
+        Some(trc) => {
+            const N: usize = 4096;
+            let luts: Vec<Vec<f32>> = trc
+                .iter()
+                .map(|c| (0..=N).map(|i| c.eval(i as f64 / N as f64) as f32).collect())
+                .collect();
+            let dec = |c: usize, v: f32| {
+                let x = v.clamp(0.0, 1.0) * N as f32;
+                let i = (x as usize).min(N - 1);
+                luts[c][i] + (luts[c][i + 1] - luts[c][i]) * (x - i as f32)
+            };
+            rgb.pixels()
+                .map(|p| [dec(0, p.0[0]), dec(1, p.0[1]), dec(2, p.0[2])])
+                .collect()
+        }
+    };
     Ok(SourceImage {
         width: w,
         height: h,
         data,
-        to_melissa: to_mel,
+        to_melissa: color::to_f32(&to_mel),
         as_shot_wb: [1.0; 3],
         is_raw: false,
         info: SourceInfo {
@@ -136,6 +176,7 @@ fn load_bitmap(path: &Path) -> Result<SourceImage> {
             exposure: None,
             linear_raw: false,
             software: tiff_software(path).unwrap_or_default(),
+            icc_trc: trc.is_some(),
         },
     })
 }
@@ -254,6 +295,7 @@ fn load_raw(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
         exposure: raw_exposure(path),
         linear_raw: matches!(raw.photometric, RawPhotometricInterpretation::LinearRaw),
         software: tiff_software(path).unwrap_or_default(),
+        icc_trc: false,
     };
 
     let fast = matches!(&raw.photometric, RawPhotometricInterpretation::Cfa(c) if c.cfa.is_rgb())

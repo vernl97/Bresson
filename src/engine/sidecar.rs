@@ -208,11 +208,13 @@ pub fn save_defaults(d: &Defaults) -> Result<()> {
     Ok(())
 }
 
-/// Disk cache for decoded analysis proxies (keyed by path, size and mtime).
+/// Disk cache for decoded analysis proxies (keyed by decoder version, path,
+/// size and mtime).
 pub fn proxy_cache_path(image: &Path) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let md = std::fs::metadata(image).ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    super::decode::DECODE_VERSION.hash(&mut h);
     image.hash(&mut h);
     md.len().hash(&mut h);
     md.modified().ok()?.hash(&mut h);

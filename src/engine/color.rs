@@ -512,6 +512,49 @@ pub fn output_transform(space: super::settings::OutputSpace) -> ([[f32; 3]; 3], 
     }
 }
 
+/// Luminance weights of an output space's linear RGB (the Y row of its
+/// RGB → XYZ matrix), for [`compress_gamut`].
+pub fn output_luma(space: super::settings::OutputSpace) -> [f32; 3] {
+    use super::settings::OutputSpace::*;
+    let p = match space {
+        Srgb => &SRGB,
+        AdobeRgb => &ADOBE_RGB,
+        ProPhoto => &PROPHOTO,
+    };
+    let y = rgb_to_xyz(p)[1];
+    [y[0] as f32, y[1] as f32, y[2] as f32]
+}
+
+/// Where gamut compression starts, as a share of the distance from grey to
+/// the gamut boundary.
+pub const GAMUT_KNEE: f32 = 0.8;
+
+/// Soft gamut compression of linear output RGB. Each colour is moved
+/// towards the grey of its own luminance (so hue and lightness are kept),
+/// and only when its chroma is past [`GAMUT_KNEE`] of the way to the gamut
+/// boundary in its direction; beyond that the remaining distance is eased
+/// in so nothing reaches the boundary. Hard per-channel clipping instead
+/// flattens saturated colours and turns their hue (red towards orange).
+#[inline]
+pub fn compress_gamut(o: [f32; 3], luma: [f32; 3]) -> [f32; 3] {
+    let g = (o[0] * luma[0] + o[1] * luma[1] + o[2] * luma[2]).clamp(0.0, 1.0);
+    // Distance to the boundary, 1 = on it.
+    let mut d = 0.0f32;
+    for v in o {
+        if v < g {
+            d = d.max((g - v) / g.max(1e-6));
+        } else if v > g {
+            d = d.max((v - g) / (1.0 - g).max(1e-6));
+        }
+    }
+    if d <= GAMUT_KNEE {
+        return o;
+    }
+    let x = (d - GAMUT_KNEE) / (1.0 - GAMUT_KNEE);
+    let k = (GAMUT_KNEE + (1.0 - GAMUT_KNEE) * x / (1.0 + x)) / d;
+    o.map(|v| g + (v - g) * k)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,6 +616,33 @@ mod tests {
                 adobe(v)
             );
         }
+    }
+
+    #[test]
+    fn gamut_compression_keeps_in_gamut_colours_and_hue() {
+        use super::super::settings::OutputSpace;
+        let w = output_luma(OutputSpace::Srgb);
+        assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+        // Well inside the gamut: untouched.
+        let c = [0.4, 0.3, 0.2];
+        assert_eq!(compress_gamut(c, w), c);
+        // A ProPhoto red far outside sRGB lands inside, with its luminance
+        // and its hue (the direction from grey) kept.
+        let m = to_f32(&rgb_to_rgb(&MELISSA, &SRGB));
+        let red = mul3(&m, [0.6, 0.05, 0.03]);
+        assert!(red.iter().any(|v| *v < 0.0 || *v > 1.0), "{red:?}");
+        let out = compress_gamut(red, w);
+        assert!(out.iter().all(|v| (0.0..=1.0).contains(v)), "{out:?}");
+        let y = |c: [f32; 3]| c[0] * w[0] + c[1] * w[1] + c[2] * w[2];
+        assert!((y(out) - y(red)).abs() < 1e-5);
+        let g = y(red);
+        let r = (out[1] - g) / (red[1] - g);
+        for c in 0..3 {
+            assert!(((out[c] - g) - r * (red[c] - g)).abs() < 1e-5);
+        }
+        // Monotone: more chroma never comes out with less.
+        let more = compress_gamut(mul3(&m, [0.7, 0.03, 0.02]), w);
+        assert!(more[0] - y(more) >= out[0] - y(out) - 1e-4);
     }
 
     #[test]

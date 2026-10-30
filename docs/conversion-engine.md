@@ -60,9 +60,17 @@ file ──decode──▶ SourceImage (linear camera RGB)
   develop. The default crop is applied relative to the active area.
 - EXIF orientation is applied to the pixels.
 
-**Bitmaps** (TIFF/JPEG/PNG) are decoded to float, run through the sRGB
-decode, and treated as sRGB primaries (`to_melissa` = sRGB → MelissaRGB with
-Bradford adaptation).
+**Bitmaps** (TIFF/JPEG/PNG) are decoded to float and read in their embedded
+ICC profile (`icc.rs`). An RGB matrix/TRC profile (rXYZ/gXYZ/bXYZ +
+rTRC/gTRC/bTRC: `curv` gamma or table, or `para`) gives `to_melissa` (its D50
+matrix into MelissaRGB, rows normalised so its white stays neutral) and the
+per-channel linearising curves (4096-entry tables). Primaries within 0.02 of
+sRGB's and tone curves within 0.005 of sRGB's are taken as exactly sRGB.
+Without a profile, or with a LUT-based one, a bitmap is treated as sRGB (the
+sRGB decode, `to_melissa` = sRGB → MelissaRGB with Bradford adaptation).
+`SourceInfo::icc_trc` records that the file's own non-sRGB tone curves were
+used. The proxy cache is keyed on `decode::DECODE_VERSION`, so a change in
+decoding decodes cached proxies again.
 
 The working space throughout is **MelissaRGB**: ProPhoto primaries, D50
 white, sRGB tone response (`color.rs`).
@@ -81,7 +89,10 @@ measured against.
 
 - **`auto_base`**: sort all pixels of the **uncropped** source by R+G+B and
   average those between the 98.5th and 99.5th percentile. The crop is
-  deliberately ignored so the rebate is always available.
+  deliberately ignored so the rebate is always available. Pixels with any
+  channel at or above `BASE_CLIP = 0.98` are left out first (clipped light
+  past the film, sprocket holes, or a rebate exposed past white has no base
+  colour), unless fewer than 1 % of pixels would remain.
 - `FilmBase::Auto` uses the roll base when there is one, otherwise
   `auto_base`. The roll base (`roll_base`, used by the app's roll convert
   and the CLI's `convert --roll`) is the per‑channel median of the frames'
@@ -168,6 +179,8 @@ For every pixel, in this order:
    aspect) → crop insets.
 3. *Linear Scan only*: values are sRGB‑encoded again (undoing the bitmap
    decode, so the file's values are used as linear), and so is the base.
+   Not when the file's own profile linearised it (`icc_trc`): that already
+   reads a gamma‑1.0 file as linear.
 4. **Base gains** in source space, then **`to_melissa`** to linear MelissaRGB.
 5. **Density above the base**: `D = log10(0.97 / max(v, 1e‑5))`.
    The base is ≈ 0; denser film is positive; anything thinner than the base
@@ -517,8 +530,20 @@ B+W frames get no look and saturation 1.
 ### 8.2 Output colour — `Renderer::output`, `color::output_transform`
 
 sRGB‑decode → linear MelissaRGB → 3×3 matrix (with Bradford D50 → D65 for
-sRGB / Adobe RGB) → encode: sRGB curve, Adobe gamma 563/256, or the ProPhoto
-curve. `export.rs` embeds a matching ICC profile and writes TIFF (8/16‑bit,
+sRGB / Adobe RGB) → soft gamut compression → encode: sRGB curve, Adobe gamma
+563/256, or the ProPhoto curve.
+
+**Gamut compression** (`color::compress_gamut`). The print is made in
+ProPhoto primaries, so saturated reds, oranges and cyans can fall outside
+sRGB or Adobe RGB. Clipping each channel would flatten them and turn their
+hue (red towards orange). Instead, with `g` the output‑space luminance
+(`output_luma`, clamped to 0..1), every colour has a distance `d` to the
+gamut boundary along its direction from grey `g` (1 = on it: the largest of
+`(g − v)/g` and `(v − g)/(1 − g)` over its channels). Colours with
+`d ≤ GAMUT_KNEE = 0.8` are untouched; beyond it the chroma is scaled by
+`(0.8 + 0.2·x/(1 + x))/d`, `x = (d − 0.8)/0.2`, so it approaches the boundary
+without reaching it. Luminance and hue are kept. The GPU preview does the
+same with the luminance weights in the output matrix rows' `w`. `export.rs` embeds a matching ICC profile and writes TIFF (8/16‑bit,
 optional ZIP) or JPEG with EXIF built from the film metadata.
 
 ### 8.3 Sharpening — `look::sharpen`
@@ -607,7 +632,7 @@ two qualify).
 d    = density (+ dodge offset · gain_c)
 p    = [lut_R(d_R), lut_G(d_G), lut_B(d_B)]        # encoded MelissaRGB
 p    = look(p)                                     # converted frames only
-out  = encode_out(M_out · srgb_decode(p))
+out  = encode_out(compress_gamut(M_out · srgb_decode(p)))
 ```
 
 then sharpening over the whole buffer.
@@ -628,7 +653,7 @@ Where it runs:
 ## 11. What triggers a re‑analysis
 
 `Settings::analysis_key()` → `AnalysisKey`: engine version
-(`ENGINE_VERSION = 4`), source, image type, colour model, pre‑saturation,
+(`ENGINE_VERSION = 5`), source, image type, colour model, pre‑saturation,
 crosstalk matrix and strength, border buffer, film base mode and sample,
 flat field. These change the
 density image or how it is measured, so changing any of them needs

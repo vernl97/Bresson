@@ -82,17 +82,28 @@ pub struct Analysis {
 
 // ---- film base -------------------------------------------------------------------
 
+/// Source values at or above this are clipped: light past the film, or a
+/// rebate exposed past the sensor's white. Neither is the base's colour.
+const BASE_CLIP: f32 = 0.98;
+
 /// Estimate the film base (brightest, unexposed area) in source space:
-/// the average of pixels between the 98.5th and 99.5th brightness percentile.
+/// the average of pixels between the 98.5th and 99.5th brightness percentile,
+/// leaving out clipped pixels (unless nearly everything is clipped).
 /// Always uses the entire image (uncropped) so that film borders remain
 /// available for mask neutralisation even when a crop has been set.
 pub fn auto_base(src: &SourceImage, _s: &Settings) -> [f32; 3] {
     let d = &src.data;
-    let mut sums: Vec<(f32, usize)> = d
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p[0] + p[1] + p[2], i))
-        .collect();
+    let sums_where = |keep: &dyn Fn(&[f32; 3]) -> bool| -> Vec<(f32, usize)> {
+        d.iter()
+            .enumerate()
+            .filter(|(_, p)| keep(p))
+            .map(|(i, p)| (p[0] + p[1] + p[2], i))
+            .collect()
+    };
+    let mut sums = sums_where(&|p| p.iter().all(|v| *v < BASE_CLIP));
+    if sums.len() < d.len() / 100 {
+        sums = sums_where(&|_| true);
+    }
     if sums.is_empty() {
         return [1.0; 3];
     }
@@ -276,7 +287,12 @@ pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Nega
     let edit_only = s.image_type == ImageType::EditOnly;
     // Already positive scans keep their own levels: density is −log10 of
     // the linear value.
-    let base = if !src.is_raw && s.source == super::settings::Source::LinearScan {
+    // Bitmaps are decoded as sRGB-encoded unless their profile says
+    // otherwise; linear (gamma 1.0) scans hold linear values, so undo that
+    // decode.
+    let linear_scan =
+        !src.is_raw && !src.info.icc_trc && s.source == super::settings::Source::LinearScan;
+    let base = if linear_scan {
         base.map(color::srgb_encode)
     } else {
         base
@@ -287,9 +303,6 @@ pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Nega
         (base_multipliers(src, s, base), BASE_LEVEL)
     };
     let to_lin = src.to_melissa;
-    // Bitmaps are decoded as sRGB-encoded; linear (gamma 1.0) scans hold
-    // linear values, so undo that decode.
-    let linear_scan = !src.is_raw && s.source == super::settings::Source::LinearScan;
     let m = density_matrix(s);
     let mono = s.is_monochrome();
     let yw = DENSITY_WEIGHTS;
@@ -1245,6 +1258,7 @@ pub struct Renderer {
     converted: bool,
     look: Look,
     out_m: [[f32; 3]; 3],
+    out_luma: [f32; 3],
     out_enc: color::EncodeLut,
     sharpen: Option<presets::SharpenDef>,
     dodge: Option<Dodge>,
@@ -1262,6 +1276,7 @@ impl Renderer {
             converted: levels.is_some(),
             look: Look::new(s),
             out_m,
+            out_luma: color::output_luma(space),
             out_enc: color::EncodeLut::new(f),
             sharpen: presets::sharpening(s.sharpening),
             dodge: levels.and_then(|l| Dodge::new(s, l)),
@@ -1286,9 +1301,14 @@ impl Renderer {
 
     /// What a GPU renderer needs to draw the same image: the per-channel
     /// curve tables (also for the unconverted view), the look, and the
-    /// linear MelissaRGB → sRGB matrix of a display preview.
-    pub fn gpu_parts(&self) -> (&CurveLut, Option<&Look>, [[f32; 3]; 3]) {
-        (&self.lut, self.converted.then_some(&self.look), self.out_m)
+    /// rows of the linear MelissaRGB → output matrix of a display preview,
+    /// with the output's luminance weights (gamut compression) in `w`.
+    pub fn gpu_parts(&self) -> (&CurveLut, Option<&Look>, [[f32; 4]; 3]) {
+        let row = |i: usize| {
+            let r = self.out_m[i];
+            [r[0], r[1], r[2], self.out_luma[i]]
+        };
+        (&self.lut, self.converted.then_some(&self.look), [row(0), row(1), row(2)])
     }
 
     /// The dodge applied before the curves (see [`dodge`]), if any.
@@ -1319,7 +1339,7 @@ impl Renderer {
             dec.get(mel_enc[1]),
             dec.get(mel_enc[2]),
         ];
-        let o = color::mul3(&self.out_m, lin);
+        let o = color::compress_gamut(color::mul3(&self.out_m, lin), self.out_luma);
         [
             self.out_enc.get(o[0]),
             self.out_enc.get(o[1]),
@@ -1708,6 +1728,70 @@ mod tests {
         }
     }
 
+    /// A scan saved in Adobe RGB or ProPhoto, with its profile embedded,
+    /// reads as the same densities as its linear pixels in that space.
+    #[test]
+    fn tagged_scans_read_in_their_profile() {
+        let chart = crate::engine::testchart::negative(0.0);
+        let dir = std::env::temp_dir().join(format!("nlp_icc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, space: OutputSpace| {
+            let p = dir.join(name);
+            let (m, enc) = color::output_transform(space);
+            let px: Vec<[f32; 3]> = chart
+                .src
+                .data
+                .iter()
+                .map(|v| color::mul3(&m, color::mul3(&chart.src.to_melissa, *v)).map(enc))
+                .collect();
+            let icc = color::icc_for(space);
+            crate::engine::export::write_tiff(
+                &p,
+                chart.src.width,
+                chart.src.height,
+                &px,
+                true,
+                false,
+                &icc,
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
+            decode::load(&p, None).unwrap()
+        };
+        let adobe = write("adobe.tif", OutputSpace::AdobeRgb);
+        let pro = write("prophoto.tif", OutputSpace::ProPhoto);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(adobe.info.icc_trc && pro.info.icc_trc);
+        let s = Settings::default();
+        let density = |src: &SourceImage| prepare_negative(src, &s, resolve_base(src, &s, None));
+        for (name, src, space, prim) in [
+            ("Adobe RGB", &adobe, OutputSpace::AdobeRgb, &color::ADOBE_RGB),
+            ("ProPhoto", &pro, OutputSpace::ProPhoto, &color::PROPHOTO),
+        ] {
+            // The same linear pixels, handed over in that space directly.
+            let (m, _) = color::output_transform(space);
+            let mut lin = chart.src.clone();
+            for v in &mut lin.data {
+                *v = color::mul3(&m, color::mul3(&chart.src.to_melissa, *v));
+            }
+            lin.to_melissa = color::to_f32(&color::rgb_to_rgb(prim, &color::MELISSA));
+            let truth = density(&lin);
+            let d = density(src);
+            let worst = chart
+                .patches
+                .iter()
+                .map(|p| {
+                    let i = p.pixels[0];
+                    (0..3)
+                        .map(|c| (d.data[i][c] - truth.data[i][c]).abs())
+                        .fold(0.0f32, f32::max)
+                })
+                .fold(0.0f32, f32::max);
+            assert!(worst < 0.01, "{name}: density differs by {worst}");
+        }
+    }
+
     /// The same negative scanned to a linear and to a gamma-encoded TIFF
     /// gives the same densities once the source says which it is.
     #[test]
@@ -1819,14 +1903,16 @@ mod tests {
     /// pixels thinner than the base are dropped as flare (it printed black).
     #[test]
     fn roll_base_follows_each_frames_scan_exposure() {
-        let (src, _) = synthetic_negative();
+        // The other frames are scanned darker, so no value passes white
+        // (clipped pixels are not read as base).
+        let (bright, _) = synthetic_negative();
         let s = Settings::default();
-        let own = resolve_base(&src, &s, None);
-        let mut bright = src.clone();
+        let mut dim = bright.clone();
         let gain = [1.5f32, 1.7, 1.6];
-        for p in bright.data.iter_mut() {
-            *p = std::array::from_fn(|c| p[c] * gain[c]);
+        for p in dim.data.iter_mut() {
+            *p = std::array::from_fn(|c| p[c] / gain[c]);
         }
+        let own = resolve_base(&dim, &s, None);
         let roll = roll_base(&[own, own, resolve_base(&bright, &s, None)]);
         let thinnest = |src: &SourceImage, base: [f32; 3]| {
             prepare_negative(src, &s, base)
@@ -1840,7 +1926,7 @@ mod tests {
         // The roll's base as it is reads the whole frame thinner.
         assert!(thinnest(&bright, roll) < -0.15);
         // Frames scanned at the roll's exposure keep the roll's base.
-        let base = resolve_base(&src, &s, Some(roll));
+        let base = resolve_base(&dim, &s, Some(roll));
         assert!((0..3).all(|c| (base[c] - roll[c]).abs() < 1e-6), "{base:?}");
     }
 
@@ -2400,6 +2486,36 @@ mod tests {
         }
     }
 
+    /// Light past the film (sprocket holes, holder gaps) clips; a band of it
+    /// larger than the top 1.5 % must not be read as the base.
+    #[test]
+    fn auto_base_ignores_clipped_light() {
+        let mut data = vec![[0.1f32, 0.1, 0.1]; 100 * 100];
+        for (i, p) in data.iter_mut().enumerate() {
+            let y = i / 100;
+            if y < 5 {
+                *p = [0.9, 0.6, 0.4]; // rebate
+            } else if y >= 97 {
+                *p = [1.0, 1.0, 1.0]; // clipped light, 3 %
+            }
+        }
+        let src = SourceImage {
+            width: 100,
+            height: 100,
+            data,
+            to_melissa: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            as_shot_wb: [1.0; 3],
+            is_raw: false,
+            info: Default::default(),
+        };
+        let b = auto_base(&src, &Settings::default());
+        assert!((b[0] - 0.9).abs() < 1e-4 && (b[2] - 0.4).abs() < 1e-4, "{b:?}");
+        // With everything clipped there is nothing else to read.
+        let mut all = src.clone();
+        all.data.fill([1.0, 1.0, 1.0]);
+        assert_eq!(auto_base(&all, &Settings::default()), [1.0; 3]);
+    }
+
     #[test]
     fn auto_base_samples_entire_image_regardless_of_crop() {
         let mut data = vec![[0.1f32, 0.1, 0.1]; 100 * 100];
@@ -2434,3 +2550,4 @@ mod tests {
         assert!((base_cropped[0] - 0.9).abs() < 1e-3);
     }
 }
+
