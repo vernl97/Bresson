@@ -154,11 +154,22 @@ pub struct ScanDefaults {
     pub infrared: bool,
     pub multi_exposure: bool,
     pub passes: i64,
+    /// Scanners (by panel key) whose 16-bit data has a tone curve applied.
+    pub gamma_encoded: std::collections::BTreeSet<String>,
+    /// The source picked per flatbed scanner (by panel key).
+    pub source: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for ScanDefaults {
     fn default() -> Self {
-        Self { dpi: 3600, infrared: true, multi_exposure: false, passes: 1 }
+        Self {
+            dpi: 3600,
+            infrared: true,
+            multi_exposure: false,
+            passes: 1,
+            gamma_encoded: Default::default(),
+            source: Default::default(),
+        }
     }
 }
 

@@ -52,6 +52,21 @@ pub fn write(path: &Path, rgb: &[u16], width: usize, height: usize, info: &ScanD
     Ok(())
 }
 
+/// Write `rgb` as a 16-bit RGB TIFF (deflate) for scans with a tone curve
+/// already applied; without the `opticfilm` Software tag it opens as a TIF Scan.
+pub fn write_tiff16(path: &Path, rgb: &[u16], width: usize, height: usize, dpi: u32, software: &str) -> Result<()> {
+    use tiff::encoder::{Compression, DeflateLevel, Rational as TRational, TiffEncoder, colortype};
+    use tiff::tags::{ResolutionUnit, Tag};
+    anyhow::ensure!(rgb.len() == width * height * 3, "scan is {} samples, expected {width}×{height}×3", rgb.len());
+    let file = BufWriter::new(File::create(path).with_context(|| format!("create {}", path.display()))?);
+    let mut enc = TiffEncoder::new(file)?.with_compression(Compression::Deflate(DeflateLevel::Balanced));
+    let mut img = enc.new_image::<colortype::RGB16>(width as u32, height as u32)?;
+    img.resolution(ResolutionUnit::Inch, TRational { n: dpi, d: 1 });
+    img.encoder().write_tag(Tag::Software, software)?;
+    img.write_data(rgb)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1799,16 +1799,32 @@ mod ui_tests {
         assert!(h.state().view == View::Folder && !h.state().frames.is_empty());
     }
 
-    /// Step until the Scan panel's worker command has finished.
-    fn wait_scan(h: &mut Harness<'_, NlpApp>) {
+    /// Step until `done` holds and the Scan panel's worker is idle.
+    fn wait_scan(h: &mut Harness<'_, NlpApp>, done: impl Fn(&NlpApp) -> bool) {
         let t0 = std::time::Instant::now();
-        while h.state().scan.busy && t0.elapsed().as_secs() < 60 {
+        while (h.state().scan.busy || !done(h.state())) && t0.elapsed().as_secs() < 60 {
             h.step();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(!h.state().scan.busy, "scanner still busy: {}", h.state().scan.status);
         assert!(h.state().scan.error.is_none(), "scan failed: {:?}", h.state().scan.error);
+        assert!(!h.state().scan.busy && done(h.state()), "scanner still busy: {}", h.state().scan.status);
         h.run_steps(2);
+    }
+
+    fn scan_roll(tag: &str) -> (PathBuf, Option<PathBuf>, Harness<'static, NlpApp>) {
+        let dir = std::env::temp_dir().join(format!("nlp_scan_ui_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
+        let builder = Harness::builder().with_size(egui::vec2(1480.0, 940.0));
+        let builder = if out.is_some() { builder.wgpu() } else { builder };
+        let d = dir.clone();
+        let mut h = builder.build_eframe(move |cc| NlpApp::new(cc, Some(d.clone())));
+        h.run_steps(3);
+        h.state_mut().roll.dialog = None;
+        h.state_mut().toggle_scan_panel();
+        wait_scan(&mut h, |a| a.scan.info.is_none());
+        (dir, out, h)
     }
 
     /// The Scan panel scans two frames from a simulated 8200i SE into an empty
@@ -1816,28 +1832,16 @@ mod ui_tests {
     /// set it also saves a screenshot of the panel.
     #[test]
     fn scan_panel_scans_into_the_roll() {
-        let dir = std::env::temp_dir().join(format!("nlp_scan_ui_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
-        let builder = Harness::builder().with_size(egui::vec2(1480.0, 940.0));
-        let builder = if out.is_some() { builder.wgpu() } else { builder };
-        let mut h = builder.build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
-        h.run_steps(3);
-        {
-            let app = h.state_mut();
-            app.roll.dialog = None;
-            app.toggle_scan_panel();
-            app.open_scanner(scanner::ScannerChoice::Simulated("plustek-opticfilm-8200i-se".into()));
-        }
-        wait_scan(&mut h);
+        let (dir, out, mut h) = scan_roll("film");
+        h.state_mut().open_scanner(scanner::ScannerChoice::Simulated("plustek-opticfilm-8200i-se".into()));
+        wait_scan(&mut h, |a| a.scan.info.is_some());
         assert!(h.state().scan.info.as_ref().is_some_and(|i| i.scan_ready));
         h.state_mut().prescan();
-        wait_scan(&mut h);
-        h.state_mut().scan_frame();
-        wait_scan(&mut h);
-        h.state_mut().scan_frame(); // Scan next
-        wait_scan(&mut h);
+        wait_scan(&mut h, |_| true);
+        h.state_mut().scan_frames();
+        wait_scan(&mut h, |a| a.scan.saved == 1);
+        h.state_mut().scan_frames(); // Scan next
+        wait_scan(&mut h, |a| a.scan.saved == 2);
         settle(&mut h, 60.0);
         let app = h.state();
         let names: Vec<&str> = app.frames.iter().map(|f| f.name.as_str()).collect();
@@ -1849,6 +1853,41 @@ mod ui_tests {
         assert!(dir.join("NLP").join("scan_001.ir.tif").exists());
         if let Some(out) = out {
             shot(&mut h, &out, "scan_panel");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The simulated SANE flatbed: three boxed frames on the transparency
+    /// unit's strip scan into three frames that convert.
+    #[test]
+    fn scan_panel_scans_flatbed_boxes() {
+        let (dir, out, mut h) = scan_roll("flatbed");
+        h.state_mut().open_scanner(scanner::ScannerChoice::SimulatedFlatbed);
+        wait_scan(&mut h, |a| a.scan.info.is_some());
+        assert_eq!(h.state().scan.info.as_ref().map(|i| i.kind), Some(scanner::ScannerKind::Flatbed));
+        assert!(h.state().scan.crops.is_empty(), "flatbeds start without boxes");
+        h.state_mut().prescan();
+        wait_scan(&mut h, |_| true);
+        // The strip's first three frames (24 × 36 mm at 38 mm pitch from 10 mm, on a 63.5 × 228.6 mm unit).
+        let frame = |k: f32| [19.75 / 63.5, (10.0 + 38.0 * k) / 228.6, 43.75 / 63.5, (46.0 + 38.0 * k) / 228.6];
+        {
+            let app = h.state_mut();
+            app.defaults.scan.dpi = 300;
+            app.scan.crops = (0..3).map(|k| frame(k as f32)).collect();
+        }
+        h.run_steps(2);
+        if let Some(out) = &out {
+            shot(&mut h, out, "scan_panel_flatbed");
+        }
+        h.state_mut().scan_frames();
+        wait_scan(&mut h, |a| a.scan.saved == 3);
+        settle(&mut h, 60.0);
+        let app = h.state();
+        let names: Vec<&str> = app.frames.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["scan_001.dng", "scan_002.dng", "scan_003.dng"]);
+        for f in &app.frames {
+            assert!(f.sc.is_converted(), "{} converted", f.name);
+            assert_eq!(f.sc.settings.source, crate::engine::settings::Source::VueScanRaw, "{}", f.name);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

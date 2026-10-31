@@ -326,7 +326,9 @@ impl NlpApp {
     }
 
     pub fn folder_ui(&mut self, ui: &mut egui::Ui) {
-        if self.frames.is_empty() {
+        // An open roll shows its (maybe still empty) grid, so its Scan button is reachable.
+        let empty_roll = self.folder.is_some() && !self.single_mode && !self.roll.projects_open;
+        if self.frames.is_empty() && !empty_roll {
             if self.roll.projects_open && !self.defaults.projects.is_empty() {
                 self.projects_ui(ui);
             } else {
@@ -610,7 +612,17 @@ impl NlpApp {
                     .fill(theme::BG)
                     .inner_margin(egui::Margin::same(16)),
             )
-            .show(ui, |ui| self.grid(ui));
+            .show(ui, |ui| {
+                if self.frames.is_empty() {
+                    ui.add_space((ui.available_height() * 0.35).max(24.0));
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("No scans in this roll yet").font(theme::medium(16.0)));
+                        ui.label(RichText::new("Drop scans here, or scan film into it with Scan.").color(theme::MUTED));
+                    });
+                } else {
+                    self.grid(ui);
+                }
+            });
     }
 
     fn folder_shortcuts(&mut self, ctx: &egui::Context) {
