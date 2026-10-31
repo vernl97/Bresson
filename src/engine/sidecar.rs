@@ -41,6 +41,17 @@ pub struct Sidecar {
     pub analysis: Option<Analysis>,
     pub roll: Option<RollData>,
     pub metadata: FilmMetadata,
+    /// Pick / reject mark from culling the roll.
+    pub flag: Flag,
+}
+
+/// A frame's cull mark.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Flag {
+    #[default]
+    None,
+    Pick,
+    Reject,
 }
 
 impl Sidecar {
@@ -110,6 +121,7 @@ fn parse(s: &str) -> Option<Sidecar> {
             .then(|| serde_json::from_value(field("roll")).ok())
             .flatten(),
         metadata: serde_json::from_value(field("metadata")).unwrap_or_default(),
+        flag: serde_json::from_value(field("flag")).unwrap_or_default(),
     })
 }
 

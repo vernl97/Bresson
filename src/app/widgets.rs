@@ -937,13 +937,9 @@ pub fn segmented_locked<T: Copy + PartialEq>(
     changed
 }
 
-/// Collapsible section header with a chevron. Returns whether the section
-/// is open; the state is remembered per title.
-pub fn fold(ui: &mut Ui, title: &str) -> bool {
-    fold_with(ui, title, true)
-}
-
-/// A [`fold`] that starts collapsed when `default_open` is false.
+/// Collapsible section header with a chevron, starting collapsed when
+/// `default_open` is false. Returns whether the section is open; the state
+/// is remembered per title.
 pub fn fold_with(ui: &mut Ui, title: &str, default_open: bool) -> bool {
     fold_section(ui, title, default_open, false).0
 }

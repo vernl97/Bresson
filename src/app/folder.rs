@@ -4,7 +4,9 @@
 use eframe::egui::{self, Color32, RichText, Sense, pos2, vec2};
 
 use super::widgets::{self, Icon, icon_button, theme};
-use super::{NlpApp, ProxyState};
+use super::NlpApp;
+use super::grid::GridFilter;
+pub use super::grid::{GRID_VISIBLE, GridState};
 use crate::engine::settings::*;
 
 /// One-line hint shown under the scan source.
@@ -19,12 +21,6 @@ pub fn source_instructions(s: Source) -> &'static str {
     }
 }
 
-/// egui memory keys: the grid's column count (for the arrow keys) and the
-/// cell to scroll into view.
-const GRID_COLS: &str = "grid_cols";
-/// The frame indices the grid painted last, for visible-first loading.
-pub const GRID_VISIBLE: &str = "grid_visible";
-const GRID_SCROLL_TO: &str = "grid_scroll_to";
 
 /// Short name for the scan source chip.
 fn source_short(s: Source) -> &'static str {
@@ -212,18 +208,6 @@ pub fn flat_field_ui(
     });
 }
 
-#[derive(Clone, Copy)]
-enum CellAction {
-    Open,
-    Convert,
-    ConvertRoll,
-    Export,
-    Copy,
-    Paste,
-    Unconvert,
-    DetectFrame,
-    Rotate(bool),
-}
 
 impl NlpApp {
     pub fn sel_vec(&self) -> Vec<usize> {
@@ -340,9 +324,11 @@ impl NlpApp {
         let ctx = ui.ctx().clone();
         self.folder_shortcuts(&ctx);
         let cmd = egui::Modifiers::COMMAND;
+        let key_text = |m, k| RichText::new(widgets::shortcut(&ctx, m, k)).color(theme::FAINT);
         let export_key = widgets::shortcut(&ctx, cmd, egui::Key::E);
-        let select_key = widgets::shortcut(&ctx, cmd, egui::Key::A);
-        let paste_key = widgets::shortcut(&ctx, cmd, egui::Key::V);
+        let (picks, needs_look) = self.filter_counts();
+        // With nothing selected the actions cover the frames on show.
+        let shown = self.shown_frames();
         egui::Panel::top("folder_top")
             .exact_size(44.0)
             .frame(
@@ -353,7 +339,7 @@ impl NlpApp {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    // Breadcrumb: Rolls / <roll name>.
+                    // Left: where you are. Breadcrumb, then the roll's film and scan source.
                     let back = ui
                         .add(egui::Button::new(RichText::new("‹  Rolls").color(theme::MUTED)).frame(false))
                         .on_hover_text("Back to all rolls")
@@ -363,86 +349,89 @@ impl NlpApp {
                     }
                     if let Some(f) = self.folder.clone() {
                         ui.label(RichText::new("/").color(theme::FAINT));
-                        let name = f
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
+                        let name = self
+                            .roll
+                            .info
+                            .as_ref()
+                            .map(|r| r.name.clone())
+                            .filter(|n| !n.trim().is_empty())
+                            .or_else(|| f.file_name().map(|n| n.to_string_lossy().to_string()))
                             .unwrap_or_else(|| f.display().to_string());
-                        let label = egui::Label::new(RichText::new(name).font(theme::medium(13.5)))
-                            .truncate();
-                        if self.single_mode {
-                            ui.add(label).on_hover_text(f.display().to_string());
-                        } else if ui
-                            .add(label.sense(Sense::click()))
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .on_hover_text(format!(
-                                "{}\nClick for roll info: film, camera, notes",
-                                f.display()
-                            ))
-                            .clicked()
+                        ui.scope(|ui| {
+                            ui.set_max_width(280.0);
+                            let label = egui::Label::new(RichText::new(name).font(theme::medium(13.5)))
+                                .truncate();
+                            if self.single_mode {
+                                ui.add(label).on_hover_text(f.display().to_string());
+                            } else if ui
+                                .add(label.sense(Sense::click()))
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(format!(
+                                    "{}\nClick for roll info: film, camera, notes",
+                                    f.display()
+                                ))
+                                .clicked()
+                            {
+                                self.open_roll_dialog(&f, false);
+                            }
+                        });
+                        let stock = self
+                            .roll
+                            .info
+                            .as_ref()
+                            .map(|r| r.metadata.film_stock.clone())
+                            .filter(|s| !s.trim().is_empty());
+                        if let Some(stock) = stock
+                            && ui
+                                .add(
+                                    egui::Button::new(RichText::new(stock).small().color(theme::TEXT))
+                                        .corner_radius(10.0)
+                                        .min_size(vec2(0.0, 20.0)),
+                                )
+                                .on_hover_text("Film stock · click for roll info")
+                                .clicked()
                         {
                             self.open_roll_dialog(&f, false);
                         }
                     }
-                    ui.add_space(4.0);
                     self.source_chip(ui);
-                    if !self.single_mode
-                        && ui
-                            .add(if self.scan.open { widgets::primary("Scan") } else { widgets::ghost("Scan") })
-                            .on_hover_text("Scan film from a Plustek OpticFilm scanner into this roll")
-                            .clicked()
-                    {
-                        self.toggle_scan_panel();
-                    }
-                    ui.add_space(2.0);
-                    let r = icon_button(ui, Icon::More, "More", false, true);
-                    egui::Popup::menu(&r).show(|ui| {
-                        let key = |k: &str| RichText::new(k.to_owned()).color(theme::FAINT);
-                        if ui.button("Open folder…").clicked() {
-                            self.choose_folder();
-                        }
-                        if ui.button("Open images…").clicked() {
-                            self.choose_files();
-                        }
-                        ui.separator();
-                        if ui
-                            .button("Contact sheet")
-                            .on_hover_text("Save a JPEG contact sheet in the NLP folder (selection, or all frames)")
-                            .clicked()
-                        {
-                            self.make_contact_sheet(self.sel_vec());
-                        }
-                        if ui
-                            .add(egui::Button::new("Select all").shortcut_text(key(&select_key)))
-                            .clicked()
-                        {
-                            self.selected = (0..self.frames.len()).collect();
-                        }
-                        ui.separator();
-                        if ui
-                            .add(egui::Button::new("Keyboard shortcuts").shortcut_text(key("?")))
-                            .clicked()
-                        {
-                            self.shortcuts_open = true;
-                        }
-                        let paste = egui::Button::new("Paste settings").shortcut_text(key(&paste_key));
-                        if ui
-                            .add_enabled(self.clipboard.is_some() && !self.selected.is_empty(), paste)
-                            .clicked()
-                        {
-                            self.paste_settings();
-                        }
-                    });
 
+                    // Middle: which frames are on show.
+                    if !self.frames.is_empty() {
+                        ui.add_space(14.0);
+                        let n = self.frames.len();
+                        let tabs = [
+                            (GridFilter::All, format!("All {n}"), "Every frame of the roll"),
+                            (GridFilter::Picks, format!("Picks {picks}"), "Frames picked with P"),
+                            (
+                                GridFilter::NeedsLook,
+                                format!("Needs a look {needs_look}"),
+                                "Converted frames with weak colour balance, clipping, or a negative much denser or thinner than the rest",
+                            ),
+                        ];
+                        for (f, label, tip) in tabs {
+                            if filter_tab(ui, self.grid.filter == f, &label, f == GridFilter::NeedsLook && needs_look > 0)
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                self.grid.filter = f;
+                            }
+                        }
+                    }
+
+                    // Right: what to do with them.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // With nothing selected the actions cover the whole roll.
                         let n = self.selected.len();
-                        let targets: Vec<usize> = if n > 0 {
-                            self.sel_vec()
-                        } else {
-                            (0..self.frames.len()).collect()
+                        let targets: Vec<usize> = if n > 0 { self.sel_vec() } else { shown.clone() };
+                        let export_label = match (n, self.grid.filter) {
+                            (0, GridFilter::All) => "Export all".to_string(),
+                            (0, GridFilter::Picks) => "Export picks".to_string(),
+                            (0, _) => format!("Export {}", targets.len()),
+                            (1, _) => "Export".to_string(),
+                            (n, _) => format!("Export {n}"),
                         };
                         if ui
-                            .add(widgets::primary(if n > 0 { "Export" } else { "Export all" }))
+                            .add_enabled(!targets.is_empty(), widgets::primary(&export_label))
                             .on_hover_text(format!("Export positive copies ({export_key})"))
                             .clicked()
                         {
@@ -453,11 +442,7 @@ impl NlpApp {
                         let more = ui
                             .add(widgets::ghost("").min_size(vec2(22.0, 28.0)))
                             .on_hover_text("Convert options");
-                        let c = more.rect.center();
-                        ui.painter().line(
-                            vec![pos2(c.x - 4.0, c.y - 2.0), pos2(c.x, c.y + 2.0), pos2(c.x + 4.0, c.y - 2.0)],
-                            egui::Stroke::new(1.5, theme::MUTED),
-                        );
+                        widgets::chevron(ui.painter(), more.rect.center(), true, theme::MUTED);
                         egui::Popup::menu(&more).show(|ui| {
                             if ui
                                 .add_enabled(targets.len() >= 2, egui::Button::new("Convert as roll…"))
@@ -470,58 +455,85 @@ impl NlpApp {
                         });
                         let converted = targets.iter().all(|&i| self.frames[i].sc.is_converted());
                         if ui
-                            .add(widgets::ghost(if converted { "Re-convert…" } else { "Convert…" }))
+                            .add_enabled(
+                                !targets.is_empty(),
+                                widgets::ghost(if converted { "Re-convert…" } else { "Convert…" }),
+                            )
                             .on_hover_text("Analyse each frame on its own, with new conversion options")
                             .clicked()
                         {
                             self.open_convert_dialog(targets.clone(), false);
                         }
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-                        let ctx = ui.ctx().clone();
-                        let cmd = egui::Modifiers::COMMAND;
-                        if ui
-                            .add_enabled(self.clipboard.is_some() && n > 0, widgets::ghost("Paste settings"))
-                            .on_hover_text(format!(
-                                "Paste copied settings to the selection ({})",
-                                widgets::shortcut(&ctx, cmd, egui::Key::V)
-                            ))
-                            .clicked()
+                        if !self.single_mode
+                            && ui
+                                .add(if self.scan.open { widgets::primary("Scan") } else { widgets::ghost("Scan") })
+                                .on_hover_text("Scan film from a Plustek OpticFilm scanner or a SANE flatbed into this roll")
+                                .clicked()
                         {
-                            self.paste_settings();
+                            self.toggle_scan_panel();
                         }
-                        if ui
-                            .add_enabled(n > 0, widgets::ghost("Copy settings"))
-                            .on_hover_text(format!(
-                                "Copy settings from the selected frame ({})",
-                                widgets::shortcut(&ctx, cmd, egui::Key::C)
-                            ))
-                            .clicked()
-                        {
-                            self.copy_settings();
-                        }
-                        if n > 0 {
-                            ui.add_space(6.0);
+                        let r = icon_button(ui, Icon::More, "More", false, true);
+                        egui::Popup::menu(&r).show(|ui| {
+                            ui.set_min_width(220.0);
+                            if ui.button("Open folder…").clicked() {
+                                self.choose_folder();
+                            }
+                            if ui.button("Open images…").clicked() {
+                                self.choose_files();
+                            }
                             ui.separator();
-                            ui.add_space(6.0);
                             if ui
-                                .add(
-                                    egui::Button::new(RichText::new("Clear").small().color(theme::MUTED))
-                                        .frame(false),
+                                .add_enabled(
+                                    n > 0,
+                                    egui::Button::new("Copy settings").shortcut_text(key_text(cmd, egui::Key::C)),
                                 )
-                                .on_hover_text("Clear selection (Esc)")
                                 .clicked()
                             {
-                                self.selected.clear();
+                                self.copy_settings();
                             }
-                            ui.label(
-                                RichText::new(format!("{n} selected")).small().color(theme::MUTED),
-                            ).on_hover_text(super::LAB_KEYS_HELP);
-                        }
+                            if ui
+                                .add_enabled(
+                                    self.clipboard.is_some() && n > 0,
+                                    egui::Button::new("Paste settings").shortcut_text(key_text(cmd, egui::Key::V)),
+                                )
+                                .clicked()
+                            {
+                                self.paste_settings();
+                            }
+                            if ui
+                                .add(egui::Button::new("Select all").shortcut_text(key_text(cmd, egui::Key::A)))
+                                .clicked()
+                            {
+                                self.selected = shown.iter().copied().collect();
+                            }
+                            ui.separator();
+                            let mut neg = self.grid.negatives;
+                            if ui
+                                .add(egui::Button::selectable(neg, "Show negatives").shortcut_text(
+                                    RichText::new("hold N").color(theme::FAINT),
+                                ))
+                                .clicked()
+                            {
+                                neg = !neg;
+                                self.grid.negatives = neg;
+                            }
+                            if ui
+                                .button("Contact sheet")
+                                .on_hover_text("Save a JPEG contact sheet in the NLP folder (selection, or the frames on show)")
+                                .clicked()
+                            {
+                                self.make_contact_sheet(targets.clone());
+                            }
+                            ui.separator();
+                            if ui
+                                .add(egui::Button::new("Keyboard shortcuts").shortcut_text(RichText::new("?").color(theme::FAINT)))
+                                .clicked()
+                            {
+                                self.shortcuts_open = true;
+                            }
+                        });
                         // Fixed slot so the buttons don't shift when jobs start/finish.
-                        ui.add_space(4.0);
                         let (slot, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                         if self.jobs.busy() > 0 {
                             ui.put(slot, egui::Spinner::new().size(14.0).color(theme::MUTED));
@@ -544,12 +556,23 @@ impl NlpApp {
                     let conv = self.frames.iter().filter(|f| f.sc.is_converted()).count();
                     let status = format!("{} frames · {} converted", self.frames.len(), conv);
                     ui.label(RichText::new(status).small().color(theme::MUTED));
-                    if self.selected.is_empty() {
+                    let n = self.selected.len();
+                    if n == 0 {
                         ui.label(
-                            RichText::new("· Click to select · double-click to edit · ? for shortcuts")
+                            RichText::new("· Click or drag to select · Space to preview · ? for shortcuts")
                                 .small()
                                 .color(theme::FAINT),
                         );
+                    } else {
+                        ui.label(RichText::new(format!("· {n} selected")).small().color(theme::TEXT))
+                            .on_hover_text(super::LAB_KEYS_HELP);
+                        if ui
+                            .add(egui::Button::new(RichText::new("Clear").small().color(theme::ACCENT)).frame(false))
+                            .on_hover_text("Clear the selection (Esc)")
+                            .clicked()
+                        {
+                            self.selected.clear();
+                        }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -625,6 +648,7 @@ impl NlpApp {
                     });
                 } else {
                     self.grid(ui);
+                    self.quick_look_ui(ui);
                 }
             });
     }
@@ -645,7 +669,7 @@ impl NlpApp {
         if undo || redo {
             self.history_step(undo);
         }
-        let (all, none, enter, copy, paste, export) = ctx.input(|i| {
+        let (all, none, enter, copy, paste, export, space) = ctx.input(|i| {
             (
                 i.modifiers.command && i.key_pressed(egui::Key::A),
                 i.key_pressed(egui::Key::Escape),
@@ -653,8 +677,31 @@ impl NlpApp {
                 i.modifiers.command && i.key_pressed(egui::Key::C),
                 i.modifiers.command && i.key_pressed(egui::Key::V),
                 i.modifiers.command && i.key_pressed(egui::Key::E),
+                !i.modifiers.any() && i.key_pressed(egui::Key::Space),
             )
         });
+        let dialog = self.export_targets.is_some();
+        if space && !dialog {
+            if self.grid.quick_look {
+                self.grid.quick_look = false;
+            } else if !self.frames.is_empty() {
+                if self.selected.is_empty()
+                    && let Some(&first) = self.shown_frames().first()
+                {
+                    self.selected.insert(first);
+                    self.anchor = Some(first);
+                    self.active = Some(first);
+                }
+                if self.active.is_none_or(|a| !self.selected.contains(&a)) {
+                    self.active = self.selected.first().copied();
+                }
+                self.grid.quick_look = self.active.is_some();
+            }
+        }
+        if let Some(flag) = Self::flag_key(ctx).filter(|_| !dialog) {
+            let idx = self.sel_vec();
+            self.set_flag(&idx, flag);
+        }
         let rotate = ctx.input(|i| {
             let cmd = i.modifiers.command;
             if cmd && i.key_pressed(egui::Key::OpenBracket) {
@@ -669,14 +716,20 @@ impl NlpApp {
             self.rotate_frames(&self.sel_vec(), cw);
         }
         if all {
-            self.selected = (0..self.frames.len()).collect();
+            self.selected = self.shown_frames().into_iter().collect();
         }
         self.grid_arrows(ctx);
-        if none && self.export_targets.is_none() {
-            self.selected.clear();
+        if none && !dialog {
+            if self.grid.quick_look {
+                self.grid.quick_look = false;
+            } else {
+                self.selected.clear();
+            }
         }
-        if enter && self.export_targets.is_none() {
-            if let Some(&i) = self.selected.first() {
+        if enter && !dialog {
+            let lead = self.active.filter(|a| self.selected.contains(a)).or(self.selected.first().copied());
+            if let Some(i) = lead {
+                self.grid.quick_look = false;
                 self.open_editor(i);
             }
         }
@@ -702,51 +755,6 @@ impl NlpApp {
                 self.toast("Only converted frames can be corrected", false);
             }
         }
-    }
-
-    /// Arrow keys move the selection through the grid; Shift extends it
-    /// from the anchor.
-    fn grid_arrows(&mut self, ctx: &egui::Context) {
-        let cols: usize = ctx
-            .data(|d| d.get_temp(egui::Id::new(GRID_COLS)))
-            .unwrap_or(1)
-            .max(1);
-        let (step, shift) = ctx.input(|i| {
-            let step = [
-                (egui::Key::ArrowLeft, -1),
-                (egui::Key::ArrowRight, 1),
-                (egui::Key::ArrowUp, -(cols as i64)),
-                (egui::Key::ArrowDown, cols as i64),
-            ]
-            .into_iter()
-            .find(|(k, _)| i.key_pressed(*k))
-            .map(|(_, s)| s);
-            (step, i.modifiers.shift)
-        });
-        let (Some(step), n) = (step, self.frames.len()) else {
-            return;
-        };
-        if n == 0 || self.export_targets.is_some() {
-            return;
-        }
-        let cur = self
-            .active
-            .filter(|i| self.selected.contains(i))
-            .or(self.selected.last().copied());
-        let next = match cur {
-            Some(c) => (c as i64 + step).clamp(0, n as i64 - 1) as usize,
-            None => 0,
-        };
-        if shift {
-            let a = self.anchor.unwrap_or(next);
-            self.selected = (a.min(next)..=a.max(next)).collect();
-        } else {
-            self.selected.clear();
-            self.selected.insert(next);
-            self.anchor = Some(next);
-        }
-        self.active = Some(next);
-        ctx.data_mut(|d| d.insert_temp(egui::Id::new(GRID_SCROLL_TO), next));
     }
 
     /// Crop and straighten each frame to its detected frame, free-form.
@@ -832,294 +840,6 @@ impl NlpApp {
             }
         }
         self.editor.invalidate();
-    }
-
-    fn grid(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let cmd = egui::Modifiers::COMMAND;
-        let keys = [
-            widgets::shortcut(&ctx, egui::Modifiers::NONE, egui::Key::Enter),
-            widgets::shortcut(&ctx, cmd, egui::Key::E),
-            widgets::shortcut(&ctx, cmd, egui::Key::C),
-            widgets::shortcut(&ctx, cmd, egui::Key::V),
-            widgets::shortcut(&ctx, cmd, egui::Key::OpenBracket),
-            widgets::shortcut(&ctx, cmd, egui::Key::CloseBracket),
-        ];
-        let cell = self.thumb_size;
-        let name_h = 22.0;
-        let now = ui.input(|i| i.time);
-        let mut clicked: Option<(usize, egui::Modifiers)> = None;
-        let mut double: Option<usize> = None;
-        let mut ctx_action: Option<(usize, CellAction)> = None;
-        let mut bg_click = false;
-        let multi = self.selected.len() >= 2;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let cols = ((ui.available_width() + 14.0) / (cell + 14.0))
-                    .floor()
-                    .max(1.0) as usize;
-                let scroll_to: Option<usize> =
-                    ctx.data_mut(|d| d.remove_temp(egui::Id::new(GRID_SCROLL_TO)));
-                ctx.data_mut(|d| d.insert_temp(egui::Id::new(GRID_COLS), cols));
-                let mut visible: Vec<usize> = Vec::new();
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(14.0, 14.0);
-                    for (i, f) in self.frames.iter().enumerate() {
-                        let sel = self.selected.contains(&i);
-                        let (rect, resp) =
-                            ui.allocate_exact_size(vec2(cell, cell + name_h), Sense::click());
-                        if scroll_to == Some(i) {
-                            resp.scroll_to_me(None);
-                        }
-                        if !ui.is_rect_visible(rect) {
-                            continue;
-                        }
-                        visible.push(i);
-                        let p = ui.painter();
-                        let square = egui::Rect::from_min_size(rect.min, vec2(cell, cell));
-                        if resp.hovered() && !sel {
-                            p.rect_filled(square, 6.0, Color32::from_white_alpha(5));
-                        }
-                        let img_area = square.shrink(6.0);
-                        let mut frame_rect = img_area;
-                        match (&f.thumb, &f.proxy) {
-                            (Some(t), _) => {
-                                let ts = t.size_vec2();
-                                let s = (img_area.width() / ts.x).min(img_area.height() / ts.y);
-                                // Bottom-aligned so the name sits right under the image.
-                                let size = ts * s;
-                                frame_rect = egui::Rect::from_min_size(
-                                    pos2(
-                                        img_area.center().x - size.x / 2.0,
-                                        img_area.bottom() - size.y,
-                                    ),
-                                    size,
-                                );
-                                egui::Image::new((t.id(), ts))
-                                    .corner_radius(3.0)
-                                    .paint_at(ui, frame_rect);
-                            }
-                            (None, ProxyState::Failed(e)) => {
-                                resp.clone().on_hover_text(e);
-                                p.rect_filled(img_area, 3.0, theme::PANEL);
-                                widgets::paint_icon(
-                                    p,
-                                    egui::Rect::from_center_size(
-                                        img_area.center(),
-                                        vec2(24.0, 24.0),
-                                    ),
-                                    Icon::Warn,
-                                    theme::ERR,
-                                );
-                            }
-                            _ => {
-                                // Loading shimmer.
-                                let a = (((now * 2.4 + i as f64 * 0.35).sin() * 0.5 + 0.5) * 10.0)
-                                    as u8
-                                    + 6;
-                                p.rect_filled(img_area, 3.0, Color32::from_white_alpha(a));
-                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-                            }
-                        }
-                        if sel {
-                            p.rect_stroke(
-                                frame_rect.expand(3.0),
-                                5.0,
-                                egui::Stroke::new(2.0, theme::ACCENT),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-
-                        // Name row with status markers on the right.
-                        let row_y = rect.bottom() - name_h / 2.0 + 1.0;
-                        let mut x = rect.right() - 8.0;
-                        if f.exporting {
-                            let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
-                            p.circle_filled(
-                                pos2(x - 3.0, row_y),
-                                3.0,
-                                theme::WARN.gamma_multiply(a),
-                            );
-                            x -= 12.0;
-                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-                        }
-                        if f.is_roll() {
-                            let g = p.layout_no_wrap(
-                                "Roll".into(),
-                                egui::FontId::proportional(10.0),
-                                theme::MUTED,
-                            );
-                            let chip = egui::Rect::from_min_max(
-                                pos2(x - g.size().x - 10.0, row_y - 8.0),
-                                pos2(x, row_y + 8.0),
-                            );
-                            p.rect_stroke(
-                                chip,
-                                8.0,
-                                egui::Stroke::new(1.0, Color32::from_white_alpha(40)),
-                                egui::StrokeKind::Inside,
-                            );
-                            p.galley(chip.center() - g.size() / 2.0, g, theme::MUTED);
-                            x = chip.left() - 6.0;
-                        }
-                        let converting = self.auto.in_flight.contains(&f.path)
-                            || self.auto.queue.contains(&f.path);
-                        if converting {
-                            // Pulsing while its conversion runs.
-                            let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
-                            p.circle_filled(
-                                pos2(x - 3.0, row_y),
-                                3.0,
-                                theme::MUTED.gamma_multiply(a),
-                            );
-                            x -= 12.0;
-                            ui.ctx().request_repaint();
-                        } else if !f.sc.is_converted() {
-                            p.circle_stroke(
-                                pos2(x - 3.0, row_y),
-                                2.5,
-                                egui::Stroke::new(1.0, theme::FAINT),
-                            );
-                            x -= 12.0;
-                        }
-                        if f.sc.is_converted() && !converting {
-                            p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::OK);
-                            x -= 12.0;
-                            // Lab correction as a pill on the picture, so the
-                            // name keeps the row.
-                            if let Some(r) = lab::readout(&f.sc.settings) {
-                                let g =
-                                    p.layout_no_wrap(r, egui::FontId::monospace(9.5), theme::TEXT);
-                                let pill = egui::Rect::from_min_size(
-                                    frame_rect.left_bottom() + egui::vec2(5.0, -g.size().y - 9.0),
-                                    g.size() + egui::vec2(10.0, 4.0),
-                                );
-                                p.rect_filled(pill, 4.0, Color32::from_black_alpha(170));
-                                ui.interact(pill, ui.id().with(("lab_readout", i)), Sense::hover())
-                                    .on_hover_text(super::LAB_KEYS_HELP);
-                                p.galley(pill.min + egui::vec2(5.0, 2.0), g, theme::TEXT);
-                            }
-                        }
-                        // What the markers mean, on hover.
-                        let markers = egui::Rect::from_min_max(
-                            pos2(x, row_y - 8.0),
-                            pos2(rect.right() - 4.0, row_y + 8.0),
-                        );
-                        if markers.width() > 6.0 {
-                            let mut tip = vec![if converting {
-                                "Converting…"
-                            } else if f.sc.is_converted() {
-                                "Converted"
-                            } else {
-                                "Not converted"
-                            }];
-                            if f.is_roll() {
-                                tip.push("balanced with the roll");
-                            }
-                            if f.exporting {
-                                tip.push("exporting");
-                            }
-                            ui.interact(markers, ui.id().with(("markers", i)), Sense::hover())
-                                .on_hover_text(tip.join(" · "));
-                        }
-                        let name_x = rect.left() + 6.0;
-                        let mut job = egui::text::LayoutJob::simple_singleline(
-                            f.name.clone(),
-                            egui::FontId::proportional(11.5),
-                            if sel { theme::TEXT } else { theme::MUTED },
-                        );
-                        job.wrap = egui::text::TextWrapping::truncate_at_width(
-                            (x - name_x - 4.0).max(10.0),
-                        );
-                        let g = p.layout_job(job);
-                        p.galley(pos2(name_x, row_y - g.size().y / 2.0), g, theme::MUTED);
-
-                        if resp.double_clicked() {
-                            double = Some(i);
-                        } else if resp.clicked() {
-                            clicked = Some((i, ui.input(|inp| inp.modifiers)));
-                        }
-                        let has_clip = self.clipboard.is_some();
-                        resp.context_menu(|ui| {
-                            let mut item = |ui: &mut egui::Ui, text: &str, key: &str, a, on| {
-                                let b = egui::Button::new(text)
-                                    .shortcut_text(RichText::new(key).color(theme::FAINT));
-                                if ui.add_enabled(on, b).clicked() {
-                                    ctx_action = Some((i, a));
-                                    ui.close();
-                                }
-                            };
-                            item(ui, "Open in editor", &keys[0], CellAction::Open, true);
-                            ui.separator();
-                            item(ui, "Convert", "", CellAction::Convert, true);
-                            if multi && sel {
-                                item(ui, "Convert as roll", "", CellAction::ConvertRoll, true);
-                            }
-                            item(ui, "Export…", &keys[1], CellAction::Export, true);
-                            ui.separator();
-                            item(ui, "Detect frame", "", CellAction::DetectFrame, true);
-                            item(ui, "Rotate left", &keys[4], CellAction::Rotate(false), true);
-                            item(ui, "Rotate right", &keys[5], CellAction::Rotate(true), true);
-                            ui.separator();
-                            item(ui, "Copy settings", &keys[2], CellAction::Copy, true);
-                            item(ui, "Paste settings", &keys[3], CellAction::Paste, has_clip);
-                            ui.separator();
-                            item(ui, "Unconvert", "", CellAction::Unconvert, true);
-                        });
-                    }
-                });
-                ctx.data_mut(|d| d.insert_temp(egui::Id::new(GRID_VISIBLE), visible));
-                // Clicking empty space below the grid clears the selection.
-                let rest = ui.available_rect_before_wrap();
-                if rest.height() > 0.0 && ui.allocate_rect(rest, Sense::click()).clicked() {
-                    bg_click = true;
-                }
-            });
-        if bg_click && clicked.is_none() {
-            self.selected.clear();
-        }
-        if let Some((i, m)) = clicked {
-            if m.shift {
-                let a = self.anchor.unwrap_or(i);
-                let (lo, hi) = (a.min(i), a.max(i));
-                if !m.command {
-                    self.selected.clear();
-                }
-                self.selected.extend(lo..=hi);
-            } else if m.command {
-                if !self.selected.remove(&i) {
-                    self.selected.insert(i);
-                }
-                self.anchor = Some(i);
-            } else {
-                self.selected.clear();
-                self.selected.insert(i);
-                self.anchor = Some(i);
-            }
-            self.active = Some(i);
-        }
-        if let Some(i) = double {
-            self.open_editor(i);
-        }
-        if let Some((i, act)) = ctx_action {
-            if !self.selected.contains(&i) {
-                self.selected.clear();
-                self.selected.insert(i);
-            }
-            self.active = Some(i);
-            match act {
-                CellAction::Open => self.open_editor(i),
-                CellAction::Convert => self.open_convert_dialog(self.sel_vec(), false),
-                CellAction::ConvertRoll => self.open_convert_dialog(self.sel_vec(), true),
-                CellAction::Export => self.open_export_dialog(self.sel_vec()),
-                CellAction::Copy => self.copy_settings(),
-                CellAction::Paste => self.paste_settings(),
-                CellAction::Unconvert => self.unconvert(&self.sel_vec()),
-                CellAction::DetectFrame => self.detect_frames(&self.sel_vec()),
-                CellAction::Rotate(cw) => self.rotate_frames(&self.sel_vec(), cw),
-            }
-        }
     }
 }
 
@@ -1391,4 +1111,31 @@ impl NlpApp {
             self.exposure_prompt = Some((items, spread));
         }
     }
+}
+
+/// A filter tab in the top bar: text that sits on a soft pill when active.
+fn filter_tab(ui: &mut egui::Ui, on: bool, label: &str, warn: bool) -> egui::Response {
+    let g = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::FontId::proportional(12.5),
+        if on { theme::TEXT } else { theme::MUTED },
+    );
+    let dot = if warn { 10.0 } else { 0.0 };
+    let (rect, resp) = ui.allocate_exact_size(g.size() + vec2(20.0 + dot, 10.0), Sense::click());
+    let p = ui.painter();
+    if on {
+        p.rect_filled(rect, rect.height() / 2.0, theme::SURFACE);
+    } else if resp.hovered() {
+        p.rect_filled(rect, rect.height() / 2.0, theme::HOVER.gamma_multiply(0.5));
+    }
+    if warn {
+        p.circle_filled(pos2(rect.left() + 12.0, rect.center().y), 3.0, theme::WARN);
+    }
+    let col = if on || resp.hovered() { theme::TEXT } else { theme::MUTED };
+    p.galley_with_override_text_color(
+        pos2(rect.left() + 10.0 + dot, rect.center().y - g.size().y / 2.0),
+        g,
+        col,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

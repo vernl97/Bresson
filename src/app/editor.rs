@@ -160,6 +160,9 @@ pub struct Editor {
     dirty: bool,
     pub before: bool,
     color_tab: ColorTab,
+    /// Counts the photos opened in this session: the sidebar's section ids
+    /// include it, so each photo starts with its default sections.
+    epoch: u32,
     pick: Option<Pick>,
     committed: Option<Settings>,
     hist: [[u32; 256]; 3],
@@ -222,6 +225,7 @@ impl Default for Editor {
             dirty: true,
             before: false,
             color_tab: ColorTab::Mids,
+            epoch: 0,
             pick: None,
             committed: None,
             hist: [[0; 256]; 3],
@@ -259,11 +263,12 @@ impl Editor {
     }
 
     pub fn load(&mut self, path: &Path, settings: Settings) {
-        let (keep, strip) = (self.color_tab, self.filmstrip);
+        let (keep, strip, epoch) = (self.color_tab, self.filmstrip, self.epoch + 1);
         *self = Editor {
             path: Some(path.to_path_buf()),
             loading: true,
             committed: Some(settings),
+            epoch,
             ..Default::default()
         };
         self.color_tab = keep;
@@ -1071,6 +1076,15 @@ impl NlpApp {
         if strip {
             self.editor.filmstrip = !self.editor.filmstrip;
         }
+        if let Some(flag) = Self::flag_key(ctx) {
+            self.set_flag(&[i], flag);
+            let what = match flag {
+                crate::engine::sidecar::Flag::Pick => "Picked",
+                crate::engine::sidecar::Flag::Reject => "Rejected",
+                crate::engine::sidecar::Flag::None => "Unflagged",
+            };
+            self.toast(format!("{what} {}", self.frames[i].name), false);
+        }
         if b {
             self.editor.before = !self.editor.before;
             self.editor.split = false;
@@ -1336,17 +1350,21 @@ impl NlpApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.set_width(ui.available_width() - 6.0);
-                self.conversion_header(ui, i, s);
-                if converted {
-                    self.conversion_summary(ui, s);
-                    self.adjust_sections(ui, s);
-                } else {
-                    self.conversion_settings(ui, s);
-                }
-                self.film_section(ui, i);
-                self.engine_section(ui, i, s);
-                ui.add_space(16.0);
+                // Section open states are remembered by id; scoping the ids to
+                // this photo makes each one open with its default state.
+                ui.push_id(self.editor.epoch, |ui| {
+                    ui.set_width(ui.available_width() - 6.0);
+                    self.conversion_header(ui, i, s);
+                    if converted {
+                        self.conversion_summary(ui, s);
+                        self.adjust_sections(ui, s);
+                    } else {
+                        self.conversion_settings(ui, s);
+                    }
+                    self.film_section(ui, i);
+                    self.engine_section(ui, i, s);
+                    ui.add_space(16.0);
+                });
             });
     }
 
@@ -1643,7 +1661,7 @@ impl NlpApp {
                 }
             }
         }
-        if widgets::fold(ui, "Source") {
+        if widgets::fold_with(ui, "Source", false) {
             if fl_combo(
                 ui,
                 "Scan source",
@@ -1770,7 +1788,7 @@ impl NlpApp {
             );
         }
         let wb_mode = s.wb_mode;
-        let wb_open = section(ui, Section::WhiteBalance, s, r, true);
+        let wb_open = section(ui, Section::WhiteBalance, s, r, false);
         if s.wb_mode != wb_mode
             && let Some(i) = self.editor_index()
         {
@@ -1835,7 +1853,7 @@ impl NlpApp {
                 s.wb_mode = WbMode::Custom;
             }
         }
-        if section(ui, Section::Lab, s, r, true) {
+        if section(ui, Section::Lab, s, r, false) {
             lab_pad(ui, s);
         }
         if section(ui, Section::HyperTone, s, r, false) {
@@ -1882,7 +1900,7 @@ impl NlpApp {
                 None,
             );
         }
-        if section(ui, Section::Toning, s, r, true) {
+        if section(ui, Section::Toning, s, r, false) {
             segmented(
                 ui,
                 &mut self.editor.color_tab,
@@ -1951,7 +1969,7 @@ impl NlpApp {
                 );
             }
         }
-        if section(ui, Section::Look, s, r, true) {
+        if section(ui, Section::Look, s, r, false) {
             fl_combo(ui, "LUT", &mut s.lut, Lut::ALL, Lut::label, "");
             fl_slider(
                 ui,

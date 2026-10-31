@@ -129,7 +129,7 @@ impl NlpApp {
         });
     }
 
-    /// The "New roll" banner: name and film stock inline, the rest in the
+    /// The "New roll" banner: the film stock inline, the rest in the
     /// roll dialog. Dismissing it keeps the folder name as the roll name.
     pub fn roll_banner_ui(&mut self, ui: &mut egui::Ui) {
         let Some(mut d) = self.roll.banner.take() else {
@@ -145,22 +145,19 @@ impl NlpApp {
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
+                    // The roll's name is already in the top bar (and in More
+                    // details); the banner only asks what film it is.
                     ui.label(RichText::new("New roll").font(theme::medium(13.0)));
-                    ui.add_space(8.0);
+                    ui.label(RichText::new("· What film is it?").color(theme::MUTED));
+                    ui.add_space(4.0);
                     let enter = |r: &egui::Response| {
                         r.lost_focus() && r.ctx.input(|i| i.key_pressed(egui::Key::Enter))
                     };
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut d.info.name)
-                            .hint_text("Name")
-                            .desired_width(160.0),
-                    );
-                    save |= enter(&r);
                     let r = widgets::stock_combo(
                         ui,
                         &mut d.info.metadata.film_stock,
-                        "Film stock, e.g. Portra 400",
-                        250.0,
+                        "e.g. Portra 400",
+                        220.0,
                     );
                     save |= enter(&r);
                     save |= ui.add(widgets::primary("Save")).clicked();

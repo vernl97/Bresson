@@ -5,6 +5,7 @@ mod auto;
 mod editor;
 mod folder;
 mod gpu;
+mod grid;
 mod history;
 mod jobs;
 mod picker;
@@ -99,6 +100,10 @@ pub struct Frame {
     /// Not converted when the folder opened: cropped and converted by
     /// itself (see `auto.rs`) until the user converts it by hand.
     pub auto_convert: bool,
+    /// The thumbnail as the scanned negative (unconverted), made on demand.
+    pub thumb_neg: Option<egui::TextureHandle>,
+    /// Share of the rendered thumbnail clipped to white and to black.
+    pub clip: Option<[f32; 2]>,
 }
 
 impl Frame {
@@ -184,6 +189,8 @@ pub struct NlpApp {
     pub export_total: usize,
     pub export_done: usize,
     pub thumb_size: f32,
+    /// Grid filter, quick look and the other grid view state.
+    pub grid: folder::GridState,
     pub time: f64,
     /// Opened as a lone image: "back" returns to the welcome screen.
     pub single_mode: bool,
@@ -237,6 +244,7 @@ impl NlpApp {
             export_total: 0,
             export_done: 0,
             thumb_size: 180.0,
+            grid: Default::default(),
             time: 0.0,
             single_mode: false,
             export_targets: None,
@@ -404,6 +412,8 @@ impl NlpApp {
             exporting: false,
             source_auto,
             auto_convert,
+            thumb_neg: None,
+            clip: None,
         }
     }
 
@@ -1294,6 +1304,8 @@ impl NlpApp {
             let levels = pipeline::levels_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref());
             let r = Renderer::new(s, levels.as_ref(), OutputSpace::Srgb);
             let px = r.render(&neg, 0.0);
+            f.clip = Some(grid::clip_share(&px));
+            f.thumb_neg = None;
             let img = to_color_image(&px, neg.width, neg.height);
             match &mut f.thumb {
                 Some(t) => t.set(img, egui::TextureOptions::LINEAR),
@@ -1446,6 +1458,7 @@ impl eframe::App for NlpApp {
         self.pump_proxies();
         self.auto_tick();
         self.render_thumbs(ctx);
+        self.render_negative_thumbs(ctx);
         self.autosave();
         if self.jobs.busy() > 0 || self.auto.queued_since.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
@@ -1517,6 +1530,7 @@ mod tests {
                 roll: None,
                 metadata: Default::default(),
                 version: crate::engine::sidecar::VERSION,
+                flag: Default::default(),
             },
             proxy: ProxyState::NotLoaded,
             thumb_src: None,
@@ -1526,6 +1540,8 @@ mod tests {
             exporting: false,
             source_auto: false,
             auto_convert: false,
+            thumb_neg: None,
+            clip: None,
         };
 
         let dummy_src = SourceImage {
@@ -1755,6 +1771,73 @@ mod ui_tests {
         }
         h.run_steps(4);
         shot(&mut h, &out, "t10_source_chip");
+    }
+
+    /// Screenshots of the grid: layout, flags, filters, quick look,
+    /// negatives, box selection and hover actions. Run with
+    /// `NLP_UI_TEST_DIR=<folder> NLP_UI_OUT=<folder> cargo test grid_tour -- --ignored`.
+    #[test]
+    #[ignore]
+    fn grid_tour() {
+        use crate::engine::sidecar::Flag;
+        let dir = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
+        let out = PathBuf::from(std::env::var("NLP_UI_OUT").expect("NLP_UI_OUT"));
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1480.0, 940.0))
+            .wgpu()
+            .build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
+        settle(&mut h, 120.0);
+        shot(&mut h, &out, "g1_grid");
+        {
+            let app = h.state_mut();
+            app.roll.banner = None;
+            app.set_flag(&[0, 2, 5], Flag::Pick);
+            app.set_flag(&[3], Flag::Reject);
+            app.selected = [1, 2].into_iter().collect();
+        }
+        h.hover_at(egui::pos2(500.0, 160.0));
+        h.run_steps(4);
+        shot(&mut h, &out, "g2_flags_hover");
+        h.state_mut().grid.filter = grid::GridFilter::Picks;
+        h.run_steps(3);
+        shot(&mut h, &out, "g3_picks");
+        assert_eq!(h.state().shown_frames(), vec![0, 2, 5]);
+        h.state_mut().grid.filter = grid::GridFilter::NeedsLook;
+        h.run_steps(3);
+        shot(&mut h, &out, "g4_needs_look");
+        h.state_mut().grid.filter = grid::GridFilter::All;
+        h.state_mut().grid.negatives = true;
+        settle(&mut h, 20.0);
+        shot(&mut h, &out, "g5_negatives");
+        h.state_mut().grid.negatives = false;
+        h.run_steps(3);
+        // Box selection from the gap above the first row.
+        h.drag_at(egui::pos2(30.0, 92.0));
+        h.step();
+        h.hover_at(egui::pos2(700.0, 400.0));
+        h.step();
+        h.run_steps(2);
+        shot(&mut h, &out, "g6_marquee");
+        h.drop_at(egui::pos2(700.0, 400.0));
+        h.run_steps(2);
+        assert!(h.state().selected.len() >= 2, "box selection picks frames");
+        {
+            let app = h.state_mut();
+            app.selected = [2].into_iter().collect();
+            app.active = Some(2);
+        }
+        h.key_press(egui::Key::Space);
+        settle(&mut h, 20.0);
+        shot(&mut h, &out, "g7_quick_look");
+        assert!(h.state().grid.quick_look);
+        h.key_press(egui::Key::ArrowRight);
+        h.key_press(egui::Key::X);
+        settle(&mut h, 20.0);
+        assert_eq!(h.state().active, Some(3));
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert!(!h.state().grid.quick_look);
+        assert_eq!(h.state().frames[3].sc.flag, Flag::Reject);
     }
 
     /// Regression: hovering the sidebars must not make them grow.
@@ -2110,6 +2193,7 @@ mod ui_tests {
             export_total: 0,
             export_done: 0,
             thumb_size: 180.0,
+            grid: Default::default(),
             time: 0.0,
             single_mode: false,
             export_targets: None,
@@ -2159,6 +2243,7 @@ mod ui_tests {
             export_total: 0,
             export_done: 0,
             thumb_size: 180.0,
+            grid: Default::default(),
             time: 0.0,
             single_mode: false,
             export_targets: None,
@@ -2201,6 +2286,7 @@ mod ui_tests {
             export_total: 0,
             export_done: 0,
             thumb_size: 180.0,
+            grid: Default::default(),
             time: 0.0,
             single_mode: false,
             export_targets: None,
@@ -2283,6 +2369,7 @@ mod ui_tests {
             export_total: 0,
             export_done: 0,
             thumb_size: 180.0,
+            grid: Default::default(),
             time: 0.0,
             single_mode: false,
             export_targets: None,

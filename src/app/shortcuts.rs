@@ -34,6 +34,9 @@ impl NlpApp {
                     (k(cmd, Key::A), "Select all"),
                     (k(none, Key::Escape), "Clear the selection"),
                     (k(none, Key::Enter), "Open in the editor"),
+                    (k(none, Key::Space), "Quick look"),
+                    ("P X U".into(), "Pick / reject / unflag"),
+                    ("N".into(), "Hold to see the negatives"),
                     (k(cmd, Key::E), "Export"),
                     (
                         format!("{} {}", k(cmd, Key::OpenBracket), k(cmd, Key::CloseBracket)),
@@ -53,6 +56,7 @@ impl NlpApp {
                     (k(none, Key::C), "Crop & straighten"),
                     (k(none, Key::H), "Flip horizontally"),
                     (k(none, Key::F), "Show / hide the filmstrip"),
+                    ("P X U".into(), "Pick / reject / unflag"),
                     ("+ −".into(), "Zoom in / out"),
                 ],
             ),
