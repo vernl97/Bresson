@@ -804,6 +804,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The worker against the real libsane's `test` backend (needs sane-backends):
+    /// list, open, scan into a DNG, then close and let the worker thread exit.
+    /// (The thread-exit crash with the full backend list is covered by the
+    /// `sane` crate's `libsane_system_config_survives_thread_exit`.) Run with
+    /// `cargo test --release worker_scans_from_real_libsane -- --ignored`.
+    #[test]
+    #[ignore]
+    fn worker_scans_from_real_libsane() {
+        let conf = temp_dir("sane-conf");
+        std::fs::write(conf.join("dll.conf"), "test\n").unwrap();
+        // SAFETY: set before libsane is loaded; run this ignored test on its own.
+        unsafe { std::env::set_var("SANE_CONFIG_DIR", &conf) };
+        let dir = temp_dir("libsane");
+        let (tx, rx) = channel();
+        let worker = ScanWorker::spawn(tx, egui::Context::default(), Settings::default());
+        worker.send(ScanCmd::Refresh);
+        let ScanEvent::Devices { devices, sane_note } = next(&rx) else { panic!("no device list") };
+        assert!(sane_note.is_none(), "{sane_note:?}");
+        let test = devices.iter().find(|d| matches!(&d.choice, ScannerChoice::Sane(n) if n.starts_with("test"))).expect("test device");
+        worker.send(ScanCmd::Open(test.choice.clone()));
+        let ScanEvent::Opened(info) = next(&rx) else { panic!("not opened") };
+        assert_eq!(info.kind, ScannerKind::Flatbed);
+        let paths = next_scan_paths(&dir, 1);
+        worker.send(ScanCmd::Scan(Box::new(ScanJob { dpi: 75, infrared: false, ..*job(vec![[0.0, 0.0, 0.3, 0.3]], paths.clone()) })));
+        let ScanEvent::Saved { path, .. } = next(&rx) else { panic!("not saved") };
+        let src = decode::load(&path, None).unwrap();
+        assert_eq!(pipeline::detect_source(&src), Source::VueScanRaw);
+        // Close the scanner and let the worker thread exit while the process lives on.
+        drop(worker);
+        assert!(matches!(next(&rx), ScanEvent::Closed));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&conf);
+    }
+
     #[test]
     fn scan_to_source_keeps_linear_values() {
         let rgb = ndarray::Array3::from_shape_fn((2, 3, 3), |(y, x, c)| (y * 30000 + x * 1000 + c * 7) as u16);

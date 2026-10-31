@@ -3,7 +3,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::{
     Backend, Constraint, DeviceInfo, Error, Frame, Handle, OptionInfo, OptionType, Parameters, Result, Status, Unit, Value,
@@ -59,7 +59,6 @@ type AuthCallback = Option<unsafe extern "C" fn(*const c_char, *mut c_char, *mut
 
 struct Fns {
     init: unsafe extern "C" fn(*mut SaneWord, AuthCallback) -> c_int,
-    exit: unsafe extern "C" fn(),
     get_devices: unsafe extern "C" fn(*mut *const *const SaneDevice, SaneWord) -> c_int,
     open: unsafe extern "C" fn(*const c_char, *mut SaneHandle) -> c_int,
     close: unsafe extern "C" fn(SaneHandle),
@@ -71,17 +70,24 @@ struct Fns {
     cancel: unsafe extern "C" fn(SaneHandle),
 }
 
-/// libsane with `sane_init` done; `sane_exit` runs when the last user drops.
+/// libsane with `sane_init` done, once per process ([`LibSane::load`]).
+///
+/// It is never unloaded and `sane_exit` is never called: the dll backend would
+/// `dlclose` the device backends, whose thread-local destructors then run from
+/// unmapped code when a thread exits.
 struct Lib {
     fns: Fns,
     _lib: libloading::Library,
 }
 
-impl Drop for Lib {
-    fn drop(&mut self) {
-        // SAFETY: every handle holds an `Arc<Lib>`, so none is still open.
-        unsafe { (self.fns.exit)() }
-    }
+/// The process's libsane, loaded on first use; `Err` says why it isn't available.
+static LIB: OnceLock<std::result::Result<Arc<Lib>, String>> = OnceLock::new();
+
+/// SANE isn't thread-safe: every call into libsane holds this lock.
+static CALLS: Mutex<()> = Mutex::new(());
+
+fn lock() -> MutexGuard<'static, ()> {
+    CALLS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Where libsane is looked for: `$NLP_SANE_LIB`, then the platform's usual names.
@@ -120,19 +126,27 @@ pub struct LibSane {
 unsafe impl Send for LibSane {}
 
 impl LibSane {
+    /// The process's libsane: loaded and `sane_init`ed on the first call, shared after.
     pub fn load() -> Result<Self> {
+        match LIB.get_or_init(Self::load_once) {
+            Ok(lib) => Ok(Self { lib: lib.clone() }),
+            Err(e) => Err(Error::Unavailable(e.clone())),
+        }
+    }
+
+    fn load_once() -> std::result::Result<Arc<Lib>, String> {
         let mut tried = Vec::new();
         for path in candidates() {
             // SAFETY: loading libsane runs its initialisers, which have no preconditions.
             match unsafe { libloading::Library::new(&path) } {
-                Ok(lib) => return Self::from_library(lib),
+                Ok(lib) => return Self::init_library(lib).map_err(|e| e.to_string()),
                 Err(e) => tried.push(format!("{}: {e}", path.display())),
             }
         }
-        Err(Error::Unavailable(format!("libsane not found ({})", tried.join("; "))))
+        Err(format!("libsane not found ({})", tried.join("; ")))
     }
 
-    fn from_library(lib: libloading::Library) -> Result<Self> {
+    fn init_library(lib: libloading::Library) -> Result<Arc<Lib>> {
         // SAFETY: the symbols have the SANE 1.0 signatures declared in `Fns`.
         let fns = unsafe {
             macro_rules! sym {
@@ -142,7 +156,6 @@ impl LibSane {
             }
             Fns {
                 init: sym!(b"sane_init"),
-                exit: sym!(b"sane_exit"),
                 get_devices: sym!(b"sane_get_devices"),
                 open: sym!(b"sane_open"),
                 close: sym!(b"sane_close"),
@@ -155,14 +168,16 @@ impl LibSane {
             }
         };
         let mut version: SaneWord = 0;
+        let _g = lock();
         // SAFETY: valid out pointer; no authorisation callback.
         status("sane_init", unsafe { (fns.init)(&mut version, None) })?;
-        Ok(Self { lib: Arc::new(Lib { fns, _lib: lib }) })
+        Ok(Arc::new(Lib { fns, _lib: lib }))
     }
 }
 
 impl Backend for LibSane {
     fn devices(&mut self) -> Result<Vec<DeviceInfo>> {
+        let _g = lock();
         let mut list: *const *const SaneDevice = std::ptr::null();
         // SAFETY: valid out pointer; the list stays valid until the next call.
         status("sane_get_devices", unsafe { (self.lib.fns.get_devices)(&mut list, 0) })?;
@@ -185,6 +200,7 @@ impl Backend for LibSane {
     fn open(&mut self, name: &str) -> Result<Box<dyn Handle>> {
         let c = CString::new(name).map_err(|_| Error::Invalid(format!("device name {name:?}")))?;
         let mut h: SaneHandle = std::ptr::null_mut();
+        let _g = lock();
         // SAFETY: valid name and out pointer.
         status("sane_open", unsafe { (self.lib.fns.open)(c.as_ptr(), &mut h) })?;
         Ok(Box::new(LibHandle { lib: self.lib.clone(), h }))
@@ -201,6 +217,7 @@ unsafe impl Send for LibHandle {}
 
 impl Drop for LibHandle {
     fn drop(&mut self) {
+        let _g = lock();
         // SAFETY: open handle, closed once.
         unsafe { (self.lib.fns.close)(self.h) }
     }
@@ -215,6 +232,7 @@ impl LibHandle {
 
 impl Handle for LibHandle {
     fn option_count(&mut self) -> Result<i32> {
+        let _g = lock();
         let mut n: SaneWord = 0;
         let mut info = 0;
         // SAFETY: option 0 is the option count, an Int.
@@ -225,6 +243,7 @@ impl Handle for LibHandle {
     }
 
     fn descriptor(&mut self, i: i32) -> Option<OptionInfo> {
+        let _g = lock();
         let d = self.raw(i)?;
         let value_type = OptionType::from_code(d.value_type);
         let words = (d.size as usize / std::mem::size_of::<SaneWord>()).max(1);
@@ -270,6 +289,7 @@ impl Handle for LibHandle {
     fn get(&mut self, opt: &OptionInfo) -> Result<Value> {
         let mut buf = vec![0u8; opt.size.max(4)];
         let mut info = 0;
+        let _g = lock();
         // SAFETY: the buffer holds the option's declared size.
         status("sane_control_option", unsafe {
             (self.lib.fns.control_option)(self.h, opt.index, ACTION_GET, buf.as_mut_ptr().cast(), &mut info)
@@ -299,6 +319,7 @@ impl Handle for LibHandle {
             Value::Button => {}
         }
         let mut info = 0;
+        let _g = lock();
         // SAFETY: the buffer holds the option's declared size.
         status("sane_control_option", unsafe {
             (self.lib.fns.control_option)(self.h, opt.index, ACTION_SET, buf.as_mut_ptr().cast(), &mut info)
@@ -308,6 +329,7 @@ impl Handle for LibHandle {
 
     fn parameters(&mut self) -> Result<Parameters> {
         let mut p = SaneParameters::default();
+        let _g = lock();
         // SAFETY: valid out pointer.
         status("sane_get_parameters", unsafe { (self.lib.fns.get_parameters)(self.h, &mut p) })?;
         Ok(Parameters {
@@ -321,6 +343,7 @@ impl Handle for LibHandle {
     }
 
     fn start(&mut self) -> Result<()> {
+        let _g = lock();
         // SAFETY: open handle.
         status("sane_start", unsafe { (self.lib.fns.start)(self.h) })
     }
@@ -328,12 +351,14 @@ impl Handle for LibHandle {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let mut n: SaneWord = 0;
         let max = buf.len().min(i32::MAX as usize) as SaneWord;
+        let _g = lock();
         // SAFETY: `buf` holds `max` bytes.
         status("sane_read", unsafe { (self.lib.fns.read)(self.h, buf.as_mut_ptr(), max, &mut n) })?;
         Ok(n.max(0) as usize)
     }
 
     fn cancel(&mut self) {
+        let _g = lock();
         // SAFETY: open handle.
         unsafe { (self.lib.fns.cancel)(self.h) }
     }

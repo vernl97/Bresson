@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 NLP Studio (`nlp_studio` crate): a standalone Rust application for converting, editing, and managing film negatives. While originally inspired by the Negative Lab Pro Lightroom plugin, **NLP Studio is an independent application designed to modernize, streamline, and meaningfully improve upon the entire film negative workflow**.
 
-It reads camera RAW negatives or TIFF/JPEG/PNG scans, converts them with a density-based print engine, and exports positive copies. A single fast, cross-platform binary provides both an interactive egui GUI and a headless CLI, completely free of Lightroom, catalog databases, or Adobe subscriptions.
+It reads camera RAW negatives or TIFF/JPEG/PNG scans, or scans film itself from Plustek OpticFilm scanners and SANE flatbeds, converts them with a density-based print engine, and exports positive copies. A single fast, cross-platform binary provides both an interactive egui GUI and a headless CLI, completely free of Lightroom, catalog databases, or Adobe subscriptions.
 
 ### Product Vision & Design Philosophy
 
@@ -16,6 +16,7 @@ It reads camera RAW negatives or TIFF/JPEG/PNG scans, converts them with a densi
   - **Photographic print exposure**: Real photographic units (EV-calibrated print exposure modeling paper density) rather than arbitrary digital slider units.
   - **Lab & darkroom shortcuts**: Dedicated Frontier/Noritsu-style lab density and color balance keys (number row / numpad: C, M, Y, Density) for ultra-fast proofing and correction.
   - **Automated frame prep**: Intelligent frame detection, crop, and straightening to isolate the active negative from film borders, rebates, and scanner holders.
+  - **Direct scanning**: scan straight into a roll from Plustek OpticFilm film scanners (a native Rust driver, no vendor software) and SANE flatbeds with a transparency unit, as linear DNGs that convert like any scan; one box per frame on a flatbed.
   - **Transparent, open sidecars**: Clean, human-readable JSON sidecars (`NLP/<file>.nlp.json`) and shared roll metadata (`NLP/roll.json`) keeping scan folders portable and non-destructive without catalog lock-in.
 - **Native Performance & Independence**: Native compiled Rust binary with multi-threaded pipelines (Rayon), fast proxy generation for instant visual feedback, and zero reliance on external hosts or legacy plugin runtimes.
 
@@ -24,9 +25,7 @@ It reads camera RAW negatives or TIFF/JPEG/PNG scans, converts them with a densi
 ```bash
 cargo run --release                          # GUI (reopens last folder)
 cargo run --release -- /path/to/scans        # GUI on a folder or single file
-NLP_FAKE_SCANNERS=1 cargo run --release -- /path/to/roll   # Scan panel with simulated OpticFilm scanners
-cargo test -p opticfilm --release            # scanner driver: parity with pyopticfilm
-cargo test -p sane --release                 # SANE layer against its simulated flatbed (-- --ignored: real libsane `test` backend)
+NLP_FAKE_SCANNERS=1 cargo run --release -- /path/to/roll   # Scan panel with simulated scanners (always on in debug builds)
 cargo run --release -- convert [--roll] [--roll-process NAME] [--tone NAME] [--wb NAME] [--lut NAME] [--border PCT] [--auto-crop] [--aspect NAME] [--flat FILE] [--jpg] [--out DIR] FILES
 cargo run --release -- scan-prep FILES       # gamma-encode linear TIF scans (Linear Scan source reads them directly)
 cargo run --release -- synth [out.tif] [ev]  # write the modelled ColorChecker negative (testchart.rs)
@@ -35,11 +34,23 @@ cargo test --release                         # unit tests (engine + app)
 cargo test --release <name>                  # single test, e.g. cargo test --release roll_process_modes
 cargo test --release chart_quality -- --nocapture   # print the conversion quality metrics
 NLP_UI_TEST_DIR=<scans> NLP_UI_OUT=<dir> cargo test --release ui_screens -- --ignored   # headless egui_kittest screenshots
+NLP_UI_OUT=<dir> cargo test --release scan_panel   # Scan panel on simulated scanners (screenshots with NLP_UI_OUT)
+cargo test -p opticfilm --release            # OpticFilm driver: parity with pyopticfilm (fixtures: scanners/opticfilm/tools/gen_fixtures.py)
+cargo test -p sane --release                 # SANE layer against its simulated flatbed
+cargo test -p sane --release -- --ignored    # against real libsane (needs sane-backends): `test` backend via a private SANE_CONFIG_DIR, and the system backends surviving thread exit
+cargo test --release worker_scans_from_real_libsane -- --ignored   # the scanner worker against real libsane
 NLP_SCAN_DIRS=<rolls>:<folder of rolls> NLP_SCAN_OUT=<dir> [NLP_SCAN_BASELINE=<old stats.json>] \
   cargo test --release real_scans -- --ignored --nocapture   # conversion check on real scans (scan_check.rs)
 ```
 
 `main.rs` sends `convert | scan-prep | synth | help` to `cli.rs`. Any other argument is treated as a path to open in the GUI.
+
+## Workspace
+
+The root `Cargo.toml` is a workspace: `nlp_studio` (this app) plus two scanner crates in `scanners/`.
+- `scanners/opticfilm`: the Plustek OpticFilm driver, a 1:1 Rust port of pyopticfilm over `nusb` (GPL-3, so distributed app builds are GPL-3). Parity is the test oracle: fixtures generated from the Python driver (`tools/gen_fixtures.py`, run in `scanners/pyopticfilm`) demand byte-identical USB traffic and identical images; `tools/gl128_sim.py` / `usb/fake_gl128_sim.rs` simulate the GL128 analog front end so calibrated scans are covered too. Its README lists what is validated. Keep Rust and Python in step when changing behaviour, and regenerate fixtures rather than editing them.
+- `scanners/sane`: SANE 1.0 bindings (`ffi.rs`, libsane loaded at runtime with `libloading`; loaded and `sane_init`ed once per process and shared, with every call under one process-wide lock since SANE isn't thread-safe; it is never unloaded and `sane_exit` is never called, because the dll backend would `dlclose` device backends whose thread-exit destructors then crash — `tests/libsane_system.rs` checks this in its own process), film-scan setup and the read loop (`lib.rs`), and a simulated flatbed (`fake.rs`) that the tests and the app's simulated scanner use.
+- `scanners/pyopticfilm`: the Python reference (untracked); only needed to regenerate fixtures.
 
 ## Architecture
 
@@ -60,21 +71,22 @@ Key data types live in `settings.rs`: `Settings` holds the per-image edit state,
 Persistence (`sidecar.rs`):
 - `<image>.nlp.json` in the `NLP/` subfolder of each scan folder holds settings, analysis and roll data.
 - `NLP/roll.json` holds the roll info (`RollInfo`: name, date, film metadata, notes). It is asked for the first time a folder is opened (`app/roll.rs`), and frames without their own film details inherit it.
-- App defaults, last folder and the Projects list (`projects`): `dirs::config_dir()/nlp-studio/defaults.json`.
+- App defaults, last folder and the Projects list (`projects`): `dirs::config_dir()/nlp-studio/defaults.json`. `Defaults.scan` keeps the Scan panel's choices (resolution, IR, multi-exposure, passes, and per scanner the flatbed source and the gamma-encoded switch).
+- Scans: `scan_NNN.dng` (or `.tif` for gamma-encoded flatbeds) in the roll folder, OpticFilm IR planes as `NLP/scan_NNN.ir.tif`. The OpticFilm calibration cache is the driver's: `dirs::cache_dir()/opticfilm/calib_v2.json`, in pyopticfilm's format.
 - Decoded proxy cache: `dirs::cache_dir()/nlp-studio/proxies/`, keyed by path, size and mtime.
 
 New `Settings` fields need `#[serde(default)]` compatibility so existing sidecars still load.
 
 **`src/app/`**: the eframe GUI.
 - `mod.rs` holds `NlpApp`: the `Frame` list, Folder/Editor `View`, undo/redo and toasts. It also contains the kittest UI tests.
-- `folder.rs` holds the welcome screen and the thumbnail grid; selection-dependent Convert / Convert as roll / Export actions sit in its top bar. `editor.rs` is the single-frame editor with canvas, crop/straighten and the sidebar sections (conversion, tone, white balance, lab correction, toning, look, film, analysis). `widgets.rs` holds the dark graphite theme (colour tokens in `theme`, Inter embedded from `assets/fonts/`), the shared controls and the vector icons. Use `theme::*` tokens and `widgets::primary`/`ghost` rather than ad-hoc colours, and `widgets::shortcut` for OS-correct shortcut labels.
+- `folder.rs` holds the welcome screen and the thumbnail grid (an open roll shows its grid even while empty, with a hint to drop files or Scan); selection-dependent Convert / Convert as roll / Export actions sit in its top bar. `editor.rs` is the single-frame editor with canvas, crop/straighten and the sidebar sections (conversion, tone, white balance, lab correction, toning, look, film, analysis). `widgets.rs` holds the dark graphite theme (colour tokens in `theme`, Inter embedded from `assets/fonts/`), the shared controls and the vector icons. Use `theme::*` tokens and `widgets::primary`/`ghost` rather than ad-hoc colours, and `widgets::shortcut` for OS-correct shortcut labels.
 - `auto.rs`: frames not converted when a folder opens are auto-cropped and converted in batches as their proxies load, then balanced as a roll (exposure variance → by images, with a banner, no modal). Converting/unconverting by hand releases a frame; `Defaults::manual_convert` turns it off. `pipeline::detect_source` picks the scan source (LinearRaw DNG or a VueScan/SilverFast Software tag → VueScan / SilverFast DNG); the folder bar's source chip changes it for the roll. Exports of unconverted frames wait here for their conversion.
 - `history.rs`: app-wide undo/redo; a step holds the settings of every frame one action changed. Batch edits outside the editor call `record(&idx)` first; the editor records through `track_history`.
 - `jobs.rs` runs all heavy work on the rayon pool and returns `JobResult`s over an mpsc channel, which the UI polls each frame. Frames load at `PROXY_SIZE` (1024 px) for thumbnails and analysis, and at `EDITOR_SIZE` (2048 px) for the editor preview. Exports decode at full resolution.
 - `gpu.rs` + `preview.wgsl`: with wgpu, the editor preview is a paint callback running the renderer's dodge, curves, look and output conversion in a shader (no sharpening). The density texture's alpha holds the dodge low-pass. `gpu_preview_matches_the_cpu_renderer` checks it against `Renderer::render`; keep the shader in step with `curve.rs`/`look.rs`. The CPU renders a 1024 px copy for histogram, readout and clipping, and remains the fallback.
 - `picker.rs`: native macOS NSOpenPanel via `objc2`, with `rfd` elsewhere.
-- `scanner.rs` + `scan_panel.rs`: scanning into the open roll from Plustek OpticFilm scanners (the `opticfilm` driver crate in `scanners/opticfilm`, GPL-3, a parity-tested port of pyopticfilm; its README covers validation) and from SANE devices such as flatbeds with a transparency unit (the `sane` crate in `scanners/sane`: libsane loaded at runtime with `libloading`, from `$NLP_SANE_LIB` or the Homebrew / distribution paths, so the app runs without it; macOS and Linux only). A dedicated thread owns the open scanner (SANE is not thread-safe) and reports `ScanEvent`s through the job channel (`JobResult::Scan`); it also lists devices (`ScanCmd::Refresh`), hiding SANE's view of OpticFilms, which are driven natively. `ScannerInfo` describes either kind as capabilities. The Scan panel (folder top bar; an open roll shows its grid even while empty) prescans, renders the prescan as a positive with the default conversion, and scans the framed area — one box for film scanners, a box per frame on flatbeds, scanned in turn — as `scan_NNN.dng`, a LinearRaw DNG written by `engine::scan_dng` (rawler's DNG writer, sRGB `ColorMatrix1`), so scans open as a VueScan / SilverFast DNG source. For SANE, `sane::Device::prepare_film` picks the film source and sets colour, 16-bit, positive film type and gamma off; flatbeds whose data is still tone-curved are marked gamma-encoded per scanner (`Defaults.scan`) and save a TIFF that opens as a TIF Scan. The OpticFilm IR plane goes to `NLP/scan_NNN.ir.tif`, outside the frame list; nothing reads it yet. `add_scanned_frame` puts each new file in the grid, where it auto-converts and the roll pass runs again. Simulated scanners (debug and test builds, or `NLP_FAKE_SCANNERS=1`) are the OpticFilm mocks on the driver's virtual clock (GL128 models on its AFE simulator, so calibration completes) and the `sane` crate's simulated flatbed. Locked OpticFilm models (`scan_ready == false`) open for status only.
+- `scanner.rs` + `scan_panel.rs`: scanning into the open roll from Plustek OpticFilm scanners (the `opticfilm` driver crate in `scanners/opticfilm`, GPL-3, a parity-tested port of pyopticfilm; its README covers validation) and from SANE devices such as flatbeds with a transparency unit (the `sane` crate in `scanners/sane`: libsane loaded at runtime with `libloading`, from `$NLP_SANE_LIB` or the Homebrew / distribution paths, so the app runs without it; macOS and Linux only). A dedicated thread owns the open scanner (SANE is not thread-safe) and reports `ScanEvent`s through the job channel (`JobResult::Scan`); it also lists devices (`ScanCmd::Refresh`), hiding SANE's view of OpticFilms, which are driven natively. `ScannerInfo` describes either kind as capabilities. The Scan panel (folder top bar; an open roll shows its grid even while empty) prescans, renders the prescan as a positive with the default conversion, and scans the framed area — one box for film scanners, a box per frame on flatbeds, scanned in turn — as `scan_NNN.dng`, a LinearRaw DNG written by `engine::scan_dng` (rawler's DNG writer, sRGB `ColorMatrix1`), so scans open as a VueScan / SilverFast DNG source. For SANE, `sane::Device::prepare_film` picks the film source and sets colour, 16-bit, positive film type and gamma off; flatbeds whose data is still tone-curved are marked gamma-encoded per scanner (`Defaults.scan`) and save a TIFF that opens as a TIF Scan. The OpticFilm IR plane goes to `NLP/scan_NNN.ir.tif`, outside the frame list; nothing reads it yet. `add_scanned_frame` puts each new file in the grid, where it auto-converts and the roll pass runs again. Simulated scanners (debug and test builds, or `NLP_FAKE_SCANNERS=1`) are the OpticFilm mocks on the driver's virtual clock (GL128 models on its AFE simulator, so calibration completes) and the `sane` crate's simulated flatbed. Locked OpticFilm models (`scan_ready == false`) open for status only. Status: neither path has run on real hardware yet; the SANE path is tested against real libsane's `test` backend.
 
 ## External assets
 
-None at runtime. The looks are native data in `assets/looks.json` (embedded with `include_str!`), measured from the plugin's enhanced looks; the plugin's tone profiles are fitted curves in `curve.rs`. The film crosstalk matrices in `crosstalk/*.toml` (from NegPy, GPL-3, for personal use; see `crosstalk/README.md`) are embedded the same way and picked by `Settings::crosstalk`. VueScan / SilverFast DNGs are set as the scan source by hand.
+None required at runtime. libsane is optional: when it's missing, only SANE scanners are unavailable (`NLP_SANE_LIB` overrides where it's looked for). The looks are native data in `assets/looks.json` (embedded with `include_str!`), measured from the plugin's enhanced looks; the plugin's tone profiles are fitted curves in `curve.rs`. The film crosstalk matrices in `crosstalk/*.toml` (from NegPy, GPL-3, for personal use; see `crosstalk/README.md`) are embedded the same way and picked by `Settings::crosstalk`. VueScan / SilverFast DNGs are set as the scan source by hand.

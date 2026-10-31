@@ -1,6 +1,6 @@
 # NLP Studio
 
-A standalone film negative converter in Rust. It reads camera RAW negatives (camera scans) or TIFF/JPEG/PNG and scanner DNG scans, converts them with a density-based print engine, and writes positive copies. It started as a port of the Negative Lab Pro Lightroom plugin; it keeps the plugin's tone profiles and looks (as native data) but needs no Lightroom or plugin files.
+A standalone film negative converter in Rust. It reads camera RAW negatives (camera scans) or TIFF/JPEG/PNG and scanner DNG scans, or scans film itself from Plustek OpticFilm scanners and SANE flatbeds, converts them with a density-based print engine, and writes positive copies. It started as a port of the Negative Lab Pro Lightroom plugin; it keeps the plugin's tone profiles and looks (as native data) but needs no Lightroom or plugin files.
 
 ## Build & run
 
@@ -8,6 +8,7 @@ A standalone film negative converter in Rust. It reads camera RAW negatives (cam
 cargo run --release                     # GUI, reopens the last folder
 cargo run --release -- /path/to/scans   # GUI on a folder (or a single file)
 cargo run --release -- help
+NLP_FAKE_SCANNERS=1 cargo run --release -- /path/to/roll   # Scan panel with simulated scanners
 ```
 
 ### Command line
@@ -35,6 +36,17 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
   - **Contact sheet**: the grid's "…" menu saves a JPEG of the selected frames (or all) to `NLP/<folder>_contact_sheet.jpg`: every frame landscape on black with its file name beneath.
 - Right-click a frame for open, convert, export, detect frame, copy/paste settings and unconvert.
 - Lab correction keys act on the selected converted frames; the offsets show under each thumbnail (see below).
+
+**Scanning**
+- **Scan** in the roll's top bar opens the Scan panel beside the grid. A new, empty roll folder opens on its (empty) grid, so you can scan straight into it.
+- Scanners:
+  - **Plustek OpticFilm** film scanners, driven natively over USB by the `opticfilm` crate (no vendor driver). The OpticFilm 8200i SE, 8100 (V2), 8300i SE and 7600i v1/v2 scan; other models open for status only until they are validated.
+  - **SANE devices** (macOS and Linux), such as flatbeds with a transparency unit, through the `sane` crate. It loads libsane at runtime (`brew install sane-backends`, or your distribution's sane-backends package; `NLP_SANE_LIB` points at another copy), so the app runs without it.
+  - **Simulated scanners** in debug builds or with `NLP_FAKE_SCANNERS=1`: every OpticFilm model and a flatbed, for trying the panel without hardware.
+- Options follow the scanner: resolution; for OpticFilms the infrared dust plane, multi-exposure and passes; for flatbeds the source (flatbed, transparency unit, …) and *Gamma-encoded* for scanners that still apply a tone curve at 16 bit.
+- **Prescan** scans the holder or bed at low resolution and shows it as a positive. Frame the shot by dragging: one box on a film scanner (advance the holder between frames, **Scan next** / ⌘R), a box per frame on a flatbed (drag inside a box to move it, a corner to resize it, × or Delete to remove it), scanned in turn with **Scan N frames**.
+- Each frame is saved in the roll folder as `scan_NNN.dng`, a linear (LinearRaw) DNG that opens as a scanner DNG, joins the grid and converts with the roll. Gamma-encoded flatbeds save `scan_NNN.tif` instead. The OpticFilm infrared plane goes to `NLP/scan_NNN.ir.tif`, kept for dust removal.
+- For film, flatbeds are set to colour, 16-bit, positive film type (no inversion by the scanner) and gamma off. Closing the panel turns the scanner's lamp off.
 
 **Editor View**
 - Toolbar:
@@ -90,13 +102,24 @@ The engine started as a port of the Lightroom plugin and now models the film its
 | `sidecar.rs` | Sidecars, roll info, defaults |
 | `export.rs` | Positive copies with ICC and EXIF, TIF scan prep |
 | `contact.rs` | Contact sheet JPEG (landscape tiles, file names) |
+| `scan_dng.rs` | Scanner output as LinearRaw DNG (or 16-bit TIFF) |
 
-The GUI is in `src/app` (eframe/egui); `gpu.rs` and `preview.wgsl` draw the editor preview.
+The GUI is in `src/app` (eframe/egui); `gpu.rs` and `preview.wgsl` draw the editor preview, `scanner.rs` and `scan_panel.rs` the scanning.
+
+## Scanner drivers (`scanners/`)
+
+| Crate | Role |
+|---|---|
+| `scanners/opticfilm` | Plustek OpticFilm driver (GPL-3): a Rust port of pyopticfilm over nusb, checked against the Python driver for byte-identical USB traffic and identical images (see its README) |
+| `scanners/sane` | SANE 1.0 bindings with libsane loaded at runtime, film-scan setup (source, colour, 16-bit, positive film type, gamma off) and a simulated flatbed |
+
+`scanners/pyopticfilm` is the Python reference the OpticFilm driver was ported from (not tracked). Linking the GPL-3 driver makes distributed builds GPL-3.
 
 ### Notes
 - **GPU preview.** With wgpu (the default), the editor draws its preview in a fragment shader (`app/gpu.rs`, `app/preview.wgsl`): the density image is a texture (its alpha holds the Hyper Tone low-pass), the print curves and the native look are buffers. It matches the CPU renderer within 0.1/255 and stays at full editor resolution while sliders move. The histogram, readout and clipping view come from a 1024 px CPU render. Exports, thumbnails and the no-wgpu fallback use the CPU renderer. The preview leaves out output sharpening.
 - **Raw processing.** `rawler` decodes the raw files and supplies the camera matrix. Full-resolution exports demosaic Bayer sensors with an RCD-style ratio-corrected method (`demosaic.rs`) and X-Trans with Markesteijn, instead of rawler's PPG and bilinear. Previews bin the mosaic instead. Scanner DNGs (LinearRaw) need no demosaic.
-- **No plugin assets.** The conversion uses no camera profiles (DCP) or look files (XMP). VueScan / SilverFast DNGs are set as the scan source by hand.
+- **No plugin assets.** The conversion uses no camera profiles (DCP) or look files (XMP). VueScan / SilverFast DNGs are set as the scan source by hand; the app's own scans are recognised as linear DNGs (and the `opticfilm` CLI's TIFFs, by their Software tag, as Linear Scan).
+- **Scanning status.** The OpticFilm driver matches pyopticfilm on its mock scanners, including calibrated GL128 scans on a simulated analog front end, but has not yet run on a real scanner. The SANE layer is tested against its simulated flatbed and, where sane-backends is installed, against real libsane (`cargo test -p sane --release -- --ignored`: SANE's `test` backend through a private config, plus the full system backend list surviving thread exit); it has not yet driven a real flatbed.
 - **Film base.** *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper. In density a wrong base is a constant per-channel offset that the levels absorb, so the conversion barely depends on it (tested on a chart cropped tight with no rebate).
 - **Flat field.** A frame of the bare light source or clear film leader, shot with the same camera, lens and light (Convert dialog, the editor's Source section, or `--flat FILE`). Uneven light varies across the frame, which the levels can't absorb.
 - **Sidecars** from before the density engine keep their settings and metadata but need a new Convert.
@@ -109,4 +132,8 @@ The GUI is in `src/app` (eframe/egui); `gpu.rs` and `preview.wgsl` draw the edit
 cargo test --release                                  # includes the chart quality metrics and a GPU-vs-CPU check
 cargo test --release chart_quality -- --nocapture     # print the conversion quality numbers
 NLP_UI_TEST_DIR=<scans> NLP_UI_OUT=<dir> cargo test --release ui_screens -- --ignored   # headless UI screenshots
+NLP_UI_OUT=<dir> cargo test --release scan_panel     # Scan panel tests on simulated scanners, with screenshots
+cargo test -p opticfilm --release                     # OpticFilm driver: parity with pyopticfilm
+cargo test -p sane --release                          # SANE layer against its simulated flatbed
+cargo test -p sane --release -- --ignored             # against real libsane (needs sane-backends; uses its `test` backend)
 ```

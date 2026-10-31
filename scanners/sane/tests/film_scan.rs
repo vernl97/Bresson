@@ -165,19 +165,42 @@ fn lineart_is_refused_with_a_clear_message() {
     assert!(err.to_string().contains("1-bit"), "{err}");
 }
 
-/// Against the real libsane's `test` backend (`brew install sane-backends`,
-/// `test` enabled in `dll.conf`). Run with `cargo test -p sane -- --ignored`.
+/// Against the real libsane's `test` backend (`brew install sane-backends`, or
+/// the distribution package). The test points SANE at a private config that
+/// enables only that backend, so the system's `dll.conf` is left alone. Run
+/// with `cargo test -p sane --release -- --ignored`.
 #[test]
 #[ignore]
 fn libsane_test_backend() {
+    let conf = std::env::temp_dir().join(format!("nlp-sane-conf-{}", std::process::id()));
+    std::fs::create_dir_all(&conf).unwrap();
+    std::fs::write(conf.join("dll.conf"), "test\n").unwrap();
+    // SAFETY: set before libsane is loaded, and this ignored test runs alone.
+    unsafe { std::env::set_var("SANE_CONFIG_DIR", &conf) };
+
     let mut sane = Sane::load().expect("libsane");
     let devices = sane.devices().unwrap();
     let name = devices.iter().find(|d| d.name.starts_with("test")).map(|d| d.name.clone()).expect("test backend device");
     let mut dev = sane.open(&name).unwrap();
-    dev.set("mode", Value::Str("Color".into())).unwrap();
-    dev.set("depth", Value::Int(16)).unwrap();
-    dev.set_window(75, [0.0, 0.0, 0.5, 0.5]).unwrap();
-    let img = dev.scan(&AtomicBool::new(false), &mut |_| {}).unwrap();
-    assert!(img.width > 0 && img.height > 0);
+
+    // Film setup on a real backend: colour, 16 bit; a window in mm from the normalised area.
+    let job = FilmScan { source: None, dpi: 75, area: [0.0, 0.0, 0.5, 0.5] };
+    let img = dev.scan_film(&job, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    assert_eq!(dev.get("mode").unwrap(), Value::Str("Color".into()));
+    assert_eq!(dev.get("depth").unwrap(), Value::Int(16));
+    assert!(img.width > 0 && img.height > 0, "{}×{}", img.width, img.height);
     assert_eq!(img.rgb.len(), img.width * img.height * 3);
+    assert!(dev.resolutions().contains(&75));
+
+    // SANE's own three-pass mode (separate R, G and B frames) assembles to the same size.
+    dev.set("three-pass", Value::Bool(true)).unwrap();
+    let three = dev.scan(&AtomicBool::new(false), &mut |_| {}).unwrap();
+    assert_eq!((three.width, three.height), (img.width, img.height));
+    assert_eq!(three.rgb.len(), img.rgb.len());
+
+    // Cancel stops a real scan.
+    dev.set("three-pass", Value::Bool(false)).unwrap();
+    let cancel = AtomicBool::new(true);
+    assert!(matches!(dev.scan(&cancel, &mut |_| {}), Err(Error::Cancelled)));
+    let _ = std::fs::remove_dir_all(&conf);
 }
