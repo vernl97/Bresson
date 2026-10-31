@@ -124,6 +124,95 @@ pub fn save(image: &Path, sc: &Sidecar) -> Result<()> {
     Ok(())
 }
 
+/// Serialize a sidecar on the caller's thread and write it from the
+/// background writer, so a slow (network) drive never stalls the UI. Writes
+/// go out in order and a newer one for the same file replaces a queued one.
+/// Failures come back from `take_save_errors`; `flush` waits for the queue.
+pub fn save_queued(image: &Path, sc: &Sidecar) -> Result<()> {
+    let mut sc = sc.clone();
+    sc.version = VERSION;
+    let json = serde_json::to_string_pretty(&sc)?;
+    let _ = writer().send(SaveMsg::Write(sidecar_path(image), json));
+    Ok(())
+}
+
+/// Wait until every queued sidecar write has reached the disk.
+pub fn flush() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if writer().send(SaveMsg::Flush(tx)).is_ok() {
+        let _ = rx.recv();
+    }
+}
+
+/// Messages about sidecars the writer could not save, oldest first.
+pub fn take_save_errors() -> Vec<String> {
+    std::mem::take(&mut *SAVE_ERRORS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+enum SaveMsg {
+    Write(PathBuf, String),
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+static SAVE_ERRORS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn writer() -> &'static std::sync::mpsc::Sender<SaveMsg> {
+    use std::sync::OnceLock;
+    static TX: OnceLock<std::sync::mpsc::Sender<SaveMsg>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<SaveMsg>();
+        std::thread::Builder::new()
+            .name("sidecar-writer".into())
+            .spawn(move || {
+                while let Ok(first) = rx.recv() {
+                    // Take everything queued: the last write per file wins.
+                    let mut writes: Vec<(PathBuf, String)> = Vec::new();
+                    let mut flushes = Vec::new();
+                    let mut absorb = |m: SaveMsg| match m {
+                        SaveMsg::Write(p, j) => {
+                            writes.retain(|(q, _)| *q != p);
+                            writes.push((p, j));
+                        }
+                        SaveMsg::Flush(f) => flushes.push(f),
+                    };
+                    absorb(first);
+                    while let Ok(m) = rx.try_recv() {
+                        absorb(m);
+                    }
+                    for (path, json) in writes {
+                        if let Err(e) = write_atomic(&path, &json) {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            SAVE_ERRORS
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(format!("Could not save settings {name}: {e:#}"));
+                        }
+                    }
+                    for f in flushes {
+                        let _ = f.send(());
+                    }
+                }
+            })
+            .expect("spawn sidecar writer");
+        tx
+    })
+}
+
+/// Write beside and rename, so a reader never sees a half-written sidecar.
+fn write_atomic(path: &Path, content: &str) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!("{name}.tmp"));
+    std::fs::write(&tmp, content)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 fn config_dir() -> Option<PathBuf> {
     let d = dirs::config_dir()?.join("nlp-studio");
     std::fs::create_dir_all(&d).ok()?;
@@ -297,6 +386,24 @@ mod tests {
         remember_project(&mut d, Path::new("/b"));
         remember_project(&mut d, Path::new("/a"));
         assert_eq!(d.projects, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+    }
+
+    #[test]
+    fn queued_saves_land_in_order_after_flush() {
+        let tmp = std::env::temp_dir().join(format!("nlp_queue_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let img = tmp.join("q.tif");
+        let mut sc = Sidecar::default();
+        for c in [1.0, 2.0, 3.0] {
+            sc.settings.contrast = c;
+            save_queued(&img, &sc).unwrap();
+        }
+        flush();
+        assert!(take_save_errors().is_empty());
+        assert_eq!(load(&img).unwrap().settings.contrast, 3.0);
+        assert!(!sidecar_path(&img).with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

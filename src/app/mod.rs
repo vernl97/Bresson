@@ -293,10 +293,13 @@ impl NlpApp {
     pub fn open_folder(&mut self, dir: &Path) {
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
             .map(|rd| {
-                rd.filter_map(|e| e.ok().map(|e| e.path()))
+                // `file_type` comes with the listing; `Path::is_file` is a
+                // stat per entry, slow on a network drive.
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_file() || t.is_symlink()))
+                    .map(|e| e.path())
                     .filter(|p| {
-                        p.is_file()
-                            && decode::is_folder_scan(p)
+                        decode::is_folder_scan(p)
                             && !p.to_string_lossy().ends_with("-prepped.tif")
                     })
                     .collect()
@@ -413,6 +416,9 @@ impl NlpApp {
 
     fn load_frames(&mut self, files: Vec<PathBuf>, dir: &Path) {
         self.save_all();
+        // The frames below read their sidecars back from disk.
+        sidecar::flush();
+        jobs::set_network_folder(dir);
         let _ = std::fs::create_dir_all(dir.join("NLP"));
         self.roll.info = sidecar::load_roll_info(dir);
         self.roll.banner = None;
@@ -434,7 +440,7 @@ impl NlpApp {
     /// Start proxy loads for the frames the grid shows first, then the rest in
     /// order, keeping only a few decodes in flight at once. Called every frame.
     fn pump_proxies(&mut self) {
-        let cap = (rayon::current_num_threads() / 2).max(2);
+        let cap = jobs::proxy_concurrency();
         let mut loading = self
             .frames
             .iter()
@@ -538,7 +544,7 @@ impl NlpApp {
     pub fn save_frame(&mut self, i: usize) {
         let f = &mut self.frames[i];
         f.dirty_since = None;
-        if let Err(e) = sidecar::save(&f.path, &f.sc) {
+        if let Err(e) = sidecar::save_queued(&f.path, &f.sc) {
             let msg = format!("Could not save settings for {}: {e:#}", f.name);
             self.toast(msg, true);
         }
@@ -553,6 +559,9 @@ impl NlpApp {
     }
 
     fn autosave(&mut self) {
+        for msg in sidecar::take_save_errors() {
+            self.toast(msg, true);
+        }
         for i in 0..self.frames.len() {
             if let Some(t) = self.frames[i].dirty_since {
                 if self.time - t > 0.8 {
@@ -1312,7 +1321,7 @@ impl NlpApp {
             self.editor.load(&path, self.frames[i].sc.settings.clone());
             let p = path.clone();
             self.jobs.spawn(move || {
-                let result = decode::load(&p, Some(jobs::EDITOR_SIZE))
+                let result = jobs::load_editor(&p)
                     .map(Arc::new)
                     .map_err(|e| format!("{e:#}"));
                 JobResult::Editor { path: p, result }
@@ -1451,6 +1460,7 @@ impl eframe::App for NlpApp {
         self.exposure_prompt_ui(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_all();
+            sidecar::flush();
         }
     }
 }

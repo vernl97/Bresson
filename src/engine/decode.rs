@@ -98,10 +98,13 @@ impl SourceImage {
 /// Load an image. With `max_long_edge`, RAW files use a fast binning path and
 /// the result is downscaled so its long edge is at most that size.
 pub fn load(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
+    // One sequential read: decoders seeking over a network drive, and the
+    // metadata probes opening the file again, are what make it slow.
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let mut img = if is_raw(path) {
-        load_raw(path, max_long_edge)?
+        load_raw(path, bytes, max_long_edge)?
     } else {
-        load_bitmap(path)?
+        load_bitmap(path, &bytes)?
     };
     if let Some(m) = max_long_edge {
         if img.long_edge() > m {
@@ -114,10 +117,9 @@ pub fn load(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
     Ok(img)
 }
 
-fn load_bitmap(path: &Path) -> Result<SourceImage> {
+fn load_bitmap(path: &Path, bytes: &[u8]) -> Result<SourceImage> {
     use image::ImageDecoder;
-    let mut decoder = image::ImageReader::open(path)
-        .with_context(|| format!("open {}", path.display()))?
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()?
         .into_decoder()
         .with_context(|| format!("decode {}", path.display()))?;
@@ -178,7 +180,7 @@ fn load_bitmap(path: &Path) -> Result<SourceImage> {
             full_height: h,
             exposure: None,
             linear_raw: false,
-            software: tiff_software(path).unwrap_or_default(),
+            software: tiff_software(&mut std::io::Cursor::new(bytes)).unwrap_or_default(),
             icc_trc: trc.is_some(),
         },
     })
@@ -186,9 +188,8 @@ fn load_bitmap(path: &Path) -> Result<SourceImage> {
 
 /// Shutter, aperture and ISO from the raw file's EXIF, when all three exist.
 /// The Software tag (305) of a TIFF-based file's first IFD.
-fn tiff_software(path: &Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
+fn tiff_software<R: std::io::Read + std::io::Seek>(f: &mut R) -> Option<String> {
+    use std::io::SeekFrom;
     let mut head = [0u8; 8];
     f.read_exact(&mut head).ok()?;
     let le = match &head[..4] {
@@ -232,11 +233,10 @@ fn tiff_software(path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&s).trim().to_string())
 }
 
-fn raw_exposure(path: &Path) -> Option<[f64; 3]> {
-    let src = rawler::rawsource::RawSource::new(path).ok()?;
-    let dec = rawler::get_decoder(&src).ok()?;
+fn raw_exposure(src: &rawler::rawsource::RawSource) -> Option<[f64; 3]> {
+    let dec = rawler::get_decoder(src).ok()?;
     let exif = dec
-        .raw_metadata(&src, &rawler::decoders::RawDecodeParams::default())
+        .raw_metadata(src, &rawler::decoders::RawDecodeParams::default())
         .ok()?
         .exif;
     let ratio = |r: rawler::formats::tiff::Rational| (r.d != 0).then(|| r.n as f64 / r.d as f64);
@@ -281,8 +281,11 @@ fn camera_matrix(raw: &rawler::RawImage) -> Mat3 {
     color::mat_inv(&rgb2cam)
 }
 
-fn load_raw(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
-    let mut raw = rawler::decode_file(path).map_err(|e| anyhow!("{}: {e}", path.display()))?;
+fn load_raw(path: &Path, bytes: Vec<u8>, max_long_edge: Option<usize>) -> Result<SourceImage> {
+    let src = rawler::rawsource::RawSource::new_from_shared_vec(std::sync::Arc::new(bytes))
+        .with_path(path);
+    let mut raw = rawler::decode(&src, &rawler::decoders::RawDecodeParams::default())
+        .map_err(|e| anyhow!("{}: {e}", path.display()))?;
     let cam2mel = camera_matrix(&raw);
     let wb = if raw.wb_coeffs[0].is_nan() || raw.wb_coeffs[1] <= 0.0 {
         [1.0, 1.0, 1.0]
@@ -295,9 +298,9 @@ fn load_raw(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
         model: raw.clean_model.clone(),
         full_width: raw.width,
         full_height: raw.height,
-        exposure: raw_exposure(path),
+        exposure: raw_exposure(&src),
         linear_raw: matches!(raw.photometric, RawPhotometricInterpretation::LinearRaw),
-        software: tiff_software(path).unwrap_or_default(),
+        software: tiff_software(&mut src.reader()).unwrap_or_default(),
         icc_trc: false,
     };
 

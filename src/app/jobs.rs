@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use eframe::egui;
@@ -172,6 +172,65 @@ fn write_cache(p: &Path, s: &SourceImage) {
     }
 }
 
+static NETWORK_FOLDER: AtomicBool = AtomicBool::new(false);
+
+/// Note whether the open folder is on a network drive, where waiting on the
+/// share, not the CPU, limits loading.
+pub fn set_network_folder(dir: &Path) {
+    NETWORK_FOLDER.store(is_network_path(dir), Ordering::Relaxed);
+}
+
+/// How many proxy decodes to keep in flight.
+pub fn proxy_concurrency() -> usize {
+    let cpu = (rayon::current_num_threads() / 2).max(2);
+    if NETWORK_FOLDER.load(Ordering::Relaxed) {
+        cpu.max(6)
+    } else {
+        cpu
+    }
+}
+
+#[cfg(unix)]
+fn is_network_path(p: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let name: Vec<u8> = st
+            .f_fstypename
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
+        matches!(
+            name.as_slice(),
+            b"smbfs" | b"nfs" | b"afpfs" | b"webdav" | b"cifs"
+        )
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // smb2, cifs, nfs, ncpfs
+        matches!(st.f_type as u64, 0xFE53_4D42 | 0xFF53_4D42 | 0x6969 | 0x564C)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = st;
+        false
+    }
+}
+
+#[cfg(not(unix))]
+fn is_network_path(p: &Path) -> bool {
+    // UNC paths (\\server\share).
+    p.to_string_lossy().starts_with(r"\\")
+}
+
 /// Load the analysis/thumbnail proxy, using the disk cache when possible.
 pub fn load_proxy(path: &Path) -> anyhow::Result<SourceImage> {
     let cache = sidecar::proxy_cache_path(path);
@@ -198,6 +257,52 @@ pub fn make_thumb(p: &SourceImage) -> SourceImage {
         as_shot_wb: p.as_shot_wb,
         is_raw: p.is_raw,
         info: p.info.clone(),
+    }
+}
+
+fn editor_cache_path(image: &Path) -> Option<PathBuf> {
+    sidecar::proxy_cache_path(image).map(|c| c.with_extension("ed"))
+}
+
+/// Load the editor preview, from the local disk cache when possible, so
+/// reopening a frame on a network drive does not read the whole file again.
+pub fn load_editor(path: &Path) -> anyhow::Result<SourceImage> {
+    let cache = editor_cache_path(path);
+    if let Some(img) = cache.as_deref().and_then(read_cache) {
+        return Ok(img);
+    }
+    let img = decode::load(path, Some(EDITOR_SIZE))?;
+    if let Some(c) = &cache {
+        write_cache(c, &img);
+        trim_editor_cache(c.parent());
+    }
+    Ok(img)
+}
+
+/// Keep the editor cache (about 32 MB a frame) under a size cap, dropping
+/// the least recently written files first.
+fn trim_editor_cache(dir: Option<&Path>) {
+    const CAP: u64 = 2 << 30;
+    let Some(rd) = dir.and_then(|d| std::fs::read_dir(d).ok()) else {
+        return;
+    };
+    let mut files: Vec<_> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "ed"))
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((m.modified().ok()?, m.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    files.sort();
+    for (_, len, p) in files {
+        if total <= CAP {
+            break;
+        }
+        if std::fs::remove_file(p).is_ok() {
+            total -= len;
+        }
     }
 }
 
