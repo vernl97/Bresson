@@ -9,9 +9,9 @@ The short version: the engine does **not** invert pixel values. It turns
 the scan into **film density** per channel, measures the density range and
 the neutral axis of the frame (or the roll), and then "prints" that
 density onto a modelled paper with real printing controls: filtration in
-CC, print time in stops, and a paper/tone curve. Every channel ends up as a
-pure function of its own density, so the whole print is baked into three
-lookup tables.
+CC, print time in stops, and a paper/tone curve. Every channel's print tone
+is a pure function of its own density, baked into three lookup tables; the
+tone profile then prints the three together so colours keep their hue.
 
 ```
 file ──decode──▶ SourceImage (linear camera RGB)
@@ -662,9 +662,13 @@ then sharpening over the whole buffer.
 Where it runs:
 
 - **Editor preview**: `app/gpu.rs` + `preview.wgsl` run dodge, curve LUTs,
-  look and output in a shader (no sharpening) on the 2048‑px proxy;
-  `gpu_preview_matches_the_cpu_renderer` keeps it in step. The CPU renders a
-  1024‑px copy for the histogram, readout and clipping, and is the fallback.
+  the hue‑preserving tone profile, look and output in a shader (no
+  sharpening) on the 2048‑px proxy; `gpu_preview_matches_the_cpu_renderer`
+  keeps it in step. The CPU renders a 1024‑px copy for the histogram, readout
+  and clipping, and is the fallback. While the straighten angle is dragged,
+  the preview re‑straightens a cached 1024‑px negative without the Hyper Tone
+  low‑pass and the histogram stays as it was (dimmed); both are rebuilt at
+  full quality on release.
 - **Export** (`export::export_frame`): decode at full resolution, the
   analysis' stored base, `prepare_negative`, optional downscale to the
   export's long edge, `levels_for`, `Renderer` with `with_megapixels`, render,
