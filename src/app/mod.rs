@@ -208,6 +208,11 @@ impl NlpApp {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
         widgets::theme::apply(&cc.egui_ctx);
         let mut defaults = sidecar::load_defaults();
+        // Temp rolls that are gone (older test runs) don't belong in Projects.
+        let tmp = std::env::temp_dir();
+        defaults
+            .projects
+            .retain(|p| p.is_dir() || !p.starts_with(&tmp));
         if defaults.projects.is_empty()
             && let Some(last) = defaults.last_folder.clone().filter(|p| p.is_dir())
         {
@@ -903,21 +908,10 @@ impl NlpApp {
                     },
                 );
                 let dest = dest.parent().unwrap_or(&scan_dir).display().to_string();
-                let r = ui.add(
-                    egui::Label::new(egui::RichText::new(&dest).small().color(theme::FAINT))
-                        .truncate(),
-                );
-                r.on_hover_text(&dest);
+                widgets::path_label(ui, &dest);
 
                 ui.add_space(10.0);
-                egui::CollapsingHeader::new(
-                    egui::RichText::new("Size, file name and presets")
-                        .small()
-                        .color(theme::MUTED),
-                )
-                .id_salt("export_more")
-                .default_open(false)
-                .show(ui, |ui| {
+                if widgets::fold_with(ui, "Size, file name and presets", false) {
                     let current = presets.iter().position(|p| p.matches(ex));
                     ui.label(egui::RichText::new("Preset").small().color(theme::MUTED));
                     ui.horizontal(|ui| {
@@ -1069,7 +1063,7 @@ impl NlpApp {
                         .small()
                         .color(theme::FAINT),
                     );
-                });
+                }
 
                 ui.add_space(22.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1364,7 +1358,12 @@ impl NlpApp {
                             .inner_margin(egui::Margin::symmetric(14, 7))
                             .shadow(ui.visuals().popup_shadow)
                             .show(ui, |ui| {
-                                ui.set_max_width(520.0);
+                                // A max width makes the Area reserve it all and
+                                // pushes short toasts off centre; only long ones
+                                // need it, to wrap.
+                                if t.text.len() > 60 {
+                                    ui.set_max_width(520.0);
+                                }
                                 ui.horizontal(|ui| {
                                     if t.error {
                                         let (r, _) = ui.allocate_exact_size(
@@ -1373,12 +1372,14 @@ impl NlpApp {
                                         );
                                         ui.painter().circle_filled(r.center(), 3.5, theme::ERR);
                                     }
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(&t.text).color(theme::TEXT),
-                                        )
-                                        .wrap(),
+                                    let label = egui::Label::new(
+                                        egui::RichText::new(&t.text).color(theme::TEXT),
                                     );
+                                    ui.add(if t.text.len() > 60 {
+                                        label.wrap()
+                                    } else {
+                                        label.extend()
+                                    });
                                     if let Some(p) = &t.reveal {
                                         let label = if cfg!(target_os = "macos") {
                                             "Show in Finder"
@@ -1632,7 +1633,7 @@ mod ui_tests {
         shot(&mut h, &out, "6_editor_crop");
         {
             use egui_kittest::kittest::Queryable;
-            h.get_by_label("Detect").click();
+            h.get_by_label("Auto").click();
         }
         settle(&mut h, 30.0);
         shot(&mut h, &out, "7_editor_detect_frame");
@@ -1671,6 +1672,70 @@ mod ui_tests {
         h.key_press(egui::Key::Space);
         settle(&mut h, 30.0);
         shot(&mut h, &out, "12_folder_lab_badge");
+    }
+
+    /// Screenshots of the dialogs, menus and the full editor sidebar (in a
+    /// tall window), for UI review. Run with
+    /// `NLP_UI_TEST_DIR=<folder> NLP_UI_OUT=<folder> cargo test ux_tour -- --ignored`.
+    #[test]
+    #[ignore]
+    fn ux_tour() {
+        use egui_kittest::kittest::Queryable;
+        let dir = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
+        let out = PathBuf::from(std::env::var("NLP_UI_OUT").expect("NLP_UI_OUT"));
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1480.0, 2600.0))
+            .wgpu()
+            .build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
+        settle(&mut h, 90.0);
+        h.state_mut().open_editor(2);
+        settle(&mut h, 60.0);
+        shot(&mut h, &out, "t1_editor_tall");
+        h.state_mut().unconvert(&[2]);
+        settle(&mut h, 30.0);
+        shot(&mut h, &out, "t2_editor_tall_unconverted");
+        h.state_mut().convert(vec![2], false);
+        settle(&mut h, 60.0);
+        h.key_press(egui::Key::B);
+        settle(&mut h, 20.0);
+        shot(&mut h, &out, "t3_editor_before");
+        h.key_press(egui::Key::B);
+        h.key_press(egui::Key::Space);
+        settle(&mut h, 20.0);
+        {
+            let app = h.state_mut();
+            app.selected = (0..app.frames.len()).collect();
+            let idx = app.sel_vec();
+            app.open_convert_dialog(idx, true);
+        }
+        h.run_steps(4);
+        shot(&mut h, &out, "t5_convert_dialog");
+        h.state_mut().convert_dialog = None;
+        h.run_steps(2);
+        {
+            let app = h.state_mut();
+            let idx = app.sel_vec();
+            app.open_export_dialog(idx);
+        }
+        h.run_steps(4);
+        shot(&mut h, &out, "t6_export_dialog_multi");
+        h.state_mut().export_targets = None;
+        h.run_steps(2);
+        {
+            let app = h.state_mut();
+            let f = app.folder.clone().unwrap();
+            app.roll.banner = None;
+            app.open_roll_dialog(&f, false);
+        }
+        h.run_steps(4);
+        shot(&mut h, &out, "t8_roll_dialog");
+        h.state_mut().roll.dialog = None;
+        h.run_steps(2);
+        if let Some(n) = h.query_by_label("VueScan / SilverFast") {
+            n.click();
+        }
+        h.run_steps(4);
+        shot(&mut h, &out, "t10_source_chip");
     }
 
     /// Regression: hovering the sidebars must not make them grow.

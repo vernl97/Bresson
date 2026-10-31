@@ -213,8 +213,16 @@ fn write_atomic(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// `$NLP_CONFIG_DIR`, else the platform config folder. Test builds default
+/// to a per-process temp folder so they never touch the user's defaults.
 fn config_dir() -> Option<PathBuf> {
-    let d = dirs::config_dir()?.join("nlp-studio");
+    let d = match std::env::var_os("NLP_CONFIG_DIR") {
+        Some(d) => PathBuf::from(d),
+        None if cfg!(test) => {
+            std::env::temp_dir().join(format!("nlp-studio-test-{}", std::process::id()))
+        }
+        None => dirs::config_dir()?.join("nlp-studio"),
+    };
     std::fs::create_dir_all(&d).ok()?;
     Some(d)
 }

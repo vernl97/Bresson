@@ -34,6 +34,7 @@ cargo test --release                         # unit tests (engine + app)
 cargo test --release <name>                  # single test, e.g. cargo test --release roll_process_modes
 cargo test --release chart_quality -- --nocapture   # print the conversion quality metrics
 NLP_UI_TEST_DIR=<scans> NLP_UI_OUT=<dir> cargo test --release ui_screens -- --ignored   # headless egui_kittest screenshots
+NLP_UI_TEST_DIR=<scans> NLP_UI_OUT=<dir> cargo test --release ux_tour -- --ignored      # dialogs and the full editor sidebar, for UI review
 NLP_UI_OUT=<dir> cargo test --release scan_panel   # Scan panel on simulated scanners (screenshots with NLP_UI_OUT)
 cargo test -p opticfilm --release            # OpticFilm driver: parity with pyopticfilm (fixtures: scanners/opticfilm/tools/gen_fixtures.py)
 cargo test -p sane --release                 # SANE layer against its simulated flatbed

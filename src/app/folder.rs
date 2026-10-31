@@ -222,6 +222,7 @@ enum CellAction {
     Paste,
     Unconvert,
     DetectFrame,
+    Rotate(bool),
 }
 
 impl NlpApp {
@@ -545,15 +546,11 @@ impl NlpApp {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.spacing_mut().slider_width = 90.0;
                         let tiny =
                             |t: &str| RichText::new(t.to_owned()).small().color(theme::FAINT);
                         ui.label(tiny("Large"));
-                        ui.add(
-                            egui::Slider::new(&mut self.thumb_size, 110.0..=340.0)
-                                .show_value(false),
-                        )
-                        .on_hover_text("Thumbnail size");
+                        widgets::mini_slider(ui, &mut self.thumb_size, 110.0..=340.0, 90.0)
+                            .on_hover_text("Thumbnail size");
                         ui.label(tiny("Small"));
                         let (done, total) = (self.auto.convert_done, self.auto.convert_total);
                         if self.auto.busy() || done < total {
@@ -651,6 +648,19 @@ impl NlpApp {
                 i.modifiers.command && i.key_pressed(egui::Key::E),
             )
         });
+        let rotate = ctx.input(|i| {
+            let cmd = i.modifiers.command;
+            if cmd && i.key_pressed(egui::Key::OpenBracket) {
+                Some(false)
+            } else if cmd && i.key_pressed(egui::Key::CloseBracket) {
+                Some(true)
+            } else {
+                None
+            }
+        });
+        if let Some(cw) = rotate.filter(|_| self.export_targets.is_none()) {
+            self.rotate_frames(&self.sel_vec(), cw);
+        }
         if all {
             self.selected = (0..self.frames.len()).collect();
         }
@@ -798,6 +808,25 @@ impl NlpApp {
         self.toast(format!("Pasted settings to {n} frame(s)"), false);
     }
 
+    /// Rotate frames a quarter turn, as one undo step (clockwise when `cw`).
+    pub fn rotate_frames(&mut self, idx: &[usize], cw: bool) {
+        if idx.is_empty() {
+            return;
+        }
+        self.record(idx);
+        for &i in idx {
+            let s = &mut self.frames[i].sc.settings;
+            s.rotation = (s.rotation + if cw { 1 } else { 3 }) % 4;
+            s.crop = super::editor::rotate_insets(s.crop, cw);
+            self.mark_changed(i);
+            if self.editor.path.as_ref() == Some(&self.frames[i].path) {
+                self.editor
+                    .set_committed(self.frames[i].sc.settings.clone());
+            }
+        }
+        self.editor.invalidate();
+    }
+
     fn grid(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let cmd = egui::Modifiers::COMMAND;
@@ -806,6 +835,8 @@ impl NlpApp {
             widgets::shortcut(&ctx, cmd, egui::Key::E),
             widgets::shortcut(&ctx, cmd, egui::Key::C),
             widgets::shortcut(&ctx, cmd, egui::Key::V),
+            widgets::shortcut(&ctx, cmd, egui::Key::OpenBracket),
+            widgets::shortcut(&ctx, cmd, egui::Key::CloseBracket),
         ];
         let cell = self.thumb_size;
         let name_h = 22.0;
@@ -948,19 +979,42 @@ impl NlpApp {
                         if f.sc.is_converted() && !converting {
                             p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::OK);
                             x -= 12.0;
+                            // Lab correction as a pill on the picture, so the
+                            // name keeps the row.
                             if let Some(r) = lab::readout(&f.sc.settings) {
                                 let g =
-                                    p.layout_no_wrap(r, egui::FontId::monospace(9.5), theme::MUTED);
-                                let sz = g.size();
-                                let r = egui::Rect::from_min_size(
-                                    pos2(x - sz.x, row_y - sz.y / 2.0),
-                                    sz,
+                                    p.layout_no_wrap(r, egui::FontId::monospace(9.5), theme::TEXT);
+                                let pill = egui::Rect::from_min_size(
+                                    frame_rect.left_bottom() + egui::vec2(5.0, -g.size().y - 9.0),
+                                    g.size() + egui::vec2(10.0, 4.0),
                                 );
-                                ui.interact(r, ui.id().with(("lab_readout", i)), Sense::hover())
+                                p.rect_filled(pill, 4.0, Color32::from_black_alpha(170));
+                                ui.interact(pill, ui.id().with(("lab_readout", i)), Sense::hover())
                                     .on_hover_text(super::LAB_KEYS_HELP);
-                                p.galley(r.min, g, theme::MUTED);
-                                x -= sz.x + 6.0;
+                                p.galley(pill.min + egui::vec2(5.0, 2.0), g, theme::TEXT);
                             }
+                        }
+                        // What the markers mean, on hover.
+                        let markers = egui::Rect::from_min_max(
+                            pos2(x, row_y - 8.0),
+                            pos2(rect.right() - 4.0, row_y + 8.0),
+                        );
+                        if markers.width() > 6.0 {
+                            let mut tip = vec![if converting {
+                                "Converting…"
+                            } else if f.sc.is_converted() {
+                                "Converted"
+                            } else {
+                                "Not converted"
+                            }];
+                            if f.is_roll() {
+                                tip.push("balanced with the roll");
+                            }
+                            if f.exporting {
+                                tip.push("exporting");
+                            }
+                            ui.interact(markers, ui.id().with(("markers", i)), Sense::hover())
+                                .on_hover_text(tip.join(" · "));
                         }
                         let name_x = rect.left() + 6.0;
                         let mut job = egui::text::LayoutJob::simple_singleline(
@@ -998,6 +1052,8 @@ impl NlpApp {
                             item(ui, "Export…", &keys[1], CellAction::Export, true);
                             ui.separator();
                             item(ui, "Detect frame", "", CellAction::DetectFrame, true);
+                            item(ui, "Rotate left", &keys[4], CellAction::Rotate(false), true);
+                            item(ui, "Rotate right", &keys[5], CellAction::Rotate(true), true);
                             ui.separator();
                             item(ui, "Copy settings", &keys[2], CellAction::Copy, true);
                             item(ui, "Paste settings", &keys[3], CellAction::Paste, has_clip);
@@ -1054,6 +1110,7 @@ impl NlpApp {
                 CellAction::Paste => self.paste_settings(),
                 CellAction::Unconvert => self.unconvert(&self.sel_vec()),
                 CellAction::DetectFrame => self.detect_frames(&self.sel_vec()),
+                CellAction::Rotate(cw) => self.rotate_frames(&self.sel_vec(), cw),
             }
         }
     }
@@ -1145,7 +1202,7 @@ pub fn conversion_fields(ui: &mut egui::Ui, s: &mut Settings, start: Option<&std
         "",
     );
     ui.add_space(6.0);
-    ui.checkbox(&mut s.auto_crop, "Auto-crop frames")
+    widgets::checkbox(ui, &mut s.auto_crop, "Auto-crop frames")
         .on_hover_text(
             "Find each uncropped frame inside the film rebate and holder, and straighten it",
         );

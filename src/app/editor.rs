@@ -292,7 +292,7 @@ const FILMSTRIP_H: f32 = 84.0;
 const FILMSTRIP_TOGGLE_H: f32 = 16.0;
 
 /// Rotate crop insets [l, t, r, b] with the image.
-fn rotate_insets(c: [f32; 4], clockwise: bool) -> [f32; 4] {
+pub(crate) fn rotate_insets(c: [f32; 4], clockwise: bool) -> [f32; 4] {
     if clockwise {
         [c[3], c[0], c[1], c[2]]
     } else {
@@ -1147,6 +1147,10 @@ impl NlpApp {
             vec2(ui.available_width(), 72.0),
             self.editor.hist_frozen,
         );
+        // Crop & straighten gets the sidebar to itself, like Lightroom.
+        if self.editor.crop.is_some() {
+            return;
+        }
         ui.add_space(4.0);
         let converted = self.frames[i].sc.is_converted();
         egui::ScrollArea::vertical()
@@ -2004,7 +2008,7 @@ impl NlpApp {
                         }
                     });
                 if f.sc.roll.is_some() {
-                    ui.checkbox(&mut s.use_roll, "Use roll analysis");
+                    widgets::checkbox(ui, &mut s.use_roll, "Use roll analysis");
                     if s.use_roll {
                         fl_combo(
                             ui,
@@ -2401,8 +2405,8 @@ impl NlpApp {
             ui.close();
         }
         ui.separator();
-        if ui
-            .checkbox(&mut self.editor.before.clone(), "Before / after")
+        if widgets::checkbox(
+            ui, &mut self.editor.before.clone(), "Before / after")
             .clicked()
         {
             self.editor.before = !self.editor.before;
@@ -2410,8 +2414,8 @@ impl NlpApp {
             self.editor.dirty = true;
             ui.close();
         }
-        if ui
-            .checkbox(&mut self.editor.split.clone(), "Split view")
+        if widgets::checkbox(
+            ui, &mut self.editor.split.clone(), "Split view")
             .clicked()
         {
             self.editor.split = !self.editor.split;
@@ -2420,8 +2424,8 @@ impl NlpApp {
             ui.close();
         }
         if converted
-            && ui
-                .checkbox(&mut self.editor.clip_view.clone(), "Show clipping")
+            && widgets::checkbox(
+                ui, &mut self.editor.clip_view.clone(), "Show clipping")
                 .clicked()
         {
             self.editor.clip_view = !self.editor.clip_view;

@@ -2,7 +2,7 @@
 //! conventions: click a slider label (or double-click its track) to reset,
 //! and typed values may exceed the slider range.
 
-use eframe::egui::{self, Color32, Rect, Sense, Ui};
+use eframe::egui::{self, Color32, FontId, Rect, Sense, Ui};
 
 // ---- Theme ------------------------------------------------------------------------
 
@@ -73,6 +73,11 @@ pub mod theme {
         v.faint_bg_color = SURFACE;
         v.code_bg_color = SURFACE;
         v.hyperlink_color = ACCENT;
+        // Text fields stand out from both the panel and the BG banners, and
+        // their hints read as hints rather than filled-in values.
+        v.text_edit_bg_color = Some(SURFACE);
+        v.weak_text_color = Some(FAINT);
+        v.disabled_alpha = 0.4;
         v.warn_fg_color = WARN;
         v.error_fg_color = ERR;
         v.selection.bg_fill = ACCENT.gamma_multiply(0.55);
@@ -621,13 +626,14 @@ pub fn stock_combo(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> e
         let edit = ui.add(
             egui::TextEdit::singleline(value)
                 .hint_text(hint)
-                .desired_width((width - 24.0).max(40.0)),
+                .desired_width((width - 32.0).max(40.0)),
         );
         changed |= edit.changed();
-        let arrow = ui.add(
-            egui::Button::new(egui::RichText::new("▾").small().color(theme::MUTED))
-                .min_size(egui::vec2(20.0, edit.rect.height())),
-        );
+        let arrow = ui
+            .add(egui::Button::new("").min_size(egui::vec2(20.0, edit.rect.height())))
+            .on_hover_text("Choose a film stock");
+        let col = if arrow.hovered() { theme::TEXT } else { theme::MUTED };
+        chevron(ui.painter(), arrow.rect.center(), true, col);
         let names = crate::engine::presets::film_stock_names();
         let q = value.trim().to_lowercase();
         let typed = !q.is_empty() && !names.iter().any(|n| n.to_lowercase() == q);
@@ -949,8 +955,147 @@ pub fn fold_with(ui: &mut Ui, title: &str, default_open: bool) -> bool {
         theme::medium(12.5),
         if hot { theme::TEXT } else { theme::MUTED },
     );
-    let c = egui::pos2(rect.right() - 8.0, rect.center().y);
-    let pts = if open {
+    chevron(
+        p,
+        egui::pos2(rect.right() - 8.0, rect.center().y),
+        open,
+        if hot { theme::TEXT } else { theme::FAINT },
+    );
+    if resp.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_persisted(id, open));
+    }
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if open {
+        ui.add_space(4.0);
+    }
+    open
+}
+
+/// Bare slim slider (track and knob, no label or value) for toolbars,
+/// drawn like [`fl_slider`].
+pub fn mini_slider(
+    ui: &mut Ui,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    width: f32,
+) -> egui::Response {
+    let (lo, hi) = (*range.start(), *range.end());
+    let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(width, 18.0), Sense::click_and_drag());
+    let track = Rect::from_min_max(
+        egui::pos2(rect.left() + 6.0, rect.center().y - 1.0),
+        egui::pos2(rect.right() - 6.0, rect.center().y + 1.0),
+    );
+    if (resp.dragged() || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let t = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
+        let nv = lo + t * (hi - lo);
+        if (nv - *v).abs() > 1e-3 {
+            *v = nv;
+            resp.mark_changed();
+        }
+    }
+    let hot = resp.hovered() || resp.dragged();
+    let p = ui.painter();
+    let x = track.left() + track.width() * ((*v - lo) / (hi - lo)).clamp(0.0, 1.0);
+    p.rect_filled(track, 1.0, theme::TRACK);
+    p.rect_filled(
+        Rect::from_min_max(track.left_top(), egui::pos2(x, track.bottom())),
+        1.0,
+        theme::MUTED,
+    );
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    p.circle(
+        egui::pos2(x, track.center().y),
+        if hot { 6.0 } else { 5.0 },
+        theme::TEXT,
+        egui::Stroke::new(2.0, theme::BG),
+    );
+    resp
+}
+
+/// Small faint path that keeps its end when it doesn't fit ("…/roll/Positives"),
+/// with the home folder shown as `~` and the full path on hover.
+pub fn path_label(ui: &mut Ui, path: &str) -> egui::Response {
+    let home = dirs::home_dir().map(|h| h.display().to_string());
+    let short = match home.as_deref().and_then(|h| path.strip_prefix(h)) {
+        Some(rest) if rest.starts_with('/') || rest.is_empty() => format!("~{rest}"),
+        _ => path.to_string(),
+    };
+    let font = FontId::proportional(11.0);
+    let max_w = ui.available_width();
+    let fits = |t: &str| ui.fonts_mut(|f| f.layout_no_wrap(t.to_string(), font.clone(), theme::FAINT).size().x) <= max_w;
+    let mut text = short.clone();
+    let mut cut = 0;
+    while !fits(&text) && cut < short.len() {
+        cut = short[cut..]
+            .char_indices()
+            .nth(1)
+            .map_or(short.len(), |(k, _)| cut + k);
+        text = format!("…{}", &short[cut..]);
+    }
+    ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(theme::FAINT)))
+        .on_hover_text(path)
+}
+
+/// Checkbox in the app's style: an outlined box that fills with the accent
+/// colour when checked (egui's own box is nearly invisible on the panels).
+pub fn checkbox(ui: &mut Ui, checked: &mut bool, text: &str) -> egui::Response {
+    let g = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), FontId::proportional(13.0), theme::TEXT);
+    let size = egui::vec2(14.0 + 8.0 + g.size().x, ui.spacing().interact_size.y);
+    let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    if resp.clicked() {
+        *checked = !*checked;
+        resp.mark_changed();
+    }
+    let on = *checked;
+    let enabled = ui.is_enabled();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, text));
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let b = Rect::from_center_size(egui::pos2(rect.left() + 7.0, rect.center().y), egui::vec2(14.0, 14.0));
+        let hot = resp.hovered();
+        if on {
+            p.rect_filled(b, 3.5, if hot { ACCENT_HOVER } else { theme::ACCENT });
+            p.add(egui::Shape::line(
+                vec![
+                    b.center() + egui::vec2(-3.5, 0.2),
+                    b.center() + egui::vec2(-1.0, 2.8),
+                    b.center() + egui::vec2(3.6, -2.6),
+                ],
+                egui::Stroke::new(1.8, Color32::WHITE),
+            ));
+        } else {
+            p.rect(
+                b,
+                3.5,
+                theme::SURFACE,
+                egui::Stroke::new(1.2, if hot { theme::MUTED } else { theme::FAINT }),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let col = if enabled { theme::TEXT } else { theme::FAINT };
+        p.galley_with_override_text_color(
+            egui::pos2(b.right() + 8.0, rect.center().y - g.size().y / 2.0),
+            g,
+            col,
+        );
+    }
+    resp
+}
+
+const ACCENT_HOVER: Color32 = Color32::from_rgb(102, 158, 255);
+
+/// Small line chevron centred on `c`: pointing down when `down`, else right.
+pub fn chevron(p: &egui::Painter, c: egui::Pos2, down: bool, color: Color32) {
+    let pts = if down {
         vec![
             c + egui::vec2(-3.5, -1.75),
             c + egui::vec2(0.0, 1.75),
@@ -963,21 +1108,7 @@ pub fn fold_with(ui: &mut Ui, title: &str, default_open: bool) -> bool {
             c + egui::vec2(-1.75, 3.5),
         ]
     };
-    p.add(egui::Shape::line(
-        pts,
-        egui::Stroke::new(1.4, if hot { theme::TEXT } else { theme::FAINT }),
-    ));
-    if resp.clicked() {
-        open = !open;
-        ui.data_mut(|d| d.insert_persisted(id, open));
-    }
-    if hot {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if open {
-        ui.add_space(4.0);
-    }
-    open
+    p.add(egui::Shape::line(pts, egui::Stroke::new(1.4, color)));
 }
 
 /// Rounded translucent label drawn over the canvas.

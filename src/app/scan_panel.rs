@@ -339,24 +339,28 @@ impl NlpApp {
             ui.end_row();
             if info.supports_ir {
                 ui.label(RichText::new("Infrared").color(theme::MUTED));
-                ui.checkbox(&mut d.infrared, "Dust plane")
+                widgets::checkbox(ui, &mut d.infrared, "Dust plane")
                     .on_hover_text("Also scan under the IR lamp, for dust removal (colour and chromogenic film)");
                 ui.end_row();
             }
             if info.supports_me {
                 ui.label(RichText::new("Exposure").color(theme::MUTED));
-                ui.checkbox(&mut d.multi_exposure, "Multi-exposure")
+                widgets::checkbox(ui, &mut d.multi_exposure, "Multi-exposure")
                     .on_hover_text("A second, longer pass merged in, for more shadow detail on dense negatives");
                 ui.end_row();
             }
             if info.supports_passes {
                 ui.label(RichText::new("Passes").color(theme::MUTED));
-                ui.add(egui::Slider::new(&mut d.passes, 1..=4)).on_hover_text("Average several aligned passes to lower noise");
+                ui.allocate_ui(egui::vec2(150.0, 28.0), |ui| {
+                    widgets::segmented(ui, &mut d.passes, &[(1, "1"), (2, "2"), (3, "3"), (4, "4")]);
+                })
+                .response
+                .on_hover_text("Average several aligned passes to lower noise");
                 ui.end_row();
             }
             if info.kind == ScannerKind::Flatbed {
                 ui.label(RichText::new("Data").color(theme::MUTED));
-                ui.checkbox(&mut gamma, "Gamma-encoded").on_hover_text(
+                widgets::checkbox(ui, &mut gamma, "Gamma-encoded").on_hover_text(
                     "Turn on if this scanner applies a tone curve even at 16 bit (scans look light and flat). \
                      Frames are then saved as TIFF scans instead of linear DNG.",
                 );

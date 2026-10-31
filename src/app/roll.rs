@@ -36,15 +36,15 @@ pub struct RollDialog {
 pub fn film_fields(ui: &mut egui::Ui, id: &str, m: &mut FilmMetadata, notes: bool) -> bool {
     let mut changed = false;
     let mut fields: Vec<(&str, &mut String, &str)> = vec![
-        ("Film stock", &mut m.film_stock, "Portra 400"),
-        ("Film ISO", &mut m.film_iso, "400"),
-        ("Shot at ISO", &mut m.shot_at_iso, "800 (push)"),
-        ("Developer", &mut m.developer, "C-41 lab"),
-        ("Camera make", &mut m.camera_make, "Nikon"),
-        ("Camera model", &mut m.camera_model, "FM2"),
-        ("Lens", &mut m.lens, "50mm f/1.8"),
-        ("Shutter", &mut m.shutter_speed, "1/125"),
-        ("Aperture", &mut m.aperture, "f/8"),
+        ("Film stock", &mut m.film_stock, "e.g. Portra 400"),
+        ("Film ISO", &mut m.film_iso, "e.g. 400"),
+        ("Shot at ISO", &mut m.shot_at_iso, "e.g. 800 (push)"),
+        ("Developer", &mut m.developer, "e.g. C-41 lab"),
+        ("Camera make", &mut m.camera_make, "e.g. Nikon"),
+        ("Camera model", &mut m.camera_model, "e.g. FM2"),
+        ("Lens", &mut m.lens, "e.g. 50mm f/1.8"),
+        ("Shutter", &mut m.shutter_speed, "e.g. 1/125"),
+        ("Aperture", &mut m.aperture, "e.g. f/8"),
     ];
     if notes {
         fields.push(("Notes", &mut m.development_notes, ""));
@@ -63,7 +63,8 @@ pub fn film_fields(ui: &mut egui::Ui, id: &str, m: &mut FilmMetadata, notes: boo
                         .add(
                             egui::TextEdit::singleline(v)
                                 .hint_text(hint)
-                                .desired_width(ui.available_width()),
+                                // desired_width excludes the field's margin.
+                                .desired_width(ui.available_width() - 8.0),
                         )
                         .changed();
                 }
@@ -136,7 +137,7 @@ impl NlpApp {
                         ui,
                         &mut d.info.metadata.film_stock,
                         "Film stock, e.g. Portra 400",
-                        200.0,
+                        250.0,
                     );
                     save |= enter(&r);
                     save |= ui.add(widgets::primary("Save")).clicked();
@@ -265,14 +266,14 @@ impl NlpApp {
                         ui.label(RichText::new("Name").small().color(theme::MUTED));
                         ui.add(
                             egui::TextEdit::singleline(&mut d.info.name)
-                                .desired_width(ui.available_width()),
+                                .desired_width(ui.available_width() - 8.0),
                         );
                         ui.end_row();
                         ui.label(RichText::new("Date").small().color(theme::MUTED));
                         ui.add(
                             egui::TextEdit::singleline(&mut d.info.date)
-                                .hint_text("2026-10-01")
-                                .desired_width(ui.available_width()),
+                                .hint_text("e.g. 2026-10-01")
+                                .desired_width(ui.available_width() - 8.0),
                         );
                         ui.end_row();
                     });
@@ -370,6 +371,12 @@ impl NlpApp {
                             }
                             ui.add_space(6.0);
                         }
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new("Drop a roll folder or scans anywhere to open them")
+                                .small()
+                                .color(theme::FAINT),
+                        );
                     });
                 });
             });
@@ -411,6 +418,8 @@ fn project_row(
             ui.set_width(w - 28.0);
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
+                    // Leave room for the Open / Remove buttons.
+                    ui.set_max_width((ui.available_width() - 160.0).max(120.0));
                     let name = info
                         .map(|i| i.name.clone())
                         .filter(|n| !n.is_empty())
@@ -447,11 +456,7 @@ fn project_row(
                         parts.push("Folder not found".into());
                     }
                     ui.label(RichText::new(parts.join(" · ")).small().color(theme::MUTED));
-                    ui.label(
-                        RichText::new(dir.display().to_string())
-                            .small()
-                            .color(theme::FAINT),
-                    );
+                    widgets::path_label(ui, &dir.display().to_string());
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if exists && ui.add(widgets::primary("Open")).clicked() {
