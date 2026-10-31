@@ -193,6 +193,20 @@ pub fn format_decoded_line(ev: &DecodedEvent<'_>) -> String {
         "buffer_preamble" => format!("BULK_PREAMBLE addr={} size={}", s("bulk_addr"), s("bulk_size")),
         "bulk_in" => format!("BULK_IN    {}b", s("length")),
         "bulk_out" => format!("BULK_OUT   {}b", s("length")),
-        _ => format!("UNCLASSIFIED {} {} [confidence={}]", ev.kind, Value::Object(f.clone()), ev.confidence.as_str()),
+        _ => format!("UNCLASSIFIED {} {} [confidence={}]", ev.kind, py_fields_repr(f), ev.confidence.as_str()),
     }
+}
+
+/// Python `repr` of an unclassified event's fields dict, in its insertion order.
+fn py_fields_repr(f: &Map<String, Value>) -> String {
+    const ORDER: [&str; 4] = ["request_type", "request", "value", "index"];
+    let keys = ORDER.iter().copied().filter(|k| f.contains_key(*k)).chain(f.keys().map(String::as_str).filter(|k| !ORDER.contains(k)));
+    let repr = |v: &Value| match v {
+        Value::Null => "None".to_string(),
+        Value::String(s) => format!("'{s}'"),
+        Value::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+        other => other.to_string(),
+    };
+    let items: Vec<String> = keys.map(|k| format!("'{k}': {}", repr(&f[k]))).collect();
+    format!("{{{}}}", items.join(", "))
 }

@@ -1054,12 +1054,14 @@ pub fn classify_failure(response: f64, min_response: f64, pathological: bool, re
 const RGB_IR_SEED_AGREE_PX: f64 = 0.5;
 const RGB_IR_REFINE_KEEP_SEED_PX: f64 = 0.25;
 
-fn rgb_ir_merge_seed_axes(gdx: f64, gdy: f64, ldx: f64, ldy: f64) -> (f64, f64) {
+#[doc(hidden)]
+pub fn rgb_ir_merge_seed_axes(gdx: f64, gdy: f64, ldx: f64, ldy: f64) -> (f64, f64) {
     let one = |g: f64, l: f64| if (l - g).abs() <= RGB_IR_SEED_AGREE_PX { l } else if g.abs() <= l.abs() { g } else { l };
     (one(gdx, ldx), one(gdy, ldy))
 }
 
-fn rgb_ir_keep_seed_axes(sdx: f64, sdy: f64, rdx: f64, rdy: f64) -> (f64, f64) {
+#[doc(hidden)]
+pub fn rgb_ir_keep_seed_axes(sdx: f64, sdy: f64, rdx: f64, rdy: f64) -> (f64, f64) {
     let one = |s: f64, r: f64| if r.abs() > s.abs() + RGB_IR_REFINE_KEEP_SEED_PX { s } else { r };
     (one(sdx, rdx), one(sdy, rdy))
 }

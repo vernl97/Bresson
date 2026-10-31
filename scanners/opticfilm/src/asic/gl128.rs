@@ -328,7 +328,8 @@ impl Gl128 {
     }
 
     /// Abort a leftover image SCAN so stationary geometry writes stick.
-    fn reset_stationary_scan_engine(&mut self, where_: &str) -> Result<()> {
+    #[doc(hidden)]
+    pub fn reset_stationary_scan_engine(&mut self, where_: &str) -> Result<()> {
         let motor_mask = r::MTRPWR | r::AGOHOME | r::FASTFED;
         self.write(r::REG_START, 0x00)?;
         self.write(r::REG_0X01, CANCEL_REG01)?;

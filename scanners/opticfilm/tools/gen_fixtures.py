@@ -323,6 +323,37 @@ def replay_fixture(out_dir):
     print("replay profiles hashed")
 
 
+def decode_fixture(out_dir):
+    """Trace JSON, log lines and decoded events of short GL128 and GL845 mock scans."""
+    from pyopticfilm.usb.decode import decode_transaction, format_decoded_line
+    from pyopticfilm.usb.fake import MockScannerTransport
+    from pyopticfilm.usb.trace import RecordingTransport, format_usb_log_line
+
+    out = {}
+    for name, dpi in [("plustek-opticfilm-8200i-se", 150), ("plustek-opticfilm-8200i", 900)]:
+        _VT[0] = 1000.0
+        rec = RecordingTransport(MockScannerTransport())
+        with tempfile.TemporaryDirectory() as tmp:
+            scanner = Scanner.open_fake(MODELS[name], transport=rec, calib_cache=Path(tmp) / "c.json")
+            try:
+                scanner.scan(resolution=dpi, area=TINY, apply_calib=False)
+            finally:
+                scanner.close()
+        rows = []
+        for t in rec.transactions:
+            ev = decode_transaction(t)
+            rows.append({
+                "txn": t.to_json(),
+                "line": format_usb_log_line(t),
+                "event": ev.to_json() if ev is not None else None,
+                "decoded": format_decoded_line(ev) if ev is not None else None,
+            })
+        out[name] = rows
+    with gzip.open(out_dir / "decode.json.gz", "wt") as fh:
+        json.dump(out, fh)
+    print(f"decode: {sum(len(v) for v in out.values())} transactions")
+
+
 def main():
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "fixtures")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -333,6 +364,8 @@ def main():
         numerics_fixture(out_dir)
     if not only or "replay" in only:
         replay_fixture(out_dir)
+    if not only or "decode" in only:
+        decode_fixture(out_dir)
     for spec in SCENARIOS:
         if not only or spec["name"] in only or "scans" in only:
             run_scenario(spec, out_dir)

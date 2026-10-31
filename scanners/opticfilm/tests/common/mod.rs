@@ -63,3 +63,49 @@ pub fn noise(n: usize, seed: u64) -> Vec<f64> {
         })
         .collect()
 }
+
+/// Log records emitted on the current thread (the `caplog` fixture).
+pub mod caplog {
+    use std::cell::RefCell;
+    use std::sync::Once;
+
+    thread_local! {
+        static RECORDS: RefCell<Vec<(log::Level, String)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    struct Capture;
+
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            RECORDS.with(|r| r.borrow_mut().push((record.level(), record.args().to_string())));
+        }
+        fn flush(&self) {}
+    }
+
+    /// Start capturing on this thread, dropping anything captured before.
+    pub fn start() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            static CAPTURE: Capture = Capture;
+            log::set_logger(&CAPTURE).unwrap();
+            log::set_max_level(log::LevelFilter::Trace);
+        });
+        RECORDS.with(|r| r.borrow_mut().clear());
+    }
+
+    /// True when a record at `level` or more severe contains `needle`.
+    pub fn contains(level: log::Level, needle: &str) -> bool {
+        RECORDS.with(|r| r.borrow().iter().any(|(l, m)| *l <= level && m.contains(needle)))
+    }
+}
+
+/// A fresh, empty per-test directory (the `tmp_path` fixture).
+pub fn tmp_path(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("opticfilm-test-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}

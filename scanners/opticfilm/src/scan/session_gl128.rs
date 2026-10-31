@@ -720,7 +720,8 @@ impl Gl128ScanSession {
         Err(Error::Scan(format!("No scan data within {DATA_TIMEOUT_S:.0}s")))
     }
 
-    fn acquire(&mut self, asic: &mut Gl128, geometry: &ScanGeometry, progress: &mut dyn Progress) -> Result<Vec<u8>> {
+    #[doc(hidden)]
+    pub fn acquire(&mut self, asic: &mut Gl128, geometry: &ScanGeometry, progress: &mut dyn Progress) -> Result<Vec<u8>> {
         self.wait_data(asic, progress)?;
         let total = geometry.total_bytes() as usize;
         let index = if geometry.disable_buffer_full_move { r::BULK_INDEX_RAM } else { r::BULK_INDEX_IMAGE };

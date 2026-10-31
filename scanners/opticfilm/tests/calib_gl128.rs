@@ -174,3 +174,103 @@ fn afe_offset_sign_magnitude_round_trip() {
     assert_eq!(encode_afe_offset(-106), 0x16A);
     assert_eq!(encode_afe_offset(400), 0xFF);
 }
+
+#[test]
+fn validate_rejects_starved_channel() {
+    const { assert!(COLOR_SHADING_CHANNEL_WHITE_MIN >= 8000.0) };
+    let (ok, reason) = validate_color_shading_strip(&[[900, 1000, 1100]; 32], &[[55000, 56000, 4000]; 32], None);
+    assert!(!ok && reason.contains("ch2 white"), "{reason}");
+}
+
+// --- host calibration (ImagePipeline) ---
+
+use ndarray::{Array2, Array3, s};
+use opticfilm::scan::pipeline::{
+    HOST_CALIB_BORDER_INSET, HOST_CALIB_HIGHLIGHT_CEILING, HOST_CALIB_HIGHLIGHT_PERCENTILE, HOST_CALIB_PEAK_PERCENTILE, HOST_CALIB_PEAK_TARGET,
+    ImagePipeline,
+};
+
+fn pipe() -> ImagePipeline {
+    ImagePipeline::new(model_by_name("plustek-opticfilm-8200i-se").unwrap())
+}
+
+fn rgb_of(h: usize, w: usize, rgb: [u16; 3]) -> Array3<u16> {
+    Array3::from_shape_fn((h, w, 3), |(_, _, c)| rgb[c])
+}
+
+fn percentile(a: impl Iterator<Item = u16>, q: f64) -> f64 {
+    let mut v: Vec<f64> = a.map(f64::from).collect();
+    v.sort_by(f64::total_cmp);
+    let pos = q / 100.0 * (v.len() - 1) as f64;
+    let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+    v[lo] + (v[hi] - v[lo]) * (pos - lo as f64)
+}
+
+fn chrome_border(rgb: &mut Array3<u16>, n: usize) {
+    let n = n as isize;
+    rgb.slice_mut(s![..n, .., ..]).fill(65535);
+    rgb.slice_mut(s![-n.., .., ..]).fill(65535);
+    rgb.slice_mut(s![.., ..n, ..]).fill(65535);
+    rgb.slice_mut(s![.., -n.., ..]).fill(65535);
+}
+
+/// Home-chrome stretch leaves film-window peaks low: makeup to near white.
+#[test]
+fn host_calib_exposure_makeup_lifts_dim_film_window() {
+    let w = 32;
+    // Raw: mid film ~8000, bright film ~16000; dark ~1000, home white ~50000.
+    let mut rgb = rgb_of(16, w, [8000; 3]);
+    rgb.slice_mut(s![.., w / 4..3 * w / 4, ..]).fill(16000);
+    let dark = Array2::from_elem((w, 3), 1000.0f32);
+    let white = Array2::from_elem((w, 3), 50000.0f32);
+    let out = pipe().apply_host_calib(rgb, &dark, &white, HOST_CALIB_PEAK_TARGET, HOST_CALIB_PEAK_PERCENTILE, true).unwrap();
+    assert!(percentile(out.iter().copied(), 99.7) >= HOST_CALIB_PEAK_TARGET as f64 * 0.95);
+    // Midtones must lift with the peak (not only clip edges).
+    assert!(percentile(out.iter().copied(), 50.0) > 20000.0);
+}
+
+/// Holder chrome brighter than film inset must not stay above film peak.
+#[test]
+fn host_calib_border_clamp_caps_hot_margins() {
+    let mut rgb = rgb_of(100, 100, [20000; 3]);
+    rgb.slice_mut(s![10..90, 10..90, ..]).fill(25000);
+    chrome_border(&mut rgb, 4);
+    let out = pipe().clamp_border_highlights(rgb, HOST_CALIB_BORDER_INSET, HOST_CALIB_PEAK_PERCENTILE);
+    let max = |a: ndarray::ArrayView3<u16>| a.iter().copied().max().unwrap();
+    assert!(max(out.slice(s![..4, .., ..])) <= max(out.slice(s![10..90, 10..90, ..])));
+    let centre = out.slice(s![40..60, 40..60, ..]);
+    assert_eq!(centre.iter().map(|&v| v as u64).sum::<u64>() / centre.len() as u64, 25000);
+}
+
+/// A joint ceiling leaves the margin above a dim channel's own film peak
+/// (session 004: green film peak 19306 vs joint p99.7 27432).
+#[test]
+fn border_clamp_ceiling_is_per_channel() {
+    let levels = [27000u16, 19300, 27600];
+    let mut rgb = rgb_of(200, 200, levels);
+    chrome_border(&mut rgb, 6);
+    let out = pipe().clamp_border_highlights(rgb, HOST_CALIB_BORDER_INSET, HOST_CALIB_PEAK_PERCENTILE);
+    for (c, &expected) in levels.iter().enumerate() {
+        assert_eq!(out.slice(s![20..180, 20..180, c]).iter().copied().max().unwrap(), expected);
+        assert!(out.slice(s![..6, .., c]).iter().copied().max().unwrap() <= expected + 1);
+    }
+}
+
+/// The makeup must be scalar: a per-channel lift neutralizes the mask.
+#[test]
+fn expose_film_base_keeps_the_orange_mask_ratios() {
+    // Session 004 film-window levels: base at 42% of scale, green 0.71x of red.
+    let out = pipe().expose_film_base(
+        rgb_of(120, 120, [27046, 19306, 27695]),
+        "test",
+        HOST_CALIB_PEAK_TARGET,
+        HOST_CALIB_PEAK_PERCENTILE,
+        false,
+        HOST_CALIB_HIGHLIGHT_CEILING,
+        HOST_CALIB_HIGHLIGHT_PERCENTILE,
+    );
+    let peak = *out.iter().max().unwrap() as f64;
+    assert!((0.98..=1.02).contains(&(peak / HOST_CALIB_PEAK_TARGET as f64)), "{peak}");
+    let mean = |c| out.slice(s![.., .., c]).iter().map(|&v| v as f64).sum::<f64>() / (120.0 * 120.0);
+    assert!((mean(1) / mean(0) - 19306.0 / 27046.0).abs() < 0.005);
+}
