@@ -413,8 +413,9 @@ x  = 0.5 + (x − 0.5)·(1 + contrast·0.015)       # tone(d)
 
 u  = (1 − x)·PAPER_RANGE + exposure_c           # paper log exposure
 y  = 1 − u / PAPER_RANGE                        # = x − exposure_c / 1.05
-out = tone_curve(profile knots, y)
 ```
+
+The tone profile then prints `y` of the three channels together (6.4).
 
 with
 
@@ -458,10 +459,21 @@ nothing hard‑clips inside the curve itself.
 
 ### 6.4 Lookup tables — `CurveLut`
 
-Each channel is evaluated at **8192** densities from −0.5 to 4.5 D, clamped
-to 0..1, then forced monotone (a running max, or min if the curve falls) so
-extreme slider settings can never fold the curve back. `apply(c, d)`
-interpolates linearly. The tables output **sRGB‑encoded MelissaRGB**.
+`tone[c]` holds each channel's print tone `y` at **8192** densities from
+−0.5 to 4.5 D; `profile` holds the tone profile at 8192 values of `y` from
+−0.5 to 1.5 (`PROFILE_XMIN/XMAX`; the identity for Edit Only and the
+unconverted view). Both are forced monotone (a running max, or min if the
+curve falls) so extreme slider settings can never fold a curve back.
+
+`apply_rgb(d)` prints a pixel: the three `y`, then the profile applied the
+way Lightroom applies a master curve (the DNG spec's RGBTone): through the
+largest and the smallest `y`, with the middle channel placed between them as
+it was, `mid' = lo' + (hi' − lo')·(mid − lo)/(hi − lo)`, clamped to 0..1. A
+grey prints exactly as with per‑channel curves, so the profiles' fit to the
+plugin's greys holds; a colour keeps its hue instead of being pulled towards
+a primary by the curve's toe and shoulder. `lut[c]` is each channel through
+the profile alone (the neutral curves), for `apply(c, d)` and the curve
+display. Outputs are **sRGB‑encoded MelissaRGB**.
 
 `CurveLut::negative_view` is the unconverted view: `srgb_encode(0.97·10^−d)`,
 the scan as captured with the base at 0.97.
@@ -640,7 +652,7 @@ two qualify).
 
 ```
 d    = density (+ dodge offset · gain_c)
-p    = [lut_R(d_R), lut_G(d_G), lut_B(d_B)]        # encoded MelissaRGB
+p    = apply_rgb(d)                                # encoded MelissaRGB (6.4)
 p    = look(p)                                     # converted frames only
 out  = encode_out(compress_gamut(M_out · srgb_decode(p)))
 ```

@@ -1346,11 +1346,7 @@ impl Renderer {
     /// Encoded MelissaRGB positive (before output conversion).
     #[inline]
     pub fn positive(&self, d: [f32; 3]) -> [f32; 3] {
-        let p = [
-            self.lut.apply(0, d[0]),
-            self.lut.apply(1, d[1]),
-            self.lut.apply(2, d[2]),
-        ];
+        let p = self.lut.apply_rgb(d);
         if self.converted {
             self.look.apply(p)
         } else {
@@ -2497,10 +2493,11 @@ mod tests {
         // 4.66. Since printing with the plugin's (brighter, steeper) tone
         // curves, colour dE00 against the chart's true colours is the gate;
         // tone-matched dE00 assumes the curves' extra chroma is wanted and is
-        // only shown. The bounds only tighten from here.
-        assert!(m.color_de < 5.1, "colour dE00 {}", m.color_de);
+        // only shown. The bounds only tighten from here. Printing the tone
+        // profile hue-preservingly: colour dE00 4.45, tone-matched 3.61.
+        assert!(m.color_de < 4.6, "colour dE00 {}", m.color_de);
         assert!(
-            m.tone_matched_de < 4.5,
+            m.tone_matched_de < 3.8,
             "tone-matched dE00 {}",
             m.tone_matched_de
         );

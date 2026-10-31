@@ -23,8 +23,13 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var neg: texture_2d<f32>;
-// Curve tables (rgb per entry), then the look map, then its grey curves.
+// Curve tables (print tone per channel in rgb, the tone profile in a),
+// then the look map, then its grey curves.
 @group(0) @binding(2) var<storage, read> tables: array<vec4<f32>>;
+
+// Print tone span of the profile table (curve::PROFILE_XMIN / XMAX).
+const PROFILE_XMIN: f32 = -0.5;
+const PROFILE_XMAX: f32 = 1.5;
 
 const HUES: u32 = 24u;
 const SATS: u32 = 5u;
@@ -68,6 +73,30 @@ fn curve(ch: u32, d: f32) -> f32 {
     let t = x - f32(i);
     let a = tables[i][ch];
     return a + (tables[j][ch] - a) * t;
+}
+
+fn profile(v: f32) -> f32 {
+    let n = p.lut.z;
+    let x = clamp((v - PROFILE_XMIN) / (PROFILE_XMAX - PROFILE_XMIN) * (n - 1.0), 0.0, n - 1.0);
+    let i = min(u32(x), u32(n) - 2u);
+    let t = x - f32(i);
+    let a = tables[i].w;
+    return a + (tables[i + 1u].w - a) * t;
+}
+
+// The tone profile on the largest and smallest channel, the middle one
+// kept at its place between them (curve::rgb_tone).
+fn print(x: vec3<f32>) -> vec3<f32> {
+    let hi = max(x.r, max(x.g, x.b));
+    let lo = min(x.r, min(x.g, x.b));
+    let fh = profile(hi);
+    let fl = profile(lo);
+    let span = hi - lo;
+    if (span <= 1e-6) {
+        return clamp(vec3<f32>(fh), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    let o = fl + (fh - fl) * (x - vec3<f32>(lo)) / span;
+    return clamp(o, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 fn rem(x: f32, m: f32) -> f32 {
@@ -231,7 +260,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     }
     let off = -g * u * u * u / (u * u + p.dodge.w + 1e-9);
     let d = n.rgb + off * p.gain.xyz;
-    let pos = look(vec3<f32>(curve(0u, d.r), curve(1u, d.g), curve(2u, d.b)));
+    let pos = look(print(vec3<f32>(curve(0u, d.r), curve(1u, d.g), curve(2u, d.b))));
     let c = clamp(pos, vec3<f32>(0.0), vec3<f32>(1.0));
     let lin = vec3<f32>(srgb_decode(c.r), srgb_decode(c.g), srgb_decode(c.b));
     let o = clamp(

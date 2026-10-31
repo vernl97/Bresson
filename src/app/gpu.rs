@@ -68,7 +68,7 @@ impl ViewData {
     pub fn new(r: &Renderer) -> Arc<Self> {
         let (lut, look, out) = r.gpu_parts();
         let mut tables: Vec<[f32; 4]> = (0..LUT_SIZE)
-            .map(|i| [lut.lut[0][i], lut.lut[1][i], lut.lut[2][i], 0.0])
+            .map(|i| [lut.tone[0][i], lut.tone[1][i], lut.tone[2][i], lut.profile[i]])
             .collect();
         let (look_params, look_tables) = match look {
             Some(l) => {

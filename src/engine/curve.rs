@@ -85,6 +85,10 @@ pub const CC: f64 = 0.01;
 pub const LUT_DMIN: f64 = -0.5;
 pub const LUT_DMAX: f64 = 4.5;
 pub const LUT_SIZE: usize = 8192;
+/// Span of print tone (0 = black, 1 = white, before the tone profile)
+/// the profile table covers; strong tone edits reach past 0..1.
+pub const PROFILE_XMIN: f64 = -0.5;
+pub const PROFILE_XMAX: f64 = 1.5;
 
 /// Number of knots of a tone curve, evenly spaced over normalised density.
 const KNOTS: usize = 21;
@@ -303,7 +307,6 @@ struct ChannelCurve {
     levels: ChannelLevels,
     /// Black and white clip, as fractions of the range.
     clip: (f64, f64),
-    knots: [f64; KNOTS],
     gamma: f64,
     /// Mid-tone colour gamma of this channel.
     mid_gamma: f64,
@@ -323,7 +326,7 @@ struct ChannelCurve {
 
 impl ChannelCurve {
     fn new(l: &Levels, s: &Settings, c: usize) -> Self {
-        let (auto_tone, knots) = profile(s.tone_profile);
+        let (auto_tone, _) = profile(s.tone_profile);
         let kind = s.image_type;
         // Clip moves the black / white end into the range (− recovers).
         let clip = (s.black_clip as f64 * 0.006, s.white_clip as f64 * 0.006);
@@ -347,7 +350,6 @@ impl ChannelCurve {
             kind,
             levels: l[c],
             clip,
-            knots,
             gamma: auto * brightness,
             mid_gamma: 2f64.powf(f(mid) / 75.0 * 0.5),
             whites: f(s.whites) - f(s.glow),
@@ -392,44 +394,97 @@ impl ChannelCurve {
         (1.0 - self.tone(d)) * PAPER_RANGE + self.exposure
     }
 
-    /// Encoded output (sRGB tone response). Already positive scans keep
-    /// their own tones; everything else is printed with the tone profile.
-    fn output(&self, d: f64) -> f64 {
-        let x = 1.0 - self.exposure(d) / PAPER_RANGE;
-        if self.kind == ImageType::EditOnly {
-            return x;
-        }
-        tone_curve(&self.knots, x)
+    /// Print tone before the tone profile (1 = white).
+    fn print_tone(&self, d: f64) -> f64 {
+        1.0 - self.exposure(d) / PAPER_RANGE
     }
 }
 
-/// Per-channel lookup table: density above base → encoded positive (0..1).
+/// A tone curve `f` applied to a colour as Lightroom applies a master
+/// curve (the DNG spec's RGBTone): to the largest and the smallest channel,
+/// with the middle one kept at its place between them. A grey gets `f`
+/// exactly; a colour keeps its hue where curving each channel on its own
+/// would crush the weak channels in a toe or shoulder and pull it towards
+/// a primary.
+#[inline]
+fn rgb_tone(x: [f32; 3], f: impl Fn(f32) -> f32) -> [f32; 3] {
+    let (hi, lo) = if x[0] >= x[1] { (0, 1) } else { (1, 0) };
+    let (hi, mid, lo) = if x[2] > x[hi] {
+        (2, hi, lo)
+    } else if x[2] < x[lo] {
+        (hi, lo, 2)
+    } else {
+        (hi, 2, lo)
+    };
+    let mut o = [0.0f32; 3];
+    o[hi] = f(x[hi]);
+    o[lo] = f(x[lo]);
+    let span = x[hi] - x[lo];
+    o[mid] = if span > 1e-6 {
+        o[lo] + (o[hi] - o[lo]) * (x[mid] - x[lo]) / span
+    } else {
+        o[hi]
+    };
+    o
+}
+
+/// Lookup tables of the print: per channel, density above base → print
+/// tone before the tone profile; then the profile, shared by the channels
+/// and applied hue-preservingly ([`CurveLut::apply_rgb`]).
 #[derive(Clone)]
 pub struct CurveLut {
+    /// Per channel: density → print tone, by [`lut_density`].
+    pub tone: [Vec<f32>; 3],
+    /// Print tone → encoded positive, by [`profile_x`]. Identity for
+    /// already positive scans and the unconverted view.
+    pub profile: Vec<f32>,
+    /// Each channel through the profile alone (0..1): the neutral curves.
     pub lut: [Vec<f32>; 3],
     /// Density span shown by [`CurveLut::sample`].
     view: (f64, f64),
 }
 
+/// Strong tone adjustments must never fold a table back.
+fn monotonic(v: &mut [f32]) {
+    if v[v.len() - 1] >= v[0] {
+        for i in 1..v.len() {
+            v[i] = v[i].max(v[i - 1]);
+        }
+    } else {
+        for i in 1..v.len() {
+            v[i] = v[i].min(v[i - 1]);
+        }
+    }
+}
+
+#[inline]
+fn lerp_table(v: &[f32], x: f32) -> f32 {
+    let x = x.clamp(0.0, (v.len() - 1) as f32);
+    let i = (x as usize).min(v.len() - 2);
+    let t = x - i as f32;
+    v[i] + (v[i + 1] - v[i]) * t
+}
+
 impl CurveLut {
     pub fn new(l: &Levels, s: &Settings) -> Self {
-        let lut = std::array::from_fn(|c| {
+        let tone = std::array::from_fn(|c| {
             let cc = ChannelCurve::new(l, s, c);
             let mut v: Vec<f32> = (0..LUT_SIZE)
-                .map(|i| cc.output(lut_density(i)).clamp(0.0, 1.0) as f32)
+                .map(|i| cc.print_tone(lut_density(i)) as f32)
                 .collect();
-            // Strong tone adjustments must never fold the curve back.
-            if v[LUT_SIZE - 1] >= v[0] {
-                for i in 1..LUT_SIZE {
-                    v[i] = v[i].max(v[i - 1]);
-                }
-            } else {
-                for i in 1..LUT_SIZE {
-                    v[i] = v[i].min(v[i - 1]);
-                }
-            }
+            monotonic(&mut v);
             v
         });
+        let profile = if s.image_type == ImageType::EditOnly {
+            identity_profile()
+        } else {
+            let (_, knots) = profile(s.tone_profile);
+            let mut v: Vec<f32> = (0..LUT_SIZE)
+                .map(|i| tone_curve(&knots, profile_x(i)) as f32)
+                .collect();
+            monotonic(&mut v);
+            v
+        };
         let view = if s.image_type == ImageType::EditOnly {
             (0.0, 2.5)
         } else {
@@ -438,33 +493,51 @@ impl CurveLut {
             let pad = (hi - lo) * 0.1;
             (lo - pad, hi + pad)
         };
-        Self { lut, view }
+        Self::with(tone, profile, view)
     }
 
     /// The unconverted negative as scanned: base at 0.97 linear.
     pub fn negative_view() -> Self {
-        let lut = std::array::from_fn(|_| {
+        let tone = std::array::from_fn(|_| {
             (0..LUT_SIZE)
                 .map(|i| color::srgb_encode(0.97 * 10f32.powf(-lut_density(i) as f32)))
                 .collect()
         });
+        Self::with(tone, identity_profile(), (0.0, 2.5))
+    }
+
+    fn with(tone: [Vec<f32>; 3], profile: Vec<f32>, view: (f64, f64)) -> Self {
+        let lut = std::array::from_fn(|c| {
+            tone[c]
+                .iter()
+                .map(|&x| lerp_table(&profile, profile_index(x)).clamp(0.0, 1.0))
+                .collect()
+        });
         Self {
+            tone,
+            profile,
             lut,
-            view: (0.0, 2.5),
+            view,
         }
     }
 
     #[inline]
+    fn index(d: f32) -> f32 {
+        (d - LUT_DMIN as f32) / (LUT_DMAX - LUT_DMIN) as f32 * (LUT_SIZE - 1) as f32
+    }
+
+    /// One channel through the profile alone: exact for neutrals.
+    #[inline]
     pub fn apply(&self, c: usize, d: f32) -> f32 {
-        let x = ((d - LUT_DMIN as f32) / (LUT_DMAX - LUT_DMIN) as f32 * (LUT_SIZE - 1) as f32)
-            .clamp(0.0, (LUT_SIZE - 1) as f32);
-        let i = x as usize;
-        let l = &self.lut[c];
-        if i >= LUT_SIZE - 1 {
-            return l[LUT_SIZE - 1];
-        }
-        let t = x - i as f32;
-        l[i] + (l[i + 1] - l[i]) * t
+        lerp_table(&self.lut[c], Self::index(d))
+    }
+
+    /// The print of a density triplet: each channel's print tone, then the
+    /// tone profile, hue-preservingly ([`rgb_tone`]).
+    #[inline]
+    pub fn apply_rgb(&self, d: [f32; 3]) -> [f32; 3] {
+        let x: [f32; 3] = std::array::from_fn(|c| lerp_table(&self.tone[c], Self::index(d[c])));
+        rgb_tone(x, |v| lerp_table(&self.profile, profile_index(v))).map(|v| v.clamp(0.0, 1.0))
     }
 
     /// Curves sampled for display: x 0..1 across the analysed density span
@@ -487,6 +560,20 @@ impl CurveLut {
 
 fn lut_density(i: usize) -> f64 {
     LUT_DMIN + i as f64 / (LUT_SIZE - 1) as f64 * (LUT_DMAX - LUT_DMIN)
+}
+
+/// Print tone at entry `i` of the profile table.
+fn profile_x(i: usize) -> f64 {
+    PROFILE_XMIN + i as f64 / (LUT_SIZE - 1) as f64 * (PROFILE_XMAX - PROFILE_XMIN)
+}
+
+#[inline]
+fn profile_index(x: f32) -> f32 {
+    (x - PROFILE_XMIN as f32) / (PROFILE_XMAX - PROFILE_XMIN) as f32 * (LUT_SIZE - 1) as f32
+}
+
+fn identity_profile() -> Vec<f32> {
+    (0..LUT_SIZE).map(|i| profile_x(i) as f32).collect()
 }
 
 /// The colour picker: white balance (temp, tint) that prints the sampled
@@ -587,6 +674,28 @@ mod tests {
             assert!(lut.apply(c, l[c].lo as f32) < 0.1, "black end");
             assert!(lut.apply(c, l[c].hi as f32) > 0.9, "white end");
             assert!(lut.apply(c, 0.4) < lut.apply(c, 0.7));
+        }
+    }
+
+    #[test]
+    fn tone_profile_keeps_the_hue_of_saturated_shadows() {
+        let l = levels();
+        let lut = CurveLut::new(&l, &Settings::default());
+        // A grey prints as each channel's own curve.
+        let g = std::array::from_fn(|c| mid_grey(&l, c));
+        let p = lut.apply_rgb(g);
+        for c in 0..3 {
+            assert!((p[c] - lut.apply(c, g[c])).abs() < 1e-3, "{p:?}");
+        }
+        // A yellow-green keeps where its red sits between blue and green;
+        // its strongest and weakest channels print as on their own.
+        let d = [0.5, 0.75, 0.4];
+        let x: [f32; 3] = std::array::from_fn(|c| lerp_table(&lut.tone[c], CurveLut::index(d[c])));
+        let place = |v: [f32; 3]| (v[0] - v[2]) / (v[1] - v[2]);
+        let p = lut.apply_rgb(d);
+        assert!((place(p) - place(x)).abs() < 1e-3, "{p:?} {x:?}");
+        for c in [1, 2] {
+            assert!((p[c] - lut.apply(c, d[c])).abs() < 1e-5, "{p:?}");
         }
     }
 
