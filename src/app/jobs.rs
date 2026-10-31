@@ -53,6 +53,8 @@ pub enum JobResult {
         spread: f64,
     },
     Message(String),
+    /// From the scanner worker (`scanner.rs`).
+    Scan(super::scanner::ScanEvent),
 }
 
 pub struct Jobs {
@@ -71,6 +73,11 @@ impl Jobs {
             ctx,
             active: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// For long-lived workers that report through the job channel.
+    pub fn sender(&self) -> Sender<JobResult> {
+        self.tx.clone()
     }
 
     pub fn ctx(&self) -> &egui::Context {

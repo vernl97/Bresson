@@ -94,3 +94,13 @@ fn gl845_8200i_does_not_byteswap() {
     let out = pipe.decode_rgb(&raw, &g, Some(false)).unwrap();
     assert_eq!(out[[0, 0, 0]], 0x1234);
 }
+
+#[test]
+fn tiffs_carry_the_software_tag() {
+    let dir = common::tmp_path("tiff-software");
+    let path = save_rgb16_tiff(&Array3::zeros((2, 2, 3)), dir.join("s.tif"), 900).unwrap();
+    let mut dec = tiff::decoder::Decoder::new(std::io::BufReader::new(File::open(path).unwrap())).unwrap();
+    let sw = dec.get_tag_ascii_string(tiff::tags::Tag::Software).unwrap();
+    assert_eq!(sw, opticfilm::image::SOFTWARE);
+    assert!(sw.starts_with("opticfilm "));
+}

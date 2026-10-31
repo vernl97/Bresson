@@ -252,7 +252,8 @@ fn density_matrix(s: &Settings) -> [[f32; 3]; 3] {
 
 /// The scan source implied by a file: demosaiced (LinearRaw) DNGs and
 /// files written by scanner software are VueScan / SilverFast DNGs, other
-/// raw files digital camera captures, bitmaps TIF scans.
+/// raw files digital camera captures, bitmaps TIF scans except the app's own
+/// scans (`opticfilm` Software tag), which are linear.
 pub fn detect_source(src: &SourceImage) -> super::settings::Source {
     use super::settings::Source;
     let sw = src.info.software.to_ascii_lowercase();
@@ -261,6 +262,8 @@ pub fn detect_source(src: &SourceImage) -> super::settings::Source {
         Source::VueScanRaw
     } else if src.is_raw {
         Source::DigitalCamera
+    } else if sw.starts_with("opticfilm") {
+        Source::LinearScan
     } else {
         Source::TifScan
     }
@@ -1435,6 +1438,9 @@ mod tests {
         use super::super::settings::Source;
         let mut src = super::super::testchart::negative(0.0).src;
         assert_eq!(detect_source(&src), Source::TifScan);
+        src.info.software = "opticfilm 0.1.0".into(); // the scanner driver's own TIFFs
+        assert_eq!(detect_source(&src), Source::LinearScan);
+        src.info.software.clear();
         src.is_raw = true;
         assert_eq!(detect_source(&src), Source::DigitalCamera);
         src.info.software = "VueScan 9.8.45".into();

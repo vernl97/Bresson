@@ -16,6 +16,7 @@ pub mod pipeline;
 pub mod presets;
 #[cfg(test)]
 mod scan_check;
+pub mod scan_dng;
 pub mod settings;
 pub mod sidecar;
 pub mod skin;

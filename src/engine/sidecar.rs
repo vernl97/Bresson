@@ -142,6 +142,24 @@ pub struct Defaults {
     pub projects: Vec<PathBuf>,
     /// Convert frames only when asked, instead of as they load.
     pub manual_convert: bool,
+    /// The Scan panel's last choices.
+    pub scan: ScanDefaults,
+}
+
+/// Scan settings the Scan panel remembers between sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScanDefaults {
+    pub dpi: i64,
+    pub infrared: bool,
+    pub multi_exposure: bool,
+    pub passes: i64,
+}
+
+impl Default for ScanDefaults {
+    fn default() -> Self {
+        Self { dpi: 3600, infrared: true, multi_exposure: false, passes: 1 }
+    }
 }
 
 /// Move `dir` to the front of the Projects list.

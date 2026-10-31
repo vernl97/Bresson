@@ -382,6 +382,14 @@ impl NlpApp {
                     }
                     ui.add_space(4.0);
                     self.source_chip(ui);
+                    if !self.single_mode
+                        && ui
+                            .add(if self.scan.open { widgets::primary("Scan") } else { widgets::ghost("Scan") })
+                            .on_hover_text("Scan film from a Plustek OpticFilm scanner into this roll")
+                            .clicked()
+                    {
+                        self.toggle_scan_panel();
+                    }
                     ui.add_space(2.0);
                     let r = icon_button(ui, Icon::More, "More", false, true);
                     egui::Popup::menu(&r).show(|ui| {
@@ -593,6 +601,8 @@ impl NlpApp {
                     });
                 });
             });
+
+        self.scan_panel_ui(ui);
 
         egui::CentralPanel::default()
             .frame(

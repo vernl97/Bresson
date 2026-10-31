@@ -9,6 +9,8 @@ mod history;
 mod jobs;
 mod picker;
 mod roll;
+mod scan_panel;
+mod scanner;
 mod widgets;
 
 use std::collections::BTreeSet;
@@ -198,6 +200,8 @@ pub struct NlpApp {
     pub auto: auto::AutoState,
     /// Undo / redo of settings edits, editor and grid alike.
     pub history: history::History,
+    /// The Scan panel and its scanner worker.
+    pub scan: scan_panel::ScanState,
 }
 
 impl NlpApp {
@@ -230,6 +234,7 @@ impl NlpApp {
             convert_dialog: None,
             auto: Default::default(),
             history: Default::default(),
+            scan: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -354,47 +359,64 @@ impl NlpApp {
         }
     }
 
+    /// A frame for `path` in the open roll: its sidecar, or new settings with
+    /// the roll's film details.
+    fn new_frame(&self, path: PathBuf) -> Frame {
+        let roll_meta = self.roll.info.as_ref().map(|r| r.metadata.clone());
+        let loaded = sidecar::load(&path);
+        let source_auto = loaded.is_none();
+        let mut sc = loaded.unwrap_or_else(|| Sidecar {
+            settings: self.defaults.settings.clone(),
+            metadata: roll_meta.unwrap_or_default(),
+            ..Default::default()
+        });
+        if decode::is_raw(&path) || sc.analysis.is_some() {
+        } else if source_auto {
+            // Bitmap scans: Lightroom WB must not be applied; mirror that default.
+            sc.settings.film_base = crate::engine::settings::FilmBase::Off;
+            sc.settings.source = crate::engine::settings::Source::TifScan;
+        }
+        let auto_convert = !sc.is_converted();
+        Frame {
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            path,
+            sc,
+            proxy: ProxyState::NotLoaded,
+            thumb_src: None,
+            thumb: None,
+            thumb_dirty: true,
+            dirty_since: None,
+            exporting: false,
+            source_auto,
+            auto_convert,
+        }
+    }
+
+    /// A frame the scanner just wrote into the open roll: it joins the grid,
+    /// converts as its proxy loads, and the roll is balanced again.
+    pub fn add_scanned_frame(&mut self, path: PathBuf) {
+        if self.index_of(&path).is_some() || self.folder.as_deref() != path.parent() {
+            return;
+        }
+        let frame = self.new_frame(path);
+        self.frames.push(frame);
+        let i = self.frames.len() - 1;
+        self.request_thumb(i);
+        self.pump_proxies();
+        if self.auto.roll_pass == auto::RollPass::Done {
+            self.auto.roll_pass = auto::RollPass::Waiting;
+        }
+    }
+
     fn load_frames(&mut self, files: Vec<PathBuf>, dir: &Path) {
         self.save_all();
         let _ = std::fs::create_dir_all(dir.join("NLP"));
         self.roll.info = sidecar::load_roll_info(dir);
         self.roll.banner = None;
-        let roll_meta = self.roll.info.as_ref().map(|r| r.metadata.clone());
-        self.frames = files
-            .into_iter()
-            .map(|path| {
-                let loaded = sidecar::load(&path);
-                let source_auto = loaded.is_none();
-                let mut sc = loaded.unwrap_or_else(|| Sidecar {
-                    settings: self.defaults.settings.clone(),
-                    metadata: roll_meta.clone().unwrap_or_default(),
-                    ..Default::default()
-                });
-                if decode::is_raw(&path) || sc.analysis.is_some() {
-                } else if source_auto {
-                    // Bitmap scans: Lightroom WB must not be applied; mirror that default.
-                    sc.settings.film_base = crate::engine::settings::FilmBase::Off;
-                    sc.settings.source = crate::engine::settings::Source::TifScan;
-                }
-                let auto_convert = !sc.is_converted();
-                Frame {
-                    name: path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    path,
-                    sc,
-                    proxy: ProxyState::NotLoaded,
-                    thumb_src: None,
-                    thumb: None,
-                    thumb_dirty: true,
-                    dirty_since: None,
-                    exporting: false,
-                    source_auto,
-                    auto_convert,
-                }
-            })
-            .collect();
+        self.frames = files.into_iter().map(|path| self.new_frame(path)).collect();
         self.folder = Some(dir.to_path_buf());
         self.selected.clear();
         self.active = None;
@@ -1237,6 +1259,10 @@ impl NlpApp {
                     Err(e) => self.toast(format!("Contact sheet failed: {e}"), true),
                 },
                 JobResult::Message(m) => self.toast(m, true),
+                JobResult::Scan(ev) => {
+                    let ctx = self.jobs.ctx().clone();
+                    self.on_scan_event(&ctx, ev);
+                }
             }
         }
     }
@@ -1773,6 +1799,60 @@ mod ui_tests {
         assert!(h.state().view == View::Folder && !h.state().frames.is_empty());
     }
 
+    /// Step until the Scan panel's worker command has finished.
+    fn wait_scan(h: &mut Harness<'_, NlpApp>) {
+        let t0 = std::time::Instant::now();
+        while h.state().scan.busy && t0.elapsed().as_secs() < 60 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!h.state().scan.busy, "scanner still busy: {}", h.state().scan.status);
+        assert!(h.state().scan.error.is_none(), "scan failed: {:?}", h.state().scan.error);
+        h.run_steps(2);
+    }
+
+    /// The Scan panel scans two frames from a simulated 8200i SE into an empty
+    /// roll; they join the grid and convert like any scan. With `NLP_UI_OUT`
+    /// set it also saves a screenshot of the panel.
+    #[test]
+    fn scan_panel_scans_into_the_roll() {
+        let dir = std::env::temp_dir().join(format!("nlp_scan_ui_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
+        let builder = Harness::builder().with_size(egui::vec2(1480.0, 940.0));
+        let builder = if out.is_some() { builder.wgpu() } else { builder };
+        let mut h = builder.build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
+        h.run_steps(3);
+        {
+            let app = h.state_mut();
+            app.roll.dialog = None;
+            app.toggle_scan_panel();
+            app.open_scanner(scanner::ScannerChoice::Simulated("plustek-opticfilm-8200i-se".into()));
+        }
+        wait_scan(&mut h);
+        assert!(h.state().scan.info.as_ref().is_some_and(|i| i.scan_ready));
+        h.state_mut().prescan();
+        wait_scan(&mut h);
+        h.state_mut().scan_frame();
+        wait_scan(&mut h);
+        h.state_mut().scan_frame(); // Scan next
+        wait_scan(&mut h);
+        settle(&mut h, 60.0);
+        let app = h.state();
+        let names: Vec<&str> = app.frames.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["scan_001.dng", "scan_002.dng"]);
+        for f in &app.frames {
+            assert!(f.sc.is_converted(), "{} converted", f.name);
+            assert_eq!(f.sc.settings.source, crate::engine::settings::Source::VueScanRaw, "{}", f.name);
+        }
+        assert!(dir.join("NLP").join("scan_001.ir.tif").exists());
+        if let Some(out) = out {
+            shot(&mut h, &out, "scan_panel");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A new folder converts itself: each frame as it loads, then the roll.
     #[test]
     #[ignore]
@@ -1902,6 +1982,7 @@ mod ui_tests {
             convert_dialog: None,
             auto: Default::default(),
             history: Default::default(),
+            scan: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1949,6 +2030,7 @@ mod ui_tests {
             convert_dialog: None,
             auto: Default::default(),
             history: Default::default(),
+            scan: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -1989,6 +2071,7 @@ mod ui_tests {
             convert_dialog: None,
             auto: Default::default(),
             history: Default::default(),
+            scan: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),
@@ -2069,6 +2152,7 @@ mod ui_tests {
             convert_dialog: None,
             auto: Default::default(),
             history: Default::default(),
+            scan: Default::default(),
             exposure_prompt: None,
             preset_draft: None,
             roll: Default::default(),

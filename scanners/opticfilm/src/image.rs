@@ -117,6 +117,10 @@ fn corrcoef(a: &[f64], b: &[f64]) -> f64 {
     sab / (saa * sbb).sqrt()
 }
 
+/// TIFF `Software` tag of every file written here. NLP Studio reads it to
+/// open these scans as linear (gamma 1.0).
+pub const SOFTWARE: &str = concat!("opticfilm ", env!("CARGO_PKG_VERSION"));
+
 fn tiff_path(path: &Path) -> PathBuf {
     match path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
         Some("tif") | Some("tiff") => path.to_path_buf(),
@@ -142,6 +146,7 @@ pub fn save_rgb16_tiff(rgb: &Array3<u16>, path: impl AsRef<Path>, dpi: i64) -> R
         .with_predictor(Predictor::Horizontal);
     let mut img = enc.new_image::<colortype::RGB16>(w as u32, h as u32).map_err(terr)?;
     img.resolution(ResolutionUnit::Inch, Rational { n: dpi as u32, d: 1 });
+    img.encoder().write_tag(Tag::Software, SOFTWARE).map_err(terr)?;
     let data: Vec<u16> = rgb.as_standard_layout().iter().copied().collect();
     img.write_data(&data).map_err(terr)?;
     Ok(out)
@@ -158,6 +163,7 @@ pub fn save_gray16_tiff(gray: &Array2<u16>, path: impl AsRef<Path>, dpi: i64) ->
         .with_predictor(Predictor::Horizontal);
     let mut img = enc.new_image::<colortype::Gray16>(w as u32, h as u32).map_err(terr)?;
     img.resolution(ResolutionUnit::Inch, Rational { n: dpi as u32, d: 1 });
+    img.encoder().write_tag(Tag::Software, SOFTWARE).map_err(terr)?;
     let data: Vec<u16> = gray.as_standard_layout().iter().copied().collect();
     img.write_data(&data).map_err(terr)?;
     Ok(out)
