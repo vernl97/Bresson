@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "scanners/opticfilm"]
+
 [package]
 name = "nlp_studio"
 version = "0.1.0"
