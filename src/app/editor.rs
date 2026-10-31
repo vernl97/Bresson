@@ -45,6 +45,8 @@ enum Handle {
     Dial,
 }
 
+type NegKey = (AnalysisKey, [i32; 4], i32, u8, bool, [i32; 3], bool);
+
 /// Uncommitted crop / straighten state while crop mode is open.
 #[derive(Clone, Copy)]
 pub(super) struct CropEdit {
@@ -140,7 +142,13 @@ pub struct Editor {
     pub loading: bool,
     neg: Option<Negative>,
     neg_small: Option<Negative>,
-    neg_key: Option<(AnalysisKey, [i32; 4], i32, u8, bool, [i32; 3])>,
+    neg_key: Option<NegKey>,
+    /// 1024 px copy of `src` (and the `src` it was made from) that the
+    /// preview uses while the straighten angle is being dragged.
+    src_low: Option<(Arc<SourceImage>, Arc<SourceImage>)>,
+    /// Small negative before straightening, keyed like `neg_key` with the
+    /// angle left out; a drag only has to straighten it again.
+    neg_pre: Option<(NegKey, Negative)>,
     /// CPU-rendered preview (without wgpu).
     tex: Option<egui::TextureHandle>,
     /// Size of the shown negative in pixels; `None` until the first render.
@@ -155,6 +163,8 @@ pub struct Editor {
     pick: Option<Pick>,
     committed: Option<Settings>,
     hist: [[u32; 256]; 3],
+    /// The histogram is not following the preview (angle drag in progress).
+    hist_frozen: bool,
     curves: Vec<[f32; 4]>,
     /// Display scale (screen points per preview pixel); `None` = fit.
     zoom: Option<f32>,
@@ -202,6 +212,8 @@ impl Default for Editor {
             neg: None,
             neg_small: None,
             neg_key: None,
+            src_low: None,
+            neg_pre: None,
             tex: None,
             size: None,
             gpu_neg: None,
@@ -213,6 +225,7 @@ impl Default for Editor {
             pick: None,
             committed: None,
             hist: [[0; 256]; 3],
+            hist_frozen: false,
             curves: Vec::new(),
             zoom: None,
             pan: egui::Vec2::ZERO,
@@ -381,6 +394,33 @@ impl NlpApp {
         let s = self.preview_settings(i);
         let f = &self.frames[i];
         let base = f.base_for(&src);
+        // Dragging the angle re-straightens on every frame, so do it on a
+        // small copy and redo it at full size once the drag ends.
+        let low = dragging
+            && self.editor.crop.is_some()
+            && s.flat_field.is_none()
+            && src.long_edge() > 1100;
+        let prep_src = if low {
+            if !self
+                .editor
+                .src_low
+                .as_ref()
+                .is_some_and(|(from, _)| Arc::ptr_eq(from, &src))
+            {
+                let (data, width, height) =
+                    decode::downscale(&src.data, src.width, src.height, 1024);
+                let small = SourceImage {
+                    width,
+                    height,
+                    data,
+                    ..(*src).clone()
+                };
+                self.editor.src_low = Some((src.clone(), Arc::new(small)));
+            }
+            self.editor.src_low.as_ref().unwrap().1.clone()
+        } else {
+            src.clone()
+        };
         let key = (
             s.analysis_key(),
             s.crop.map(|v| (v * 100.0).round() as i32),
@@ -388,16 +428,36 @@ impl NlpApp {
             s.rotation,
             s.flip_h,
             base.map(|v| (v * 1e5) as i32),
+            low,
         );
         if self.editor.neg_key.as_ref() != Some(&key) || self.editor.neg.is_none() {
-            let neg = pipeline::prepare_negative(&src, &s, base);
+            let neg = if low {
+                let pre_key = (key.0.clone(), key.1, 0, key.3, key.4, key.5, true);
+                if self.editor.neg_pre.as_ref().map(|(k, _)| k) != Some(&pre_key) {
+                    let mut flat = s.clone();
+                    flat.straighten = 0.0;
+                    let n = pipeline::prepare_negative(&prep_src, &flat, base);
+                    self.editor.neg_pre = Some((pre_key, n));
+                }
+                let pre = &self.editor.neg_pre.as_ref().unwrap().1;
+                let (data, width, height) =
+                    decode::straighten(&pre.data, pre.width, pre.height, s.straighten);
+                Negative {
+                    width,
+                    height,
+                    data,
+                }
+            } else {
+                self.editor.neg_pre = None;
+                pipeline::prepare_negative(&prep_src, &s, base)
+            };
             let (d, w, h) = decode::downscale(&neg.data, neg.width, neg.height, 1024);
             self.editor.neg_small = Some(Negative {
                 width: w,
                 height: h,
                 data: d,
             });
-            self.editor.gpu_neg = self.gpu.then(|| gpu::NegData::new(&neg));
+            self.editor.gpu_neg = self.gpu.then(|| gpu::NegData::new(&neg, !low));
             self.editor.neg = Some(neg);
             self.editor.neg_key = Some(key);
         }
@@ -415,16 +475,25 @@ impl NlpApp {
         let full_long = src.info.full_width.max(src.info.full_height).max(1) as f32;
         let crop_frac = 1.0 - (s.crop[0] + s.crop[2]).max(s.crop[1] + s.crop[3]) / 100.0;
         let scale = cpu_neg.width.max(cpu_neg.height) as f32 / (full_long * crop_frac.max(0.1));
-        let px = r.render(cpu_neg, scale.min(1.0));
-        let mut hist = [[0u32; 256]; 3];
-        let step = if self.gpu { 1 } else { 3 };
-        for p in px.iter().step_by(step) {
-            for c in 0..3 {
-                hist[c][(p[c].clamp(0.0, 1.0) * 255.0) as usize] += 1;
+        // The GPU draws the preview, so while the angle is dragged the CPU
+        // copy for histogram and readout is left as it was (and shown dimmed).
+        let frozen = low && self.gpu && !self.editor.px.is_empty();
+        self.editor.hist_frozen = frozen;
+        let px = if frozen {
+            Vec::new()
+        } else {
+            let px = r.render(cpu_neg, scale.min(1.0));
+            let mut hist = [[0u32; 256]; 3];
+            let step = if self.gpu { 1 } else { 3 };
+            for p in px.iter().step_by(step) {
+                for c in 0..3 {
+                    hist[c][(p[c].clamp(0.0, 1.0) * 255.0) as usize] += 1;
+                }
             }
-        }
-        self.editor.hist = hist;
-        self.editor.curves = r.curve_lut().map(|l| l.sample(96)).unwrap_or_default();
+            self.editor.hist = hist;
+            self.editor.curves = r.curve_lut().map(|l| l.sample(96)).unwrap_or_default();
+            px
+        };
         let (w, h) = (cpu_neg.width, cpu_neg.height);
         if self.gpu {
             self.editor.gpu_view = Some(gpu::ViewData::new(&r));
@@ -456,9 +525,11 @@ impl NlpApp {
             }
         }
         self.editor.size = Some([full.width, full.height]);
-        self.editor.px = px;
-        self.editor.px_size = [w, h];
-        self.editor.dirty = use_small;
+        if !frozen {
+            self.editor.px = px;
+            self.editor.px_size = [w, h];
+        }
+        self.editor.dirty = use_small || low;
     }
 
     /// Zoom by `factor` keeping the image point under `rel` (cursor relative
@@ -1070,7 +1141,12 @@ impl NlpApp {
         if self.editor.crop.is_some() {
             self.crop_panel(ui, i);
         }
-        widgets::histogram(ui, &self.editor.hist, vec2(ui.available_width(), 72.0));
+        widgets::histogram(
+            ui,
+            &self.editor.hist,
+            vec2(ui.available_width(), 72.0),
+            self.editor.hist_frozen,
+        );
         ui.add_space(4.0);
         let converted = self.frames[i].sc.is_converted();
         egui::ScrollArea::vertical()

@@ -36,7 +36,13 @@ pub struct NegData {
 }
 
 impl NegData {
-    pub fn new(neg: &Negative) -> Arc<Self> {
+    /// `with_low` fills the dodge low-pass; a drag preview skips it.
+    pub fn new(neg: &Negative, with_low: bool) -> Arc<Self> {
+        let low = if with_low {
+            dodge::low_pass(neg)
+        } else {
+            vec![0.0; neg.data.len()]
+        };
         Arc::new(Self {
             id: next_id(),
             width: neg.width as u32,
@@ -44,7 +50,7 @@ impl NegData {
             texels: neg
                 .data
                 .iter()
-                .zip(dodge::low_pass(neg))
+                .zip(low)
                 .map(|(d, low)| [d[0], d[1], d[2], low])
                 .collect(),
         })
@@ -417,7 +423,7 @@ mod tests {
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
         let format = wgpu::TextureFormat::Rgba32Float;
         let mut gp = GpuPreview::new(&device, format, true);
-        let (neg_d, view) = (NegData::new(neg), ViewData::new(r));
+        let (neg_d, view) = (NegData::new(neg, true), ViewData::new(r));
         gp.prepare(&device, &queue, 0, &neg_d, &view, [0.0, 0.0, 1.0, 1.0]);
         let (w, h) = (neg.width as u32, neg.height as u32);
         let target = device.create_texture(&wgpu::TextureDescriptor {

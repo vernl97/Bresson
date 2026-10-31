@@ -201,7 +201,8 @@ pub fn gradient_rect(ui: &Ui, rect: Rect, a: Color32, b: Color32) {
 
 /// Paint an RGB histogram (counts per channel, 256 bins) as additive
 /// translucent fills, so overlapping channels sum towards white.
-pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2) {
+/// `frozen` greys the plot out: it shows the last settled state.
+pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2, frozen: bool) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 6.0, theme::BG);
@@ -213,7 +214,11 @@ pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2) {
         .max()
         .unwrap_or(1)
         .max(1) as f32;
-    let cols = [(235u8, 72u8, 72u8), (72, 200, 96), (80, 130, 255)];
+    let cols = if frozen {
+        [(95u8, 95u8, 95u8); 3]
+    } else {
+        [(235u8, 72u8, 72u8), (72, 200, 96), (80, 130, 255)]
+    };
     for (c, &(r, g, b)) in cols.iter().enumerate() {
         let y = |v: u32| plot.bottom() - plot.height() * (v as f32 / max).sqrt().min(1.0);
         let x = |i: usize| plot.left() + plot.width() * i as f32 / 255.0;
