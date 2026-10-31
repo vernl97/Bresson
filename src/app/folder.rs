@@ -417,6 +417,13 @@ impl NlpApp {
                         {
                             self.selected = (0..self.frames.len()).collect();
                         }
+                        ui.separator();
+                        if ui
+                            .add(egui::Button::new("Keyboard shortcuts").shortcut_text(key("?")))
+                            .clicked()
+                        {
+                            self.shortcuts_open = true;
+                        }
                         let paste = egui::Button::new("Paste settings").shortcut_text(key(&paste_key));
                         if ui
                             .add_enabled(self.clipboard.is_some() && !self.selected.is_empty(), paste)
@@ -539,7 +546,7 @@ impl NlpApp {
                     ui.label(RichText::new(status).small().color(theme::MUTED));
                     if self.selected.is_empty() {
                         ui.label(
-                            RichText::new("· Click to select · double-click to edit")
+                            RichText::new("· Click to select · double-click to edit · ? for shortcuts")
                                 .small()
                                 .color(theme::FAINT),
                         );
@@ -623,7 +630,7 @@ impl NlpApp {
     }
 
     fn folder_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() || self.shortcuts_open {
             return;
         }
         let mac = ctx.os() == egui::os::OperatingSystem::Mac;

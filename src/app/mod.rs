@@ -11,6 +11,7 @@ mod picker;
 mod roll;
 mod scan_panel;
 mod scanner;
+mod shortcuts;
 mod widgets;
 
 use std::collections::BTreeSet;
@@ -178,6 +179,8 @@ pub struct NlpApp {
     pub clipboard: Option<Settings>,
     pub editor: editor::Editor,
     pub toasts: Vec<Toast>,
+    /// The keyboard shortcut sheet is showing.
+    pub shortcuts_open: bool,
     pub export_total: usize,
     pub export_done: usize,
     pub thumb_size: f32,
@@ -230,6 +233,7 @@ impl NlpApp {
             clipboard: None,
             editor: editor::Editor::default(),
             toasts: Vec::new(),
+            shortcuts_open: false,
             export_total: 0,
             export_done: 0,
             thumb_size: 180.0,
@@ -1459,6 +1463,7 @@ impl eframe::App for NlpApp {
         self.convert_dialog_ui(&ctx);
         self.roll_dialog_ui(&ctx);
         self.exposure_prompt_ui(&ctx);
+        self.shortcuts_ui(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_all();
             sidecar::flush();
@@ -1690,7 +1695,21 @@ mod ui_tests {
         settle(&mut h, 90.0);
         h.state_mut().open_editor(2);
         settle(&mut h, 60.0);
+        for k in [egui::Key::Num4, egui::Key::Num7, egui::Key::Num9, egui::Key::Num9] {
+            h.key_press(k);
+            h.run_steps(2);
+        }
+        settle(&mut h, 30.0);
         shot(&mut h, &out, "t1_editor_tall");
+        h.state_mut().shortcuts_open = true;
+        h.run_steps(4);
+        shot(&mut h, &out, "t4_shortcuts");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        assert!(!h.state().shortcuts_open, "Esc closes the shortcut sheet");
+        assert!(h.state().view == View::Editor, "Esc on the sheet stays in the editor");
+        h.key_press(egui::Key::Num0);
+        h.run_steps(2);
         h.state_mut().unconvert(&[2]);
         settle(&mut h, 30.0);
         shot(&mut h, &out, "t2_editor_tall_unconverted");
@@ -2087,6 +2106,7 @@ mod ui_tests {
             clipboard: None,
             editor: editor::Editor::default(),
             toasts: Vec::new(),
+            shortcuts_open: false,
             export_total: 0,
             export_done: 0,
             thumb_size: 180.0,
@@ -2135,6 +2155,7 @@ mod ui_tests {
             clipboard: None,
             editor: editor::Editor::default(),
             toasts: Vec::new(),
+            shortcuts_open: false,
             export_total: 0,
             export_done: 0,
             thumb_size: 180.0,
@@ -2176,6 +2197,7 @@ mod ui_tests {
             clipboard: None,
             editor: editor::Editor::default(),
             toasts: Vec::new(),
+            shortcuts_open: false,
             export_total: 0,
             export_done: 0,
             thumb_size: 180.0,
@@ -2257,6 +2279,7 @@ mod ui_tests {
             clipboard: None,
             editor: editor::Editor::default(),
             toasts: Vec::new(),
+            shortcuts_open: false,
             export_total: 0,
             export_done: 0,
             thumb_size: 180.0,

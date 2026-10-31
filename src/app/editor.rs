@@ -286,6 +286,186 @@ impl Editor {
 /// Drag distance in points for one lab correction click.
 const LAB_DRAG_PX: f32 = 12.0;
 
+/// Sidebar sections that can be reset on their own.
+#[derive(Clone, Copy)]
+enum Section {
+    Tone,
+    WhiteBalance,
+    Lab,
+    HyperTone,
+    Glow,
+    Toning,
+    Look,
+}
+
+macro_rules! differs {
+    ($s:expr, $r:expr; $($f:ident),*) => { false $(|| $s.$f != $r.$f)* };
+}
+macro_rules! take {
+    ($s:expr, $r:expr; $($f:ident),*) => {{ $( $s.$f = $r.$f.clone(); )* }};
+}
+
+impl Section {
+    fn title(self) -> &'static str {
+        match self {
+            Section::Tone => "Tone",
+            Section::WhiteBalance => "White balance",
+            Section::Lab => "Lab correction",
+            Section::HyperTone => "Hyper Tone",
+            Section::Glow => "Glow, fade & clipping",
+            Section::Toning => "Colour toning",
+            Section::Look => "Look",
+        }
+    }
+
+    /// Whether `s` differs from the reference `r` in this section.
+    fn modified(self, s: &Settings, r: &Settings) -> bool {
+        match self {
+            Section::Tone => differs!(s, r; tone_profile, print_exposure, brightness, contrast,
+                highlights, shadows, whites, blacks),
+            Section::WhiteBalance => s.wb_mode != r.wb_mode,
+            Section::Lab => lab::readout(s).is_some(),
+            Section::HyperTone => differs!(s, r; hyper_tone_highlights, hyper_tone_shadows),
+            Section::Glow => differs!(s, r; glow, fade, white_clip, black_clip),
+            Section::Toning => differs!(s, r; mid_cyan, mid_tint, mid_temp, high_cyan, high_tint,
+                high_temp, high_range, shadow_cyan, shadow_tint, shadow_temp, shadow_range),
+            Section::Look => differs!(s, r; lut, lut_strength, post_saturation, sharpening),
+        }
+    }
+
+    fn reset(self, s: &mut Settings, r: &Settings) {
+        match self {
+            Section::Tone => take!(s, r; tone_profile, print_exposure, brightness, contrast,
+                highlights, shadows, whites, blacks),
+            Section::WhiteBalance => take!(s, r; wb_mode, wb_temp, wb_tint),
+            Section::Lab => lab::reset(s),
+            Section::HyperTone => take!(s, r; hyper_tone_highlights, hyper_tone_shadows),
+            Section::Glow => take!(s, r; glow, fade, white_clip, black_clip),
+            Section::Toning => take!(s, r; mid_cyan, mid_tint, mid_temp, high_cyan, high_tint,
+                high_temp, high_range, shadow_cyan, shadow_tint, shadow_temp, shadow_range),
+            Section::Look => take!(s, r; lut, lut_strength, post_saturation, sharpening),
+        }
+    }
+}
+
+/// A section header that marks edits and resets the section on request;
+/// returns whether it is open.
+fn section(ui: &mut egui::Ui, sec: Section, s: &mut Settings, r: &Settings, open: bool) -> bool {
+    let (open, reset) = widgets::fold_section(ui, sec.title(), open, sec.modified(s, r));
+    if reset {
+        sec.reset(s, r);
+    }
+    open
+}
+
+/// Lab printer keys: one tile per channel (density, cyan, magenta, yellow)
+/// with its offset in clicks and − / + buttons labelled with their keys.
+fn lab_pad(ui: &mut egui::Ui, s: &mut Settings) {
+    use lab::Channel;
+    let clicks = lab::clicks(s);
+    let tiles = [
+        (Channel::D, "Density", theme::TEXT, ("6", "Print lighter"), ("4", "Print darker")),
+        (Channel::C, "Cyan", grad::RED_CYAN.1, ("1", "Remove cyan"), ("7", "Add cyan")),
+        (Channel::M, "Magenta", grad::GREEN_MAGENTA.1, ("2", "Remove magenta"), ("8", "Add magenta")),
+        (Channel::Y, "Yellow", grad::BLUE_YELLOW.1, ("3", "Remove yellow"), ("9", "Add yellow")),
+    ];
+    let gap = 6.0;
+    let w = ((ui.available_width() - gap * 3.0) / 4.0).floor();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for (k, (ch, name, color, minus, plus)) in tiles.into_iter().enumerate() {
+            let (rect, _) = ui.allocate_exact_size(vec2(w, 70.0), Sense::hover());
+            let top = Rect::from_min_size(rect.min, vec2(w, 44.0));
+            let half = |right: bool| {
+                Rect::from_min_size(
+                    pos2(rect.left() + if right { w / 2.0 } else { 0.0 }, top.bottom()),
+                    vec2(w / 2.0, rect.height() - top.height()),
+                )
+            };
+            ui.painter().rect_filled(rect, 7.0, theme::BG);
+            // Value: drag sideways to step, double-click to zero.
+            let r = ui
+                .interact(top, ui.id().with(("lab_value", k)), Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                .on_hover_text(format!("{name}: drag sideways or use the keys · double-click to reset"));
+            let acc_id = r.id.with("drag_acc");
+            let mut acc: f32 = ui.data(|d| d.get_temp(acc_id)).unwrap_or(0.0);
+            acc += r.drag_delta().x;
+            let steps = (acc / LAB_DRAG_PX).trunc();
+            if steps != 0.0 {
+                lab::nudge(s, ch, steps as i32);
+                acc -= steps * LAB_DRAG_PX;
+            }
+            if r.drag_stopped() {
+                acc = 0.0;
+            }
+            ui.data_mut(|d| d.insert_temp(acc_id, acc));
+            if r.double_clicked() {
+                lab::nudge(s, ch, -clicks[k]);
+            }
+            let p = ui.painter();
+            let letter = &name[..1];
+            p.text(
+                pos2(top.center().x, top.top() + 11.0),
+                egui::Align2::CENTER_CENTER,
+                letter,
+                theme::medium(11.0),
+                color,
+            );
+            let v = match clicks[k] {
+                0 => "0".to_string(),
+                v if v > 0 => format!("+{v}"),
+                v => format!("−{}", -v),
+            };
+            p.text(
+                pos2(top.center().x, top.top() + 29.0),
+                egui::Align2::CENTER_CENTER,
+                v,
+                theme::medium(17.0),
+                if clicks[k] == 0 { theme::FAINT } else { theme::TEXT },
+            );
+            p.hline(
+                rect.x_range().shrink(6.0),
+                top.bottom(),
+                egui::Stroke::new(1.0, theme::LINE),
+            );
+            for (right, (key, tip), sign, step) in [(false, minus, "−", -1), (true, plus, "+", 1)] {
+                let hr = half(right);
+                let b = ui
+                    .interact(hr, ui.id().with(("lab_btn", k, right)), Sense::click())
+                    .on_hover_text(format!("{tip} ({key})"));
+                let p = ui.painter();
+                if b.hovered() {
+                    let rounding = if right {
+                        egui::CornerRadius { se: 7, ..Default::default() }
+                    } else {
+                        egui::CornerRadius { sw: 7, ..Default::default() }
+                    };
+                    p.rect_filled(hr, rounding, theme::HOVER);
+                }
+                p.text(
+                    hr.center() - vec2(5.0, 0.0),
+                    egui::Align2::CENTER_CENTER,
+                    sign,
+                    theme::medium(14.0),
+                    theme::TEXT,
+                );
+                p.text(
+                    hr.center() + vec2(7.0, 1.0),
+                    egui::Align2::CENTER_CENTER,
+                    key,
+                    egui::FontId::proportional(9.5),
+                    theme::MUTED,
+                );
+                if b.clicked() {
+                    lab::nudge(s, ch, step);
+                }
+            }
+        }
+    });
+}
+
+
 /// Height of the editor's filmstrip.
 const FILMSTRIP_H: f32 = 84.0;
 /// Height of the bar that collapses and expands the filmstrip.
@@ -810,7 +990,7 @@ impl NlpApp {
 
     /// Returns true when the view changed and drawing should stop.
     fn editor_shortcuts(&mut self, ctx: &egui::Context, i: usize) -> bool {
-        if ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() || self.shortcuts_open {
             return false;
         }
         let mac = ctx.os() == egui::os::OperatingSystem::Mac;
@@ -1201,14 +1381,11 @@ impl NlpApp {
             })
             .collect();
         if !others.is_empty() {
-            ui.add_space(4.0);
-            let label = if roll.is_some() {
-                "Apply to roll"
-            } else {
-                "Apply to folder"
-            };
+            ui.add_space(6.0);
+            let scope = if roll.is_some() { "roll" } else { "folder" };
+            let label = format!("Apply to {scope} ({} frames)", others.len());
             if ui
-                .add(widgets::ghost(label))
+                .add(widgets::ghost(&label).min_size(egui::vec2(ui.available_width(), 28.0)))
                 .on_hover_text(format!(
                     "Copy these details to {} other frame(s)",
                     others.len()
@@ -1546,7 +1723,13 @@ impl NlpApp {
     }
 
     fn adjust_sections(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
-        if widgets::fold(ui, "Tone") {
+        // What each section resets to: this frame's defaults.
+        let mut reference = s.clone();
+        if let Some(i) = self.editor_index() {
+            self.reset_edits(i, &mut reference);
+        }
+        let r = &reference;
+        if section(ui, Section::Tone, s, r, true) {
             fl_combo(
                 ui,
                 "Tone profile",
@@ -1585,49 +1768,16 @@ impl NlpApp {
                 &mut s.blacks,
                 "Black point: up = matte, down = deeper",
             );
-            if widgets::fold_with(ui, "Hyper Tone", false) {
-                let amount = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
-                    fl_slider(ui, l, v, 0.0..=100.0, 0.0, 0, tip, None)
-                };
-                amount(
-                    ui,
-                    "Burn highlights",
-                    &mut s.hyper_tone_highlights,
-                    "Holds back large bright areas (sky, window light) while keeping their detail",
-                );
-                amount(
-                    ui,
-                    "Dodge shadows",
-                    &mut s.hyper_tone_shadows,
-                    "Opens large dark areas (backlit subjects, shade) while keeping their detail",
-                );
-            }
-            if widgets::fold_with(ui, "Glow, fade & clipping", false) {
-                tone(ui, "Lab glow", &mut s.glow, "Silky compressed highlights");
-                tone(ui, "Lab fade", &mut s.fade, "Open, compressed deep shadows");
-                fl_slider(
-                    ui,
-                    "White clip",
-                    &mut s.white_clip,
-                    -50.0..=50.0,
-                    0.0,
-                    0,
-                    "Negative values recover clipped highlights",
-                    None,
-                );
-                fl_slider(
-                    ui,
-                    "Black clip",
-                    &mut s.black_clip,
-                    -50.0..=50.0,
-                    0.0,
-                    0,
-                    "Negative values recover crushed shadows",
-                    None,
-                );
-            }
         }
-        if widgets::fold(ui, "White balance") {
+        let wb_mode = s.wb_mode;
+        let wb_open = section(ui, Section::WhiteBalance, s, r, true);
+        if s.wb_mode != wb_mode
+            && let Some(i) = self.editor_index()
+        {
+            // Reset to an auto mode: recompute its Temp / Tint.
+            self.refresh_wb(i, s);
+        }
+        if wb_open {
             let wb_key = widgets::shortcut(ui.ctx(), egui::Modifiers::NONE, egui::Key::W);
             self.combo_with_picker(
                 ui,
@@ -1685,101 +1835,54 @@ impl NlpApp {
                 s.wb_mode = WbMode::Custom;
             }
         }
-        if widgets::fold(ui, "Lab correction") {
-            let clicks = lab::clicks(s);
-            let rows = [
-                (
-                    lab::Channel::D,
-                    "D",
-                    "Print lighter (6)",
-                    "Print darker (4)",
-                ),
-                (lab::Channel::C, "C", "Remove cyan (1)", "Add cyan (7)"),
-                (
-                    lab::Channel::M,
-                    "M",
-                    "Remove magenta (2)",
-                    "Add magenta (8)",
-                ),
-                (lab::Channel::Y, "Y", "Remove yellow (3)", "Add yellow (9)"),
-            ];
-            ui.horizontal(|ui| {
-                for (k, (ch, name, minus_tip, plus_tip)) in rows.into_iter().enumerate() {
-                    ui.vertical(|ui| {
-                        let v = match clicks[k] {
-                            0 => "0".to_string(),
-                            v if v > 0 => format!("+{v}"),
-                            v => format!("−{}", -v),
-                        };
-                        // Drag the value sideways to step through clicks;
-                        // double-click to zero it.
-                        let r = ui
-                            .add(
-                                egui::Label::new(
-                                    RichText::new(format!("{name} {v}")).monospace().color(
-                                        if clicks[k] == 0 {
-                                            theme::MUTED
-                                        } else {
-                                            theme::TEXT
-                                        },
-                                    ),
-                                )
-                                .sense(Sense::click_and_drag()),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-                            .on_hover_text("Drag to change · double-click to reset");
-                        let acc_id = r.id.with("drag_acc");
-                        let mut acc: f32 = ui.data(|d| d.get_temp(acc_id)).unwrap_or(0.0);
-                        acc += r.drag_delta().x;
-                        let steps = (acc / LAB_DRAG_PX).trunc();
-                        if steps != 0.0 {
-                            lab::nudge(s, ch, steps as i32);
-                            acc -= steps * LAB_DRAG_PX;
-                        }
-                        if r.drag_stopped() {
-                            acc = 0.0;
-                        }
-                        ui.data_mut(|d| d.insert_temp(acc_id, acc));
-                        if r.double_clicked() {
-                            lab::nudge(s, ch, -clicks[k]);
-                        }
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            if ui
-                                .add(widgets::ghost("−"))
-                                .on_hover_text(minus_tip)
-                                .clicked()
-                            {
-                                lab::nudge(s, ch, -1);
-                            }
-                            if ui
-                                .add(widgets::ghost("+"))
-                                .on_hover_text(plus_tip)
-                                .clicked()
-                            {
-                                lab::nudge(s, ch, 1);
-                            }
-                        });
-                    });
-                    ui.add_space(4.0);
-                }
-            });
-            ui.add(
-                egui::Label::new(
-                    RichText::new(super::LAB_KEYS_HELP)
-                        .small()
-                        .color(theme::MUTED),
-                )
-                .wrap(),
-            );
-            if ui
-                .add_enabled(lab::readout(s).is_some(), widgets::ghost("Reset (0)"))
-                .clicked()
-            {
-                lab::reset(s);
-            }
+        if section(ui, Section::Lab, s, r, true) {
+            lab_pad(ui, s);
         }
-        if widgets::fold(ui, "Colour toning") {
+        if section(ui, Section::HyperTone, s, r, false) {
+            let amount = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
+                fl_slider(ui, l, v, 0.0..=100.0, 0.0, 0, tip, None)
+            };
+            amount(
+                ui,
+                "Burn highlights",
+                &mut s.hyper_tone_highlights,
+                "Holds back large bright areas (sky, window light) while keeping their detail",
+            );
+            amount(
+                ui,
+                "Dodge shadows",
+                &mut s.hyper_tone_shadows,
+                "Opens large dark areas (backlit subjects, shade) while keeping their detail",
+            );
+        }
+        if section(ui, Section::Glow, s, r, false) {
+            let tone = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
+                fl_slider(ui, l, v, -50.0..=50.0, 0.0, 0, tip, None)
+            };
+            tone(ui, "Lab glow", &mut s.glow, "Silky compressed highlights");
+            tone(ui, "Lab fade", &mut s.fade, "Open, compressed deep shadows");
+            fl_slider(
+                ui,
+                "White clip",
+                &mut s.white_clip,
+                -50.0..=50.0,
+                0.0,
+                0,
+                "Negative values recover clipped highlights",
+                None,
+            );
+            fl_slider(
+                ui,
+                "Black clip",
+                &mut s.black_clip,
+                -50.0..=50.0,
+                0.0,
+                0,
+                "Negative values recover crushed shadows",
+                None,
+            );
+        }
+        if section(ui, Section::Toning, s, r, true) {
             segmented(
                 ui,
                 &mut self.editor.color_tab,
@@ -1848,7 +1951,7 @@ impl NlpApp {
                 );
             }
         }
-        if widgets::fold(ui, "Look") {
+        if section(ui, Section::Look, s, r, true) {
             fl_combo(ui, "LUT", &mut s.lut, Lut::ALL, Lut::label, "");
             fl_slider(
                 ui,
@@ -1970,6 +2073,13 @@ impl NlpApp {
             ui.close();
         }
         ui.separator();
+        if ui
+            .add(egui::Button::new("Keyboard shortcuts").shortcut_text(RichText::new("?").color(theme::FAINT)))
+            .clicked()
+        {
+            self.shortcuts_open = true;
+            ui.close();
+        }
         if self.frames[i].sc.is_converted()
             && ui
                 .button("Unconvert")
@@ -2784,6 +2894,24 @@ fn gpu_paint_clipped(
 #[cfg(test)]
 mod crop_lock_tests {
     use super::*;
+
+    #[test]
+    fn sections_mark_and_reset_only_their_own_fields() {
+        let r = Settings::default();
+        let mut s = r.clone();
+        assert!(!Section::Look.modified(&s, &r));
+        s.lut_strength = 60.0;
+        s.brightness = 12.0;
+        lab::nudge(&mut s, lab::Channel::C, 2);
+        assert!(Section::Look.modified(&s, &r));
+        assert!(Section::Tone.modified(&s, &r) && Section::Lab.modified(&s, &r));
+        Section::Look.reset(&mut s, &r);
+        assert!(!Section::Look.modified(&s, &r));
+        assert_eq!(s.brightness, 12.0, "other sections keep their edits");
+        Section::Lab.reset(&mut s, &r);
+        assert_eq!(s.filtration, [0.0; 3]);
+        assert!(Section::Tone.modified(&s, &r));
+    }
 
     #[test]
     fn dragging_keeps_the_ratio_and_the_anchor() {

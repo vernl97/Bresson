@@ -160,7 +160,11 @@ pub mod theme {
 
 /// Platform-correct label for a shortcut (`⌘Z` on macOS, `Ctrl+Z` elsewhere).
 pub fn shortcut(ctx: &egui::Context, mods: egui::Modifiers, key: egui::Key) -> String {
+    // egui spells some keys out ("OpenBracket") off macOS; show the symbol.
     ctx.format_shortcut(&egui::KeyboardShortcut::new(mods, key))
+        .replace("OpenBracket", "[")
+        .replace("CloseBracket", "]")
+        .replace("Escape", "Esc")
 }
 
 /// Accent-filled call-to-action button.
@@ -620,37 +624,44 @@ pub fn fl_combo<T: Copy + PartialEq>(
 /// (the crosstalk folder). Typing filters the list; any text is allowed.
 pub fn stock_combo(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> egui::Response {
     let mut changed = false;
-    let mut out = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        let edit = ui.add(
-            egui::TextEdit::singleline(value)
-                .hint_text(hint)
-                .desired_width((width - 32.0).max(40.0)),
-        );
-        changed |= edit.changed();
-        let arrow = ui
-            .add(egui::Button::new("").min_size(egui::vec2(20.0, edit.rect.height())))
-            .on_hover_text("Choose a film stock");
-        let col = if arrow.hovered() { theme::TEXT } else { theme::MUTED };
-        chevron(ui.painter(), arrow.rect.center(), true, col);
-        let names = crate::engine::presets::film_stock_names();
-        let q = value.trim().to_lowercase();
-        let typed = !q.is_empty() && !names.iter().any(|n| n.to_lowercase() == q);
-        egui::Popup::menu(&arrow).show(|ui| {
-            ui.set_min_width(220.0);
-            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                for n in names.iter().filter(|n| !typed || n.to_lowercase().contains(&q)) {
-                    if ui.selectable_label(*value == *n, n).clicked() {
-                        *value = n.clone();
-                        changed = true;
-                    }
+    let pad = ui.spacing().button_padding;
+    let edit = ui.add(
+        egui::TextEdit::singleline(value)
+            .hint_text(hint)
+            // Keep typed text clear of the chevron drawn inside the field.
+            .margin(egui::Margin {
+                left: pad.x as i8,
+                right: 22,
+                top: pad.y as i8,
+                bottom: pad.y as i8,
+            })
+            .desired_width((width - 8.0).max(40.0)),
+    );
+    changed |= edit.changed();
+    let arrow_rect = egui::Rect::from_min_max(
+        edit.rect.right_top() - egui::vec2(22.0, 0.0),
+        edit.rect.right_bottom(),
+    );
+    let arrow = ui
+        .interact(arrow_rect, ui.id().with("stock_arrow"), Sense::click())
+        .on_hover_text("Choose a film stock");
+    let col = if arrow.hovered() { theme::TEXT } else { theme::MUTED };
+    chevron(ui.painter(), arrow.rect.center(), true, col);
+    let names = crate::engine::presets::film_stock_names();
+    let q = value.trim().to_lowercase();
+    let typed = !q.is_empty() && !names.iter().any(|n| n.to_lowercase() == q);
+    egui::Popup::menu(&arrow).show(|ui| {
+        ui.set_min_width(220.0);
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for n in names.iter().filter(|n| !typed || n.to_lowercase().contains(&q)) {
+                if ui.selectable_label(*value == *n, n).clicked() {
+                    *value = n.clone();
+                    changed = true;
                 }
-            });
+            }
         });
-        out = Some(edit);
     });
-    let mut r = out.expect("text edit was added");
+    let mut r = edit;
     if changed {
         r.mark_changed();
     }
@@ -934,6 +945,12 @@ pub fn fold(ui: &mut Ui, title: &str) -> bool {
 
 /// A [`fold`] that starts collapsed when `default_open` is false.
 pub fn fold_with(ui: &mut Ui, title: &str, default_open: bool) -> bool {
+    fold_section(ui, title, default_open, false).0
+}
+
+/// A sidebar section header. When `modified`, a dot after the title marks
+/// the edit and hovering the header offers Reset; returns (open, reset).
+pub fn fold_section(ui: &mut Ui, title: &str, default_open: bool, modified: bool) -> (bool, bool) {
     let id = ui.make_persistent_id(("fold", title));
     let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, default_open));
     ui.add_space(10.0);
@@ -948,30 +965,67 @@ pub fn fold_with(ui: &mut Ui, title: &str, default_open: bool) -> bool {
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::click());
     let hot = resp.hovered();
     let p = ui.painter();
-    p.text(
+    let title_rect = p.text(
         rect.left_center(),
         egui::Align2::LEFT_CENTER,
         title,
         theme::medium(12.5),
         if hot { theme::TEXT } else { theme::MUTED },
     );
+    if modified {
+        p.circle_filled(
+            egui::pos2(title_rect.right() + 7.0, rect.center().y),
+            2.5,
+            theme::ACCENT,
+        );
+    }
+    // Reset sits left of the chevron while the header is hovered.
+    let mut reset_rect = None;
+    if modified && hot {
+        let g = p.layout_no_wrap("Reset".into(), FontId::proportional(11.0), theme::MUTED);
+        let r = Rect::from_min_size(
+            egui::pos2(rect.right() - 24.0 - g.size().x, rect.center().y - g.size().y / 2.0),
+            g.size(),
+        );
+        let over = ui
+            .ctx()
+            .pointer_hover_pos()
+            .is_some_and(|q| r.expand(4.0).contains(q));
+        p.galley_with_override_text_color(
+            r.min,
+            g,
+            if over { theme::ACCENT } else { theme::MUTED },
+        );
+        reset_rect = Some(r.expand(4.0));
+    }
     chevron(
         p,
         egui::pos2(rect.right() - 8.0, rect.center().y),
         open,
         if hot { theme::TEXT } else { theme::FAINT },
     );
+    let mut reset = false;
     if resp.clicked() {
-        open = !open;
-        ui.data_mut(|d| d.insert_persisted(id, open));
+        let on_reset = reset_rect
+            .zip(resp.interact_pointer_pos())
+            .is_some_and(|(r, q)| r.contains(q));
+        if on_reset {
+            reset = true;
+        } else {
+            open = !open;
+            ui.data_mut(|d| d.insert_persisted(id, open));
+        }
     }
     if hot {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if modified {
+            resp.on_hover_text(format!("{title} has been edited"));
+        }
     }
     if open {
         ui.add_space(4.0);
     }
-    open
+    (open, reset)
 }
 
 /// Bare slim slider (track and knob, no label or value) for toolbars,

@@ -32,46 +32,69 @@ pub struct RollDialog {
     pub new: bool,
 }
 
-/// The film / capture fields as a two-column grid. Returns true on change.
+/// The film / capture fields in two groups, short fields side by side.
+/// Returns true on change.
 pub fn film_fields(ui: &mut egui::Ui, id: &str, m: &mut FilmMetadata, notes: bool) -> bool {
     let mut changed = false;
-    let mut fields: Vec<(&str, &mut String, &str)> = vec![
-        ("Film stock", &mut m.film_stock, "e.g. Portra 400"),
-        ("Film ISO", &mut m.film_iso, "e.g. 400"),
-        ("Shot at ISO", &mut m.shot_at_iso, "e.g. 800 (push)"),
-        ("Developer", &mut m.developer, "e.g. C-41 lab"),
-        ("Camera make", &mut m.camera_make, "e.g. Nikon"),
-        ("Camera model", &mut m.camera_model, "e.g. FM2"),
-        ("Lens", &mut m.lens, "e.g. 50mm f/1.8"),
-        ("Shutter", &mut m.shutter_speed, "e.g. 1/125"),
-        ("Aperture", &mut m.aperture, "e.g. f/8"),
-    ];
-    if notes {
-        fields.push(("Notes", &mut m.development_notes, ""));
-    }
-    egui::Grid::new(id)
-        .num_columns(2)
-        .spacing(vec2(8.0, 4.0))
-        .show(ui, |ui| {
-            for (label, v, hint) in fields {
-                ui.label(RichText::new(label).small().color(theme::MUTED));
-                if label == "Film stock" {
-                    let w = ui.available_width();
-                    changed |= widgets::stock_combo(ui, v, hint, w).changed();
-                } else {
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(v)
-                                .hint_text(hint)
-                                // desired_width excludes the field's margin.
-                                .desired_width(ui.available_width() - 8.0),
-                        )
-                        .changed();
-                }
-                ui.end_row();
+    ui.push_id(id, |ui| {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.label(RichText::new("Film stock").small().color(theme::MUTED));
+            let w = ui.available_width();
+            changed |= widgets::stock_combo(ui, &mut m.film_stock, "Portra 400", w).changed();
+            changed |= pair(
+                ui,
+                ("ISO", &mut m.film_iso, "400"),
+                ("Shot at ISO", &mut m.shot_at_iso, "800 push"),
+            );
+            changed |= field(ui, "Developer", &mut m.developer, "C-41");
+
+            group_heading(ui, "Camera");
+            changed |= pair(
+                ui,
+                ("Make", &mut m.camera_make, "Nikon"),
+                ("Model", &mut m.camera_model, "FM2"),
+            );
+            changed |= field(ui, "Lens", &mut m.lens, "50mm f/1.8");
+            changed |= pair(
+                ui,
+                ("Shutter", &mut m.shutter_speed, "1/125"),
+                ("Aperture", &mut m.aperture, "f/8"),
+            );
+            if notes {
+                changed |= field(ui, "Notes", &mut m.development_notes, "");
             }
         });
+    });
     changed
+}
+
+/// A muted sub-heading between the groups of film fields.
+fn group_heading(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(title).font(theme::medium(11.5)).color(theme::MUTED));
+}
+
+/// A label above a single-line field that fills its column.
+fn field(ui: &mut egui::Ui, label: &str, v: &mut String, hint: &str) -> bool {
+    ui.label(RichText::new(label).small().color(theme::MUTED));
+    ui.add(
+        egui::TextEdit::singleline(v)
+            .hint_text(hint)
+            // desired_width excludes the field's margin.
+            .desired_width(ui.available_width() - 8.0),
+    )
+    .changed()
+}
+
+/// Two short fields side by side, each `(label, value, hint)`.
+fn pair(ui: &mut egui::Ui, a: (&str, &mut String, &str), b: (&str, &mut String, &str)) -> bool {
+    let (mut changed_a, mut changed_b) = (false, false);
+    ui.columns(2, |cols| {
+        changed_a = field(&mut cols[0], a.0, a.1, a.2);
+        changed_b = field(&mut cols[1], b.0, b.1, b.2);
+    });
+    changed_a || changed_b
 }
 
 fn folder_name(dir: &Path) -> String {
