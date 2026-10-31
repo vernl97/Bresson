@@ -75,9 +75,14 @@ Parity with pyopticfilm is the test oracle. `tools/gen_fixtures.py` runs the
 Python driver on its mock transports with a virtual clock and records USB
 traffic and outputs into `tests/fixtures/`. The tests:
 
-- `parity_scans` — 41 scenarios over all 14 models (colour, IR, ME adaptive and
+- `parity_scans` — 59 scenarios over all 14 models (colour, IR, ME adaptive and
   fixed, Multi-Pass, calibration, home, error paths, 7600i v1 job replay):
-  **byte-identical USB traffic and pixel-identical images**.
+  **byte-identical USB traffic and pixel-identical images**. The 18 `sim_*`
+  scenarios run calibrated GL128 scans on a mock with a simulated AD9826
+  front end (`tools/gl128_sim.py`, ported as `usb/fake_gl128_sim.rs`), where
+  pyopticfilm's own mock can only reach calibration's error paths: AFE
+  search, ASIC shading, IR host flatten, explicit and forced calibration, dpi
+  changes, on all three GL128 models.
 - `parity_geometry` — `compute_geometry` / `compute_calib_geometry` for every
   model, resolution and five crops (468 cases), plus calibration-cache
   fingerprints: exact.
@@ -86,8 +91,11 @@ traffic and outputs into `tests/fixtures/`. The tests:
   alignment (≤ 1 LSB on 0.01 % of samples, `np.polyfit` vs normal equations).
   The 7600i v1 vendor jobs, including the derived 7200 dpi infrared job, are
   identical.
-- `golden_setup`, `model_lock`, `calib_gl128` — ports of pyopticfilm's golden
-  register programs, model-lock oracles and shading/AFE tests.
+- `parity_decode` — trace JSON, log lines and decoded events of mock scans.
+- The other test files port pyopticfilm's unit tests where they reach code
+  the parity scenarios miss (golden register programs, model-lock oracles,
+  GL128 motor safety and image read, calibration cache, scanner façade,
+  selection, registration, exposure, USB framing, TIFF I/O).
 
 ```bash
 cargo test -p opticfilm --release
@@ -101,10 +109,13 @@ Not yet covered:
 
 - A scan on real hardware. Start with `status`, then `lamp`, then a small
   `scan --area` before full frames.
-- The 7600i v1 replay reads synchronously; pyopticfilm keeps one bulk
-  transfer in flight on a thread. The USB traffic is the same, but on hardware
-  the scanner's buffer may fill at 7200 dpi until the reads are pipelined.
-- The rest of pyopticfilm's unit tests (it has 1166). The ported ones plus the
-  parity scenarios cover the scan flows; tests that monkeypatch internals
-  (e.g. the fake AD9826 AFE golden) are not ported yet.
+- Queued bulk reads on hardware. The 7600i v1 replay keeps one bulk read
+  queued, as pyopticfilm's worker thread does, through nusb's own transfer
+  queue; on the mocks it matches the plain reads byte for byte
+  (`tests/queued_bulk_read.rs`), but it has not run on a scanner.
+- The simulated front end is a model, not a capture: it proves both drivers
+  calibrate the same way, not that either matches a real sensor. Its strips
+  are flat-field and DVDSET shading is not applied to image reads.
+- Unit tests not ported: those built on a mock ASIC object (their paths now
+  run through the `sim_*` scenarios) and the numpy input-type tests.
 - Scan Lab (`tools/scanlab`) and the forensic tools are out of scope.

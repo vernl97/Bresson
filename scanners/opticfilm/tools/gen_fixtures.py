@@ -70,7 +70,12 @@ def run_scenario(spec, out_dir):
     model = MODELS[spec["model"]]
     _VT[0] = 1000.0
     with tempfile.TemporaryDirectory() as td:
-        scanner = Scanner.open_fake(model, calib_cache=Path(td) / "calib.json")
+        sim = None
+        if spec.get("sim"):
+            from gl128_sim import Gl128SimTransport
+
+            sim = Gl128SimTransport()
+        scanner = Scanner.open_fake(model, transport=sim, calib_cache=Path(td) / "calib.json")
         transport = scanner.protocol._transport if hasattr(scanner.protocol, "_transport") else None
         if model.asic == "GL843" and hasattr(scanner.asic, "usb"):
             transport = scanner.asic.usb.transport
@@ -130,7 +135,37 @@ def scan(**kw):
     return {"op": "scan", **kw}
 
 
+def sim(name, model, *steps):
+    """A scenario on the simulated-AFE GL128 mock (``gl128_sim.py``)."""
+    return {"name": name, "model": model, "sim": True, "steps": list(steps)}
+
+
+SE, V2, S83 = "plustek-opticfilm-8200i-se", "plustek-opticfilm-8100-v2", "plustek-opticfilm-8300i-se"
+
+
 SCENARIOS = [
+    # GL128 calibrated on the simulated AFE: the success paths the plain mock never reaches.
+    sim("sim_se_1800_calib", SE, scan(resolution=1800, area=CROP)),
+    sim("sim_se_1800_warm_tiny", SE, {"op": "warmup"}, scan(resolution=1800, area=TINY)),
+    sim("sim_se_1200_ir_only", SE, scan(resolution=1200, area=TINY, mode="infrared")),
+    sim("sim_se_1800_color_ir", SE, scan(resolution=1800, area=TINY, infrared=True)),
+    sim("sim_se_1800_me", SE, scan(resolution=1800, area=TINY, multi_exposure=True)),
+    sim("sim_se_1800_me_fixed", SE, scan(resolution=1800, area=TINY, multi_exposure=True, me_long_mode="fixed")),
+    sim("sim_se_1800_multipass3", SE, scan(resolution=1800, area=TINY, n_passes=3)),
+    sim("sim_se_3600_calib", SE, scan(resolution=3600, area=[0.4, 0.4, 0.45, 0.45])),
+    sim("sim_se_7200_calib", SE, scan(resolution=7200, area=[0.0, 0.0, 0.02, 0.02])),
+    sim("sim_se_calibrate_then_scan", SE,
+        {"op": "calibrate", "resolution": 1800}, {"op": "calibrate", "resolution": 1800, "mode": "infrared"},
+        scan(resolution=1800, area=TINY), {"op": "calibrate", "resolution": 1800, "force": True}),
+    sim("sim_se_dpi_change", SE, scan(resolution=1800, area=TINY), scan(resolution=2400, area=TINY),
+        scan(resolution=3600, area=[0.4, 0.4, 0.43, 0.43])),
+    sim("sim_v2_1800_calib", V2, scan(resolution=1800, area=CROP)),
+    sim("sim_v2_1800_me", V2, scan(resolution=1800, area=TINY, multi_exposure=True)),
+    sim("sim_v2_calibrate", V2, {"op": "calibrate", "resolution": 1800}),
+    sim("sim_s83_1800_calib", S83, scan(resolution=1800, area=CROP)),
+    sim("sim_s83_1800_color_ir", S83, scan(resolution=1800, area=TINY, infrared=True)),
+    sim("sim_s83_1200_ir_only", S83, scan(resolution=1200, area=TINY, mode="infrared")),
+    sim("sim_s83_calibrate", S83, {"op": "calibrate", "resolution": 1800}, {"op": "calibrate", "resolution": 1800, "mode": "infrared"}),
     # GL128 (scan-ready)
     {"name": "se_150_tiny_nocalib", "model": "plustek-opticfilm-8200i-se",
      "steps": [scan(resolution=150, area=TINY, apply_calib=False)]},

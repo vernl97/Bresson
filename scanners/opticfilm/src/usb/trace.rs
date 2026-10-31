@@ -2,6 +2,7 @@
 //! Structured USB transactions and a recording transport wrapper.
 
 use std::any::Any;
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -261,11 +262,13 @@ pub struct RecordingTransport {
     pub sink: Option<TxnCallback>,
     pub keep_in_memory: bool,
     pub transactions: Vec<UsbTransaction>,
+    /// Queued bulk IN reads (size, start time), recorded when they complete.
+    queued: VecDeque<(usize, f64)>,
 }
 
 impl RecordingTransport {
     pub fn new(inner: Box<dyn UsbTransport>) -> Self {
-        Self { inner, listener: None, sink: None, keep_in_memory: true, transactions: Vec::new() }
+        Self { inner, listener: None, sink: None, keep_in_memory: true, transactions: Vec::new(), queued: VecDeque::new() }
     }
 
     fn record(&mut self, mut txn: UsbTransaction) {
@@ -324,11 +327,33 @@ impl UsbTransport for RecordingTransport {
         self.finish(txn, r, |_, _| {})
     }
 
+    fn bulk_read_submit(&mut self, size: usize) -> Result<bool> {
+        let t0 = perf_counter();
+        let queued = self.inner.bulk_read_submit(size)?;
+        if queued {
+            self.queued.push_back((size, t0));
+        }
+        Ok(queued)
+    }
+
+    /// Recorded as an ordinary `bulk_read` when it completes, so a queued
+    /// stream traces like the same reads done one at a time.
+    fn bulk_read_wait(&mut self, timeout_ms: Option<u32>) -> Result<Vec<u8>> {
+        let Some((size, t0)) = self.queued.pop_front() else {
+            return self.inner.bulk_read_wait(timeout_ms);
+        };
+        let mut txn = UsbTransaction::bulk_read(size, None);
+        txn.t0 = Some(t0);
+        let r = self.inner.bulk_read_wait(timeout_ms);
+        self.finish(txn, r, |_, _| {})
+    }
+
     fn read_intr(&mut self, timeout_ms: Option<u32>) -> Result<Vec<u8>> {
         self.inner.read_intr(timeout_ms)
     }
 
     fn abort_bulk_in(&mut self) -> Option<usize> {
+        self.queued.clear();
         Some(self.inner.abort_bulk_in().unwrap_or(0))
     }
 

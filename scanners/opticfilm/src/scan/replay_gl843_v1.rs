@@ -885,45 +885,66 @@ pub fn run_profile(profile: &Value, usb: &mut Gl843V1Usb, hooks: ReplayHooks<'_>
                     *asked -= n;
                     n
                 };
+                // Keep one read queued so the scanner's buffer never fills (Python
+                // runs it on a worker thread); transports that cannot queue read in turn.
                 let mut n = request(&mut asked, rp.h.read_chunk);
-                let mut part = rp.usb.transport.bulk_read(n, None)?;
+                let queued = rp.usb.transport.bulk_read_submit(n)?;
+                let mut outstanding = queued;
+                let mut part = if queued { Vec::new() } else { rp.usb.transport.bulk_read(n, None)? };
                 let mut t0: Option<f64> = None;
                 let mut since = 0usize;
-                while left > 0 {
-                    (rp.h.check)()?;
-                    if part.is_empty() || part.len() > n || got[fi] + part.len() > size {
-                        return Err(Error::Scan(format!("frame {i}: bulk read returned {} of {n} bytes", part.len())));
-                    }
-                    left -= part.len();
-                    asked += n - part.len(); // a short read is asked for again
-                    let this = std::mem::take(&mut part);
-                    if asked > 0 {
-                        n = request(&mut asked, rp.h.read_chunk);
-                        part = rp.usb.transport.bulk_read(n, None)?;
-                    }
-                    if let Some(b) = buffers.get_mut(&i) {
-                        b[got[fi]..got[fi] + this.len()].copy_from_slice(&this);
-                    }
-                    got[fi] += this.len();
-                    match t0 {
-                        None => t0 = Some(monotonic()),
-                        Some(t) if i == main => {
-                            since += this.len();
-                            let secs = monotonic() - t;
-                            if secs > THROUGHPUT_GRACE_S && (since as f64 / secs) < need * THROUGHPUT_MIN {
-                                return Err(Error::Scan(format!(
-                                    "scan data at {:.2} MB/s, the scan needs {:.2} MB/s",
-                                    since as f64 / secs / 1e6,
-                                    need / 1e6
-                                )));
+                let r = (|| -> Result<()> {
+                    while left > 0 {
+                        (rp.h.check)()?;
+                        if queued {
+                            outstanding = false;
+                            part = rp.usb.transport.bulk_read_wait(None)?;
+                        }
+                        if part.is_empty() || part.len() > n || got[fi] + part.len() > size {
+                            return Err(Error::Scan(format!("frame {i}: bulk read returned {} of {n} bytes", part.len())));
+                        }
+                        left -= part.len();
+                        asked += n - part.len(); // a short read is asked for again
+                        let this = std::mem::take(&mut part);
+                        if asked > 0 {
+                            n = request(&mut asked, rp.h.read_chunk);
+                            if queued {
+                                rp.usb.transport.bulk_read_submit(n)?;
+                                outstanding = true;
+                            } else {
+                                part = rp.usb.transport.bulk_read(n, None)?;
                             }
                         }
-                        _ => {}
+                        if let Some(b) = buffers.get_mut(&i) {
+                            b[got[fi]..got[fi] + this.len()].copy_from_slice(&this);
+                        }
+                        got[fi] += this.len();
+                        match t0 {
+                            None => t0 = Some(monotonic()),
+                            Some(t) if i == main => {
+                                since += this.len();
+                                let secs = monotonic() - t;
+                                if secs > THROUGHPUT_GRACE_S && (since as f64 / secs) < need * THROUGHPUT_MIN {
+                                    return Err(Error::Scan(format!(
+                                        "scan data at {:.2} MB/s, the scan needs {:.2} MB/s",
+                                        since as f64 / secs / 1e6,
+                                        need / 1e6
+                                    )));
+                                }
+                            }
+                            _ => {}
+                        }
+                        if let Some(p) = rp.h.progress.as_mut() {
+                            p(i, got[fi], size);
+                        }
                     }
-                    if let Some(p) = rp.h.progress.as_mut() {
-                        p(i, got[fi], size);
-                    }
+                    Ok(())
+                })();
+                if r.is_err() && outstanding {
+                    // Collect the read still queued so the endpoint is idle for cleanup.
+                    let _ = rp.usb.transport.bulk_read_wait(None);
                 }
+                r?;
                 if i != main && got[fi] == size && let Some(b) = buffers.get(&i) {
                     result.frames.insert(i, b.clone());
                     if let Some(c) = calibration.as_mut() {

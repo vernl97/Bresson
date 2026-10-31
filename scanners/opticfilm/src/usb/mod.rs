@@ -5,6 +5,7 @@ pub mod correlate;
 pub mod decode;
 pub mod device;
 pub mod fake;
+pub mod fake_gl128_sim;
 pub mod fake_gl843_v1;
 pub mod protocol;
 pub mod trace;

@@ -94,6 +94,10 @@ pub trait FakeDevice: Send + 'static {
         let _ = core;
         vec![0; size]
     }
+    /// A `VALUE_BUFFER` control write (bulk preamble or AHB upload header).
+    fn after_buffer_write(&mut self, core: &mut FakeCore, index: u16, data: &[u8]) {
+        let _ = (core, index, data);
+    }
 }
 
 /// Plain register file: no device behaviour.
@@ -172,6 +176,7 @@ impl<D: FakeDevice> FakeUsbTransport<D> {
                 return Ok(Vec::new());
             }
             if value == VALUE_BUFFER {
+                self.dev.after_buffer_write(&mut self.core, index, txn.data.as_deref().unwrap_or(&[]));
                 return Ok(Vec::new());
             }
             return Err(Error::Usb(format!("unexpected BUFFER out value=0x{value:04x}")));

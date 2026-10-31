@@ -46,6 +46,20 @@ pub trait UsbTransport: Send + Any {
         Err(Error::Usb("transport has no interrupt endpoint".into()))
     }
 
+    /// Queue a bulk IN read of `size` bytes without waiting for it, so the
+    /// device always has a request pending. `Ok(false)` when the transport
+    /// cannot queue reads; use [`UsbTransport::bulk_read`] then.
+    fn bulk_read_submit(&mut self, size: usize) -> Result<bool> {
+        let _ = size;
+        Ok(false)
+    }
+
+    /// Wait for the oldest read queued with [`UsbTransport::bulk_read_submit`].
+    fn bulk_read_wait(&mut self, timeout_ms: Option<u32>) -> Result<Vec<u8>> {
+        let _ = timeout_ms;
+        Err(Error::Usb("no queued bulk read".into()))
+    }
+
     /// Drain and clear an abandoned bulk IN stream. `None` when unsupported.
     fn abort_bulk_in(&mut self) -> Option<usize> {
         None

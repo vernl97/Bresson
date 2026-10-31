@@ -12,6 +12,8 @@ use opticfilm::error::Error;
 use opticfilm::scan::me_exposure::MeLongMode;
 use opticfilm::scan::request::{ScanControl, ScanMode, ScanRequest};
 use opticfilm::usb::fake::MockScannerTransport;
+use opticfilm::usb::transport::UsbTransport;
+use opticfilm::usb::fake_gl128_sim::{Gl128Sim, Gl128SimTransport};
 use opticfilm::usb::fake_gl843_v1::SimulatedGl843V1Transport;
 use opticfilm::usb::trace::{UsbOp, UsbTransaction};
 use opticfilm::usb::transport::find_transport;
@@ -119,7 +121,10 @@ fn run(path: &std::path::Path) -> Vec<String> {
     clock::use_virtual(1000.0);
     let dir = std::env::temp_dir().join(format!("opticfilm-parity-{}-{}", std::process::id(), spec["name"].as_str().unwrap()));
     let _ = std::fs::remove_dir_all(&dir);
-    let mut scanner = Scanner::open_fake(model, None, Some(dir.join("calib.json"))).unwrap();
+    // `sim` scenarios run on the simulated-AFE GL128 mock (`tools/gl128_sim.py`).
+    let transport: Option<Box<dyn UsbTransport>> =
+        if spec.get("sim").and_then(Value::as_bool) == Some(true) { Some(Box::new(Gl128Sim::transport())) } else { None };
+    let mut scanner = Scanner::open_fake(model, transport, Some(dir.join("calib.json"))).unwrap();
     let mut fails = Vec::new();
     for (k, (step, want)) in spec["steps"].as_array().unwrap().iter().zip(fx["results"].as_array().unwrap()).enumerate() {
         let op = step["op"].as_str().unwrap();
@@ -191,6 +196,8 @@ fn run(path: &std::path::Path) -> Vec<String> {
     }
     let t = scanner.transport();
     let txns: Vec<Value> = if let Some(m) = find_transport::<MockScannerTransport>(t) {
+        m.core.transactions.iter().map(row).collect()
+    } else if let Some(m) = find_transport::<Gl128SimTransport>(t) {
         m.core.transactions.iter().map(row).collect()
     } else if let Some(s) = find_transport::<SimulatedGl843V1Transport>(t) {
         s.transactions.iter().map(row).collect()
