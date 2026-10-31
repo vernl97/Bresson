@@ -37,14 +37,24 @@ pub struct Gl843V1Usb {
 
 impl Gl843V1Usb {
     pub fn new(transport: Box<dyn UsbTransport>) -> Self {
-        Self { transport, shadow: HashMap::new() }
+        Self {
+            transport,
+            shadow: HashMap::new(),
+        }
     }
 
     pub fn ctl_out(&mut self, value: u16, index: u16, data: &[u8]) -> Result<()> {
         let request = if data.len() > 1 { 0x04 } else { 0x0C };
         let mut error: Option<Error> = None;
         for _attempt in 0..10 {
-            match self.transport.control_msg(0x40, request, value, index, ControlData::Out(data), None) {
+            match self.transport.control_msg(
+                0x40,
+                request,
+                value,
+                index,
+                ControlData::Out(data),
+                None,
+            ) {
                 Ok(_) => {}
                 // A stalled write is sent again.
                 Err(e @ Error::Usb(_)) => {
@@ -72,9 +82,14 @@ impl Gl843V1Usb {
 
     pub fn ctl_in(&mut self, value: u16, index: u16, length: usize) -> Result<Vec<u8>> {
         let req = if length > 1 { 0x04 } else { 0x0C };
-        let data = self.transport.control_msg(0xC0, req, value, index, ControlData::In(length), None)?;
+        let data =
+            self.transport
+                .control_msg(0xC0, req, value, index, ControlData::In(length), None)?;
         if data.len() != length {
-            return Err(Error::Usb(format!("control read 0x{value:02x}/0x{index:02x} returned {} bytes", data.len())));
+            return Err(Error::Usb(format!(
+                "control read 0x{value:02x}/0x{index:02x} returned {} bytes",
+                data.len()
+            )));
         }
         Ok(data)
     }
@@ -101,18 +116,45 @@ impl Gl843V1Usb {
     }
 
     pub fn write_afe(&mut self, addr: u8, value: u16) -> Result<()> {
-        self.ctl_out(0x83, 0, &[0x51, addr, 0x3A, (value >> 8) as u8, 0x3B, (value & 0xFF) as u8])
+        self.ctl_out(
+            0x83,
+            0,
+            &[
+                0x51,
+                addr,
+                0x3A,
+                (value >> 8) as u8,
+                0x3B,
+                (value & 0xFF) as u8,
+            ],
+        )
     }
 
     /// Motor table into RAM slot `slot`.
     pub fn upload_table(&mut self, slot: u32, table: &[i64]) -> Result<()> {
         let addr = 0x40000 + 0x8000 * slot;
-        let data: Vec<u8> = table.iter().flat_map(|&v| [(v & 0xFF) as u8, (v >> 8) as u8]).collect();
+        let data: Vec<u8> = table
+            .iter()
+            .flat_map(|&v| [(v & 0xFF) as u8, (v >> 8) as u8])
+            .collect();
         self.write_register(0x5B, ((addr >> 12) & 0xFF) as u8)?;
         self.write_register(0x5C, ((addr >> 4) & 0xFF) as u8)?;
         self.ctl_out(0x83, 0, &[0x28])?;
         let n = data.len();
-        self.ctl_out(0x82, 0, &[1, 0, 0, 0, (n & 0xFF) as u8, ((n >> 8) & 0xFF) as u8, ((n >> 16) & 0xFF) as u8, 0])?;
+        self.ctl_out(
+            0x82,
+            0,
+            &[
+                1,
+                0,
+                0,
+                0,
+                (n & 0xFF) as u8,
+                ((n >> 8) & 0xFF) as u8,
+                ((n >> 16) & 0xFF) as u8,
+                0,
+            ],
+        )?;
         let mut pad = data;
         pad.resize(n + (BULK_PACKET - n % BULK_PACKET) % BULK_PACKET, 0);
         if self.transport.bulk_write(&pad, None)? != pad.len() {
@@ -151,20 +193,34 @@ pub fn recorded_motion(profile: &Value) -> Result<RecordedMotion> {
             let b = base64::engine::general_purpose::STANDARD
                 .decode(op["data"].as_str().unwrap_or(""))
                 .map_err(|e| Error::Value(format!("bad base64 in replay profile: {e}")))?;
-            tables.push(b.chunks_exact(2).map(|p| p[0] as i64 | ((p[1] as i64) << 8)).collect());
+            tables.push(
+                b.chunks_exact(2)
+                    .map(|p| p[0] as i64 | ((p[1] as i64) << 8))
+                    .collect(),
+            );
             continue;
         }
-        if kind != "control" || op["rt"].as_u64() != Some(0x40) || op["value"].as_u64() != Some(0x83) {
+        if kind != "control"
+            || op["rt"].as_u64() != Some(0x40)
+            || op["value"].as_u64() != Some(0x83)
+        {
             continue;
         }
-        let d: Vec<u8> = op["data"].as_array().map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0) as u8).collect()).unwrap_or_default();
+        let d: Vec<u8> = op["data"]
+            .as_array()
+            .map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0) as u8).collect())
+            .unwrap_or_default();
         if d.len() < 2 {
             continue;
         }
         for p in d.chunks_exact(2) {
             let (r, v) = (p[0], p[1]);
             if r == 0x5B {
-                slot = if v & 0x40 != 0 { Some((v >> 3) & 7) } else { None };
+                slot = if v & 0x40 != 0 {
+                    Some((v >> 3) & 7)
+                } else {
+                    None
+                };
             }
             if r == 0x0F && v == 1 && ctx.is_none() {
                 let g = |a: u8| *reg.get(&a).unwrap_or(&0) as u32;
@@ -181,7 +237,11 @@ pub fn recorded_motion(profile: &Value) -> Result<RecordedMotion> {
     };
     // Python `list.sort(key=t[-1])` is stable.
     tables.sort_by_key(|t| *t.last().unwrap_or(&0));
-    Ok(RecordedMotion { fast: tables[0].clone(), slow: tables[tables.len() - 1].clone(), regs: ctx })
+    Ok(RecordedMotion {
+        fast: tables[0].clone(),
+        slow: tables[tables.len() - 1].clone(),
+        regs: ctx,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,16 +258,27 @@ pub struct Gl843V1Motion {
     base01: u8,
 }
 
-const MOTOR_REGS: [u8; 19] = [0x1C, 0x1F, 0x21, 0x22, 0x23, 0x24, 0x38, 0x39, 0x5E, 0x5F, 0x67, 0x68, 0x69, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x80];
+const MOTOR_REGS: [u8; 19] = [
+    0x1C, 0x1F, 0x21, 0x22, 0x23, 0x24, 0x38, 0x39, 0x5E, 0x5F, 0x67, 0x68, 0x69, 0x6B, 0x6C, 0x6D,
+    0x6E, 0x6F, 0x80,
+];
 
 fn feedl(n: i64) -> [(u8, u8); 3] {
-    [(0x3D, ((n >> 16) & 0x0F) as u8), (0x3E, ((n >> 8) & 0xFF) as u8), (0x3F, (n & 0xFF) as u8)]
+    [
+        (0x3D, ((n >> 16) & 0x0F) as u8),
+        (0x3E, ((n >> 8) & 0xFF) as u8),
+        (0x3F, (n & 0xFF) as u8),
+    ]
 }
 
 impl Gl843V1Motion {
     pub fn new(rec: RecordedMotion) -> Self {
         let base01 = rec.regs.get(&0x01).copied().unwrap_or(0x22) & !0x01;
-        Self { rec, loaded: None, base01 }
+        Self {
+            rec,
+            loaded: None,
+            base01,
+        }
     }
 
     pub fn wait_idle(&self, usb: &mut Gl843V1Usb, timeout_s: f64) -> Result<u8> {
@@ -215,7 +286,9 @@ impl Gl843V1Motion {
         let mut s = usb.status()?;
         while s & STATUS_MOTORENB != 0 {
             if monotonic() - t0 > timeout_s {
-                return Err(Error::MotorTimeout(format!("motor still running after {timeout_s:.0} s")));
+                return Err(Error::MotorTimeout(format!(
+                    "motor still running after {timeout_s:.0} s"
+                )));
             }
             sleep(0.01);
             s = usb.status()?;
@@ -232,16 +305,33 @@ impl Gl843V1Motion {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn do_move(&mut self, usb: &mut Gl843V1Usb, steps: i64, reverse: bool, table: Table, fmovno: u8, timeout_s: f64, until_home: bool) -> Result<(u8, bool)> {
+    fn do_move(
+        &mut self,
+        usb: &mut Gl843V1Usb,
+        steps: i64,
+        reverse: bool,
+        table: Table,
+        fmovno: u8,
+        timeout_s: f64,
+        until_home: bool,
+    ) -> Result<(u8, bool)> {
         self.wait_idle(usb, 5.0)?;
         if self.loaded != Some(table) {
-            let t = if table == Table::Fast { &self.rec.fast } else { &self.rec.slow };
+            let t = if table == Table::Fast {
+                &self.rec.fast
+            } else {
+                &self.rec.slow
+            };
             usb.upload_table(3, t)?;
             self.loaded = Some(table);
         }
         let regs = &self.rec.regs;
         let mut pairs: Vec<(u8, u8)> = vec![(0x01, self.base01)];
-        pairs.extend(MOTOR_REGS.iter().map(|&r| (r, regs.get(&r).copied().unwrap_or(0))));
+        pairs.extend(
+            MOTOR_REGS
+                .iter()
+                .map(|&r| (r, regs.get(&r).copied().unwrap_or(0))),
+        );
         pairs.extend((0x10..0x16).map(|r| (r, 0)));
         pairs.push((0x6A, fmovno));
         pairs.push((0x02, 0x18 | if reverse { MTRREV } else { 0 }));
@@ -260,7 +350,9 @@ impl Gl843V1Motion {
             }
             if monotonic() - t0 > timeout_s {
                 self.stop(usb)?;
-                return Err(Error::MotorTimeout(format!("move did not finish in {timeout_s:.0} s")));
+                return Err(Error::MotorTimeout(format!(
+                    "move did not finish in {timeout_s:.0} s"
+                )));
             }
             sleep(0.002);
         }
@@ -272,7 +364,8 @@ impl Gl843V1Motion {
             s = self.stop(usb)?;
         }
         if s & STATUS_HOME == 0 {
-            let (_, reached) = self.do_move(usb, 80000, true, Table::Fast, 0xFF, timeout_s, true)?;
+            let (_, reached) =
+                self.do_move(usb, 80000, true, Table::Fast, 0xFF, timeout_s, true)?;
             if !reached {
                 return Err(Error::MotorTimeout("home sensor not found".into()));
             }
@@ -286,11 +379,15 @@ impl Gl843V1Motion {
             }
         }
         if !left {
-            return Err(Error::MotorTimeout("home sensor stays on after moving forward".into()));
+            return Err(Error::MotorTimeout(
+                "home sensor stays on after moving forward".into(),
+            ));
         }
         let (st, reached) = self.do_move(usb, 3000, true, Table::Slow, 0xFF, 10.0, true)?;
         if !reached {
-            return Err(Error::MotorTimeout("home sensor not found on the final approach".into()));
+            return Err(Error::MotorTimeout(
+                "home sensor not found on the final approach".into(),
+            ));
         }
         Ok(st)
     }
@@ -340,17 +437,27 @@ impl Gl843V1 {
         }
         let data = replay_data();
         self.usb.ctl_in(0x8E, 0, 1)?;
-        let num = |v: &Value| -> u64 { v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(0) };
+        let num = |v: &Value| -> u64 {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0)
+        };
         for group in data["boot"].as_array().into_iter().flatten() {
             let g = group.as_array().expect("boot group");
             if g[0].as_str() == Some("8c") {
-                self.usb.ctl_out(0x8C, num(&g[1]) as u16, &[num(&g[2]) as u8])?;
+                self.usb
+                    .ctl_out(0x8C, num(&g[1]) as u16, &[num(&g[2]) as u8])?;
             } else {
                 let bytes: Vec<u8> = g.iter().map(|v| num(v) as u8).collect();
                 self.usb.ctl_out(0x83, 0, &bytes)?;
             }
         }
-        let gpio: Vec<(u8, u8)> = data["gpio"].as_array().into_iter().flatten().map(|p| (num(&p[0]) as u8, num(&p[1]) as u8)).collect();
+        let gpio: Vec<(u8, u8)> = data["gpio"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| (num(&p[0]) as u8, num(&p[1]) as u8))
+            .collect();
         self.usb.write_registers(&gpio)?;
         sleep(0.1);
         let afe = &data["afe"];
@@ -387,9 +494,11 @@ impl Gl843V1 {
     pub fn lamp_on(&mut self) -> Result<()> {
         let reg03 = self.reg03();
         if self.scan_method == ScanMethod::Infrared {
-            self.usb.write_registers(&[(0x03, reg03 & !LAMP_BIT), (0xA8, IR_GPIO_ON)])?;
+            self.usb
+                .write_registers(&[(0x03, reg03 & !LAMP_BIT), (0xA8, IR_GPIO_ON)])?;
         } else {
-            self.usb.write_registers(&[(0xA8, IR_GPIO_OFF), (0x03, reg03 | LAMP_BIT)])?;
+            self.usb
+                .write_registers(&[(0xA8, IR_GPIO_OFF), (0x03, reg03 | LAMP_BIT)])?;
         }
         self.lamp_on_at = Some(monotonic());
         Ok(())
@@ -397,14 +506,22 @@ impl Gl843V1 {
 
     pub fn lamp_off(&mut self) -> Result<()> {
         let reg03 = self.reg03();
-        self.usb.write_registers(&[(0x03, reg03 & !LAMP_BIT), (0xA8, IR_GPIO_OFF)])?;
+        self.usb
+            .write_registers(&[(0x03, reg03 & !LAMP_BIT), (0xA8, IR_GPIO_OFF)])?;
         self.lamp_on_at = None;
         Ok(())
     }
 
     pub fn white_led(&mut self, on: bool) -> Result<()> {
         let reg03 = self.reg03();
-        self.usb.write_register(0x03, if on { reg03 | LAMP_BIT } else { reg03 & !LAMP_BIT })?;
+        self.usb.write_register(
+            0x03,
+            if on {
+                reg03 | LAMP_BIT
+            } else {
+                reg03 & !LAMP_BIT
+            },
+        )?;
         self.lamp_on_at = if on { Some(monotonic()) } else { None };
         Ok(())
     }

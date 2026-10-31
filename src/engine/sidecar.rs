@@ -349,6 +349,13 @@ pub fn save_defaults(d: &Defaults) -> Result<()> {
 /// Disk cache for decoded analysis proxies (keyed by decoder version, path,
 /// size and mtime).
 pub fn proxy_cache_path(image: &Path) -> Option<PathBuf> {
+    let key = cache_key(image)?;
+    let dir = dirs::cache_dir()?.join("nlp-studio").join("proxies");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(format!("{key:016x}.json")))
+}
+
+fn cache_key(image: &Path) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let md = std::fs::metadata(image).ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -356,9 +363,39 @@ pub fn proxy_cache_path(image: &Path) -> Option<PathBuf> {
     image.hash(&mut h);
     md.len().hash(&mut h);
     md.modified().ok()?.hash(&mut h);
-    let dir = dirs::cache_dir()?.join("nlp-studio").join("proxies");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join(format!("{:016x}.json", h.finish())))
+    Some(h.finish())
+}
+
+/// The grid thumbnail cache, next to the sidecar in the scan folder's `NLP/`
+/// (`<file>.<key>.thumb`; the key changes with the file, so stale ones are
+/// recognisable by name).
+pub fn thumb_path(image: &Path) -> Option<PathBuf> {
+    let name = image.file_name()?.to_str()?;
+    Some(project_dir(image).join(format!("{name}.{:08x}.thumb", cache_key(image)? as u32)))
+}
+
+/// Remove the thumbnails of `image` left by earlier versions of the file.
+pub fn remove_stale_thumbs(image: &Path, keep: &Path) {
+    let Some(name) = image.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let Ok(rd) = std::fs::read_dir(project_dir(image)) else {
+        return;
+    };
+    let prefix = format!("{name}.");
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        let fname = e.file_name();
+        let f = fname.to_string_lossy();
+        // `<name>.<8 hex>.thumb` exactly, so `a.tif` leaves `a.tif.b.tif.*` alone.
+        let is_thumb = f
+            .strip_prefix(&prefix)
+            .and_then(|r| r.strip_suffix(".thumb"))
+            .is_some_and(|k| k.len() == 8 && k.bytes().all(|b| b.is_ascii_hexdigit()));
+        if is_thumb && p != keep {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 #[cfg(test)]

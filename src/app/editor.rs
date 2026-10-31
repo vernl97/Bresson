@@ -369,10 +369,34 @@ fn lab_pad(ui: &mut egui::Ui, s: &mut Settings) {
     use lab::Channel;
     let clicks = lab::clicks(s);
     let tiles = [
-        (Channel::D, "Density", theme::TEXT, ("6", "Print lighter"), ("4", "Print darker")),
-        (Channel::C, "Cyan", grad::RED_CYAN.1, ("1", "Remove cyan"), ("7", "Add cyan")),
-        (Channel::M, "Magenta", grad::GREEN_MAGENTA.1, ("2", "Remove magenta"), ("8", "Add magenta")),
-        (Channel::Y, "Yellow", grad::BLUE_YELLOW.1, ("3", "Remove yellow"), ("9", "Add yellow")),
+        (
+            Channel::D,
+            "Density",
+            theme::TEXT,
+            ("6", "Print lighter"),
+            ("4", "Print darker"),
+        ),
+        (
+            Channel::C,
+            "Cyan",
+            grad::RED_CYAN.1,
+            ("1", "Remove cyan"),
+            ("7", "Add cyan"),
+        ),
+        (
+            Channel::M,
+            "Magenta",
+            grad::GREEN_MAGENTA.1,
+            ("2", "Remove magenta"),
+            ("8", "Add magenta"),
+        ),
+        (
+            Channel::Y,
+            "Yellow",
+            grad::BLUE_YELLOW.1,
+            ("3", "Remove yellow"),
+            ("9", "Add yellow"),
+        ),
     ];
     let gap = 6.0;
     let w = ((ui.available_width() - gap * 3.0) / 4.0).floor();
@@ -383,7 +407,10 @@ fn lab_pad(ui: &mut egui::Ui, s: &mut Settings) {
             let top = Rect::from_min_size(rect.min, vec2(w, 44.0));
             let half = |right: bool| {
                 Rect::from_min_size(
-                    pos2(rect.left() + if right { w / 2.0 } else { 0.0 }, top.bottom()),
+                    pos2(
+                        rect.left() + if right { w / 2.0 } else { 0.0 },
+                        top.bottom(),
+                    ),
                     vec2(w / 2.0, rect.height() - top.height()),
                 )
             };
@@ -392,7 +419,9 @@ fn lab_pad(ui: &mut egui::Ui, s: &mut Settings) {
             let r = ui
                 .interact(top, ui.id().with(("lab_value", k)), Sense::click_and_drag())
                 .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-                .on_hover_text(format!("{name}: drag sideways or use the keys · double-click to reset"));
+                .on_hover_text(format!(
+                    "{name}: drag sideways or use the keys · double-click to reset"
+                ));
             let acc_id = r.id.with("drag_acc");
             let mut acc: f32 = ui.data(|d| d.get_temp(acc_id)).unwrap_or(0.0);
             acc += r.drag_delta().x;
@@ -427,14 +456,19 @@ fn lab_pad(ui: &mut egui::Ui, s: &mut Settings) {
                 egui::Align2::CENTER_CENTER,
                 v,
                 theme::medium(17.0),
-                if clicks[k] == 0 { theme::FAINT } else { theme::TEXT },
+                if clicks[k] == 0 {
+                    theme::FAINT
+                } else {
+                    theme::TEXT
+                },
             );
             p.hline(
                 rect.x_range().shrink(6.0),
                 top.bottom(),
                 egui::Stroke::new(1.0, theme::LINE),
             );
-            for (right, (key, tip), sign, step) in [(false, minus, "−", -1), (true, plus, "+", 1)] {
+            for (right, (key, tip), sign, step) in [(false, minus, "−", -1), (true, plus, "+", 1)]
+            {
                 let hr = half(right);
                 let b = ui
                     .interact(hr, ui.id().with(("lab_btn", k, right)), Sense::click())
@@ -442,9 +476,15 @@ fn lab_pad(ui: &mut egui::Ui, s: &mut Settings) {
                 let p = ui.painter();
                 if b.hovered() {
                     let rounding = if right {
-                        egui::CornerRadius { se: 7, ..Default::default() }
+                        egui::CornerRadius {
+                            se: 7,
+                            ..Default::default()
+                        }
                     } else {
-                        egui::CornerRadius { sw: 7, ..Default::default() }
+                        egui::CornerRadius {
+                            sw: 7,
+                            ..Default::default()
+                        }
                     };
                     p.rect_filled(hr, rounding, theme::HOVER);
                 }
@@ -469,7 +509,6 @@ fn lab_pad(ui: &mut egui::Ui, s: &mut Settings) {
         }
     });
 }
-
 
 /// Height of the editor's filmstrip.
 const FILMSTRIP_H: f32 = 84.0;
@@ -1466,7 +1505,11 @@ impl NlpApp {
                 };
                 let icon = if free { Icon::Unlock } else { Icon::Lock };
                 if icon_button(ui, icon, tip, !free, true).clicked() {
-                    c.aspect = if free { c.locked_aspect } else { CropAspect::Free };
+                    c.aspect = if free {
+                        c.locked_aspect
+                    } else {
+                        CropAspect::Free
+                    };
                     changed = true;
                 }
                 egui::ComboBox::from_id_salt("crop_aspect")
@@ -1475,7 +1518,10 @@ impl NlpApp {
                     .selected_text(c.locked_aspect.label())
                     .show_ui(ui, |ui| {
                         for &o in CropAspect::ALL.iter().filter(|o| **o != CropAspect::Free) {
-                            if ui.selectable_label(c.locked_aspect == o && !free, o.label()).clicked() {
+                            if ui
+                                .selectable_label(c.locked_aspect == o && !free, o.label())
+                                .clicked()
+                            {
                                 c.locked_aspect = o;
                                 c.aspect = o;
                                 changed = true;
@@ -2092,7 +2138,10 @@ impl NlpApp {
         }
         ui.separator();
         if ui
-            .add(egui::Button::new("Keyboard shortcuts").shortcut_text(RichText::new("?").color(theme::FAINT)))
+            .add(
+                egui::Button::new("Keyboard shortcuts")
+                    .shortcut_text(RichText::new("?").color(theme::FAINT)),
+            )
             .clicked()
         {
             self.shortcuts_open = true;
@@ -2533,28 +2582,20 @@ impl NlpApp {
             ui.close();
         }
         ui.separator();
-        if widgets::checkbox(
-            ui, &mut self.editor.before.clone(), "Before / after")
-            .clicked()
-        {
+        if widgets::checkbox(ui, &mut self.editor.before.clone(), "Before / after").clicked() {
             self.editor.before = !self.editor.before;
             self.editor.split = false;
             self.editor.dirty = true;
             ui.close();
         }
-        if widgets::checkbox(
-            ui, &mut self.editor.split.clone(), "Split view")
-            .clicked()
-        {
+        if widgets::checkbox(ui, &mut self.editor.split.clone(), "Split view").clicked() {
             self.editor.split = !self.editor.split;
             self.editor.before = false;
             self.editor.dirty = true;
             ui.close();
         }
         if converted
-            && widgets::checkbox(
-                ui, &mut self.editor.clip_view.clone(), "Show clipping")
-                .clicked()
+            && widgets::checkbox(ui, &mut self.editor.clip_view.clone(), "Show clipping").clicked()
         {
             self.editor.clip_view = !self.editor.clip_view;
             self.editor.dirty = true;
@@ -2934,7 +2975,14 @@ mod crop_lock_tests {
     #[test]
     fn dragging_keeps_the_ratio_and_the_anchor() {
         let k = 1.5;
-        for h in [Handle::TL, Handle::BR, Handle::L, Handle::R, Handle::T, Handle::B] {
+        for h in [
+            Handle::TL,
+            Handle::BR,
+            Handle::L,
+            Handle::R,
+            Handle::T,
+            Handle::B,
+        ] {
             let mut ins = [10.0, 12.0, 30.0, 8.0];
             match h {
                 Handle::TL | Handle::L => ins[0] = 3.0,

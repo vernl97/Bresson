@@ -5,7 +5,9 @@
 mod common;
 
 use opticfilm::error::Error;
-use opticfilm::usb::device::{PID_OPTICFILM_8200I, PID_OPTICFILM_8200I_SE, UsbDeviceInfo, VID_PLUSTEK};
+use opticfilm::usb::device::{
+    PID_OPTICFILM_8200I, PID_OPTICFILM_8200I_SE, UsbDeviceInfo, VID_PLUSTEK,
+};
 use opticfilm::usb::fake::{ControlLogData, FakeUsbTransport, NoDevice};
 use opticfilm::usb::protocol::*;
 use opticfilm::usb::transport::find_transport;
@@ -27,18 +29,34 @@ fn written(d: &ControlLogData) -> &[u8] {
 
 #[test]
 fn device_id_format() {
-    let info = UsbDeviceInfo { vendor_id: VID_PLUSTEK, product_id: PID_OPTICFILM_8200I, bus: Some(1), address: Some(8), ..Default::default() };
+    let info = UsbDeviceInfo {
+        vendor_id: VID_PLUSTEK,
+        product_id: PID_OPTICFILM_8200I,
+        bus: Some(1),
+        address: Some(8),
+        ..Default::default()
+    };
     assert_eq!(info.device_id(), "plustek:usb:07b3:130d:001:008");
     assert!(info.is_supported());
 }
 
 #[test]
 fn se_variant_identified_as_gl128() {
-    let info = UsbDeviceInfo { vendor_id: VID_PLUSTEK, product_id: PID_OPTICFILM_8200I_SE, bus: Some(1), address: Some(2), ..Default::default() };
+    let info = UsbDeviceInfo {
+        vendor_id: VID_PLUSTEK,
+        product_id: PID_OPTICFILM_8200I_SE,
+        bus: Some(1),
+        address: Some(2),
+        ..Default::default()
+    };
     assert!(info.is_supported());
     assert!(info.is_8200i_se());
     assert_eq!(info.asic_hint(), "GL128");
-    let other = UsbDeviceInfo { vendor_id: 0x1234, product_id: PID_OPTICFILM_8200I_SE, ..Default::default() };
+    let other = UsbDeviceInfo {
+        vendor_id: 0x1234,
+        product_id: PID_OPTICFILM_8200I_SE,
+        ..Default::default()
+    };
     assert!(!other.is_supported() && !other.is_8200i_se());
 }
 
@@ -60,7 +78,10 @@ fn genesys_constants_match_sane_low_h() {
 fn link_status_check() {
     GenesysUsbProtocol::check_link_status(0x55).unwrap();
     let err = GenesysUsbProtocol::check_link_status(0x00).unwrap_err();
-    assert!(matches!(err, Error::Usb(_)) && err.to_string().contains("0x00"), "{err}");
+    assert!(
+        matches!(err, Error::Usb(_)) && err.to_string().contains("0x00"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -77,7 +98,10 @@ fn read_register_gl845_framing() {
     fake(&mut p).core.registers.insert(0x6B, 0x30);
     assert_eq!(p.read_register(0x6B).unwrap(), 0x30);
     let (rtype, req, value, index, data) = fake(&mut p).core.control_log()[0].clone();
-    assert_eq!((rtype, req, value), (REQUEST_TYPE_IN, REQUEST_BUFFER, VALUE_GET_REGISTER));
+    assert_eq!(
+        (rtype, req, value),
+        (REQUEST_TYPE_IN, REQUEST_BUFFER, VALUE_GET_REGISTER)
+    );
     assert_eq!(index, (0x22 + (0x6Bu32 << 8)) as u16);
     assert_eq!(data, ControlLogData::Len(2));
 }
@@ -87,7 +111,10 @@ fn write_register_gl845_framing() {
     let mut p = proto();
     p.write_register(0x6C, 0x4C).unwrap();
     let (rtype, req, value, index, data) = fake(&mut p).core.control_log()[0].clone();
-    assert_eq!((rtype, req, value, index), (REQUEST_TYPE_OUT, REQUEST_BUFFER, VALUE_SET_REGISTER, INDEX));
+    assert_eq!(
+        (rtype, req, value, index),
+        (REQUEST_TYPE_OUT, REQUEST_BUFFER, VALUE_SET_REGISTER, INDEX)
+    );
     assert_eq!(written(&data), [0x6C, 0x4C]);
     assert_eq!(fake(&mut p).core.reg(0x6C), 0x4C);
 }
@@ -115,7 +142,10 @@ fn bulk_read_data_sends_gl845_header_per_chunk() {
     assert_eq!(p.bulk_read_data(4).unwrap(), [1, 2, 3, 4]);
     // First control is the bulk header.
     let (rtype, req, value, index, data) = fake(&mut p).core.control_log()[0].clone();
-    assert_eq!((rtype, req, value, index), (REQUEST_TYPE_OUT, REQUEST_BUFFER, VALUE_BUFFER, 0x00));
+    assert_eq!(
+        (rtype, req, value, index),
+        (REQUEST_TYPE_OUT, REQUEST_BUFFER, VALUE_BUFFER, 0x00)
+    );
     let payload = written(&data);
     assert_eq!(payload[3], 0x10); // 0x10000000 address marker
     assert_eq!(payload[4..8], [4, 0, 0, 0]);

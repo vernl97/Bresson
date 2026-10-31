@@ -6,9 +6,17 @@
 
 use super::model::{FilmModel, MdKey, OrdMap, RegMap, ScanMethod};
 
-fn lookup_method_dpi<V: Clone>(table: Option<&OrdMap<MdKey, V>>, method: ScanMethod, resolution: i64) -> Option<V> {
+fn lookup_method_dpi<V: Clone>(
+    table: Option<&OrdMap<MdKey, V>>,
+    method: ScanMethod,
+    resolution: i64,
+) -> Option<V> {
     let table = table.filter(|t| !t.is_empty())?;
-    for key in [MdKey(Some(method), Some(resolution)), MdKey(None, Some(resolution)), MdKey(Some(method), None)] {
+    for key in [
+        MdKey(Some(method), Some(resolution)),
+        MdKey(None, Some(resolution)),
+        MdKey(Some(method), None),
+    ] {
         if let Some(v) = table.get(&key) {
             return Some(v.clone());
         }
@@ -18,7 +26,8 @@ fn lookup_method_dpi<V: Clone>(table: Option<&OrdMap<MdKey, V>>, method: ScanMet
 
 /// `LPERIOD` exposure for `resolution` / `method`.
 pub fn exposure_lperiod_for(model: &FilmModel, resolution: i64, method: ScanMethod) -> i64 {
-    lookup_method_dpi(model.lperiod_by_dpi.as_ref(), method, resolution).unwrap_or(model.exposure_lperiod)
+    lookup_method_dpi(model.lperiod_by_dpi.as_ref(), method, resolution)
+        .unwrap_or(model.exposure_lperiod)
 }
 
 /// Shading/scan DUMMY register value.

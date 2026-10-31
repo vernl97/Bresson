@@ -5,7 +5,10 @@
 use eframe::egui::{self, RichText, Sense, pos2, vec2};
 
 use super::NlpApp;
-use super::scanner::{self, DeviceEntry, ScanCmd, ScanEvent, ScanJob, ScanWorker, ScannerChoice, ScannerInfo, ScannerKind};
+use super::scanner::{
+    self, DeviceEntry, ScanCmd, ScanEvent, ScanJob, ScanWorker, ScannerChoice, ScannerInfo,
+    ScannerKind,
+};
 use super::widgets::{self, theme};
 
 /// Smallest box kept from a drag, as a fraction of the prescan.
@@ -16,9 +19,16 @@ const HANDLE: f32 = 8.0;
 #[derive(Debug, Clone, Copy)]
 enum Drag {
     New([f32; 2]),
-    Move { i: usize, grab: [f32; 2], orig: [f32; 4] },
+    Move {
+        i: usize,
+        grab: [f32; 2],
+        orig: [f32; 4],
+    },
     /// Corner: 0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left.
-    Resize { i: usize, corner: usize },
+    Resize {
+        i: usize,
+        corner: usize,
+    },
 }
 
 #[derive(Default)]
@@ -46,7 +56,12 @@ pub struct ScanState {
 }
 
 fn order(a: [f32; 2], b: [f32; 2]) -> [f32; 4] {
-    [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+    ]
 }
 
 /// The corner of the box spanned by `fixed` and `p` that `p` is on.
@@ -76,14 +91,21 @@ impl NlpApp {
     pub fn close_scan_panel(&mut self) {
         let devices = self.scan.devices.take();
         let sane_note = self.scan.sane_note.take();
-        self.scan = ScanState { devices, sane_note, ..Default::default() };
+        self.scan = ScanState {
+            devices,
+            sane_note,
+            ..Default::default()
+        };
     }
 
     fn scan_send(&mut self, cmd: ScanCmd) {
-        let worker = self
-            .scan
-            .worker
-            .get_or_insert_with(|| ScanWorker::spawn(self.jobs.sender(), self.jobs.ctx().clone(), self.defaults.settings.clone()));
+        let worker = self.scan.worker.get_or_insert_with(|| {
+            ScanWorker::spawn(
+                self.jobs.sender(),
+                self.jobs.ctx().clone(),
+                self.defaults.settings.clone(),
+            )
+        });
         self.scan.error = None;
         self.scan.busy = true;
         self.scan.progress = None;
@@ -107,7 +129,10 @@ impl NlpApp {
 
     fn set_scan_source(&mut self, source: String) {
         if let Some(info) = &self.scan.info {
-            self.defaults.scan.source.insert(info.choice.key(), source.clone());
+            self.defaults
+                .scan
+                .source
+                .insert(info.choice.key(), source.clone());
             let _ = crate::engine::sidecar::save_defaults(&self.defaults);
         }
         self.scan_send(ScanCmd::SetSource(source));
@@ -115,12 +140,18 @@ impl NlpApp {
 
     /// Scan every framed area into the open roll with the panel's settings.
     pub fn scan_frames(&mut self) {
-        let (Some(info), Some(dir)) = (&self.scan.info, self.folder.clone()) else { return };
+        let (Some(info), Some(dir)) = (&self.scan.info, self.folder.clone()) else {
+            return;
+        };
         if self.scan.crops.is_empty() {
             return;
         }
         let d = &self.defaults.scan;
-        let dpi = if info.resolutions.contains(&d.dpi) { d.dpi } else { info.resolutions.iter().copied().max().unwrap_or(d.dpi) };
+        let dpi = if info.resolutions.contains(&d.dpi) {
+            d.dpi
+        } else {
+            info.resolutions.iter().copied().max().unwrap_or(d.dpi)
+        };
         let areas = self.scan.crops.clone();
         let job = ScanJob {
             dpi,
@@ -128,7 +159,11 @@ impl NlpApp {
             areas,
             infrared: d.infrared && info.supports_ir,
             multi_exposure: d.multi_exposure && info.supports_me,
-            passes: if info.supports_passes { d.passes.max(1) } else { 1 },
+            passes: if info.supports_passes {
+                d.passes.max(1)
+            } else {
+                1
+            },
             source: info.source.clone(),
             gamma_encoded: d.gamma_encoded.contains(&info.choice.key()),
         };
@@ -155,29 +190,52 @@ impl NlpApp {
                 s.status = if info.scan_ready {
                     format!("{} ready", info.label)
                 } else {
-                    format!("{} is not validated for scanning yet; it opens for status only.", info.label)
+                    format!(
+                        "{} is not validated for scanning yet; it opens for status only.",
+                        info.label
+                    )
                 };
                 s.busy = false;
                 // A flatbed opens on its film source; switch to the one picked last time.
                 let wanted = self.defaults.scan.source.get(&info.choice.key()).cloned();
-                let switch = wanted.filter(|w| info.kind == ScannerKind::Flatbed && Some(w) != info.source.as_ref() && info.sources.contains(w));
+                let switch = wanted.filter(|w| {
+                    info.kind == ScannerKind::Flatbed
+                        && Some(w) != info.source.as_ref()
+                        && info.sources.contains(w)
+                });
                 s.info = Some(info);
                 if let Some(w) = switch {
                     self.scan_send(ScanCmd::SetSource(w));
                 }
             }
             ScanEvent::Prescan(img) => {
-                s.prescan = Some(ctx.load_texture("scan-prescan", img, egui::TextureOptions::LINEAR));
-                let flatbed = s.info.as_ref().is_some_and(|i| i.kind == ScannerKind::Flatbed);
-                s.status = if flatbed { "Draw a box around each frame." } else { "Drag on the prescan to frame the scan." }.into();
+                s.prescan =
+                    Some(ctx.load_texture("scan-prescan", img, egui::TextureOptions::LINEAR));
+                let flatbed = s
+                    .info
+                    .as_ref()
+                    .is_some_and(|i| i.kind == ScannerKind::Flatbed);
+                s.status = if flatbed {
+                    "Draw a box around each frame."
+                } else {
+                    "Drag on the prescan to frame the scan."
+                }
+                .into();
                 s.busy = false;
                 s.progress = None;
             }
             ScanEvent::Saved { path, ir_path } => {
                 s.saved += 1;
                 s.pending = s.pending.saturating_sub(1);
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                s.status = if ir_path.is_some() { format!("Saved {name} with its IR plane") } else { format!("Saved {name}") };
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                s.status = if ir_path.is_some() {
+                    format!("Saved {name} with its IR plane")
+                } else {
+                    format!("Saved {name}")
+                };
                 if s.pending == 0 {
                     s.busy = false;
                     s.progress = None;
@@ -215,9 +273,20 @@ impl NlpApp {
             .default_size(360.0)
             .min_size(300.0)
             .max_size(560.0)
-            .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin { left: 16, right: 12, top: 12, bottom: 8 }))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin {
+                        left: 16,
+                        right: 12,
+                        top: 12,
+                        bottom: 8,
+                    }),
+            )
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.scan_panel_body(ui));
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.scan_panel_body(ui));
             });
     }
 
@@ -225,7 +294,11 @@ impl NlpApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Scan").font(theme::medium(15.0)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(widgets::ghost("Close")).on_hover_text("Close the panel and release the scanner").clicked() {
+                if ui
+                    .add(widgets::ghost("Close"))
+                    .on_hover_text("Close the panel and release the scanner")
+                    .clicked()
+                {
                     self.close_scan_panel();
                 }
             });
@@ -289,14 +362,24 @@ impl NlpApp {
         };
         let mut picked = None;
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("scan_scanner").width(230.0).selected_text(text).show_ui(ui, |ui| {
-                for d in &devices {
-                    if ui.selectable_label(current.as_ref() == Some(&d.choice), &d.label).clicked() {
-                        picked = Some(d.choice.clone());
+            egui::ComboBox::from_id_salt("scan_scanner")
+                .width(230.0)
+                .selected_text(text)
+                .show_ui(ui, |ui| {
+                    for d in &devices {
+                        if ui
+                            .selectable_label(current.as_ref() == Some(&d.choice), &d.label)
+                            .clicked()
+                        {
+                            picked = Some(d.choice.clone());
+                        }
                     }
-                }
-            });
-            if ui.add_enabled(!self.scan.busy, widgets::ghost("Refresh")).on_hover_text("Look for connected scanners").clicked() {
+                });
+            if ui
+                .add_enabled(!self.scan.busy, widgets::ghost("Refresh"))
+                .on_hover_text("Look for connected scanners")
+                .clicked()
+            {
                 self.refresh_scanners();
             }
         });
@@ -313,7 +396,10 @@ impl NlpApp {
         let mut d = self.defaults.scan.clone();
         let dpis = &info.resolutions;
         if !dpis.is_empty() && !dpis.contains(&d.dpi) {
-            d.dpi = *dpis.iter().find(|&&v| v >= d.dpi).unwrap_or(dpis.last().unwrap());
+            d.dpi = *dpis
+                .iter()
+                .find(|&&v| v >= d.dpi)
+                .unwrap_or(dpis.last().unwrap());
         }
         let mut gamma = d.gamma_encoded.contains(&key);
         let mut new_source = None;
@@ -397,27 +483,54 @@ impl NlpApp {
         let size = tex.size_vec2();
         let scale = (ui.available_width() / size.x).min(520.0 / size.y);
         let (rect, resp) = ui.allocate_exact_size(size * scale, Sense::click_and_drag());
-        ui.painter().image(tex.id(), rect, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
+        ui.painter().image(
+            tex.id(),
+            rect,
+            egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
         let to_norm = |p: egui::Pos2| {
             let v = ((p - rect.min) / rect.size()).clamp(vec2(0.0, 0.0), vec2(1.0, 1.0));
             [v.x, v.y]
         };
-        let to_screen =
-            |c: [f32; 4]| egui::Rect::from_min_max(rect.min + vec2(c[0], c[1]) * rect.size(), rect.min + vec2(c[2], c[3]) * rect.size());
-        let close_box = |r: egui::Rect| egui::Rect::from_min_size(pos2(r.max.x - 18.0, r.min.y + 2.0), vec2(16.0, 16.0));
+        let to_screen = |c: [f32; 4]| {
+            egui::Rect::from_min_max(
+                rect.min + vec2(c[0], c[1]) * rect.size(),
+                rect.min + vec2(c[2], c[3]) * rect.size(),
+            )
+        };
+        let close_box = |r: egui::Rect| {
+            egui::Rect::from_min_size(pos2(r.max.x - 18.0, r.min.y + 2.0), vec2(16.0, 16.0))
+        };
         let hit_corner = |p: egui::Pos2, crops: &[[f32; 4]]| {
             crops.iter().enumerate().rev().find_map(|(i, c)| {
                 let r = to_screen(*c);
-                [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].iter().position(|q| q.distance(p) <= HANDLE).map(|k| (i, k))
+                [
+                    r.left_top(),
+                    r.right_top(),
+                    r.right_bottom(),
+                    r.left_bottom(),
+                ]
+                .iter()
+                .position(|q| q.distance(p) <= HANDLE)
+                .map(|k| (i, k))
             })
         };
-        let hit_box = |p: egui::Pos2, crops: &[[f32; 4]]| crops.iter().rposition(|c| to_screen(*c).contains(p));
+        let hit_box = |p: egui::Pos2, crops: &[[f32; 4]]| {
+            crops.iter().rposition(|c| to_screen(*c).contains(p))
+        };
 
         if resp.clicked()
             && let Some(p) = resp.interact_pointer_pos()
         {
-            let close = self.scan.crops.iter().rposition(|c| multi && close_box(to_screen(*c)).contains(p));
-            if let Some(i) = close.filter(|&i| self.scan.selected == Some(i) || hit_box(p, &self.scan.crops) == Some(i)) {
+            let close = self
+                .scan
+                .crops
+                .iter()
+                .rposition(|c| multi && close_box(to_screen(*c)).contains(p));
+            if let Some(i) = close.filter(|&i| {
+                self.scan.selected == Some(i) || hit_box(p, &self.scan.crops) == Some(i)
+            }) {
                 self.scan.crops.remove(i);
                 self.scan.selected = None;
             } else {
@@ -431,7 +544,11 @@ impl NlpApp {
             self.scan.drag = Some(if let Some((i, corner)) = hit_corner(p, crops) {
                 Drag::Resize { i, corner }
             } else if let Some(i) = hit_box(p, crops) {
-                Drag::Move { i, grab: to_norm(p), orig: crops[i] }
+                Drag::Move {
+                    i,
+                    grab: to_norm(p),
+                    orig: crops[i],
+                }
             } else {
                 Drag::New(to_norm(p))
             });
@@ -452,7 +569,10 @@ impl NlpApp {
                         }
                         let i = self.scan.crops.len() - 1;
                         self.scan.selected = Some(i);
-                        self.scan.drag = Some(Drag::Resize { i, corner: corner_toward(a, n) });
+                        self.scan.drag = Some(Drag::Resize {
+                            i,
+                            corner: corner_toward(a, n),
+                        });
                     }
                 }
                 Drag::Move { i, grab, orig } => {
@@ -476,7 +596,10 @@ impl NlpApp {
                         if b[2] - b[0] > MIN_BOX && b[3] - b[1] > MIN_BOX {
                             *c = b;
                             // Follow the pointer when it crosses the fixed corner.
-                            self.scan.drag = Some(Drag::Resize { i, corner: corner_toward(fixed, n) });
+                            self.scan.drag = Some(Drag::Resize {
+                                i,
+                                corner: corner_toward(fixed, n),
+                            });
                         }
                     }
                     self.scan.selected = Some(i);
@@ -489,7 +612,10 @@ impl NlpApp {
         if multi
             && resp.hovered()
             && let Some(i) = self.scan.selected.filter(|&i| i < self.scan.crops.len())
-            && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, egui::Key::Delete) || inp.consume_key(egui::Modifiers::NONE, egui::Key::Backspace))
+            && ui.input_mut(|inp| {
+                inp.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                    || inp.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+            })
         {
             self.scan.crops.remove(i);
             self.scan.selected = None;
@@ -504,8 +630,14 @@ impl NlpApp {
             for r in [
                 egui::Rect::from_min_max(rect.min, pos2(rect.max.x, crop.min.y)),
                 egui::Rect::from_min_max(pos2(rect.min.x, crop.max.y), rect.max),
-                egui::Rect::from_min_max(pos2(rect.min.x, crop.min.y), pos2(crop.min.x, crop.max.y)),
-                egui::Rect::from_min_max(pos2(crop.max.x, crop.min.y), pos2(rect.max.x, crop.max.y)),
+                egui::Rect::from_min_max(
+                    pos2(rect.min.x, crop.min.y),
+                    pos2(crop.min.x, crop.max.y),
+                ),
+                egui::Rect::from_min_max(
+                    pos2(crop.max.x, crop.min.y),
+                    pos2(rect.max.x, crop.max.y),
+                ),
             ] {
                 p.rect_filled(r, 0.0, egui::Color32::from_black_alpha(130));
             }
@@ -515,19 +647,41 @@ impl NlpApp {
         for (i, c) in self.scan.crops.iter().enumerate() {
             let r = to_screen(*c);
             let active = self.scan.selected == Some(i) || hovered_box == Some(i);
-            p.rect_stroke(r, 0.0, egui::Stroke::new(if active { 2.0 } else { 1.5 }, theme::ACCENT), egui::StrokeKind::Inside);
+            p.rect_stroke(
+                r,
+                0.0,
+                egui::Stroke::new(if active { 2.0 } else { 1.5 }, theme::ACCENT),
+                egui::StrokeKind::Inside,
+            );
             if multi {
                 let tag = egui::Rect::from_min_size(r.min + vec2(2.0, 2.0), vec2(18.0, 16.0));
                 p.rect_filled(tag, 3.0, theme::ACCENT);
-                p.text(tag.center(), egui::Align2::CENTER_CENTER, format!("{}", i + 1), egui::FontId::proportional(11.0), egui::Color32::WHITE);
+                p.text(
+                    tag.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{}", i + 1),
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::WHITE,
+                );
                 if active {
                     let x = close_box(r);
                     p.rect_filled(x, 3.0, egui::Color32::from_black_alpha(170));
-                    p.text(x.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(13.0), theme::TEXT);
+                    p.text(
+                        x.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "×",
+                        egui::FontId::proportional(13.0),
+                        theme::TEXT,
+                    );
                 }
             }
             if self.scan.selected == Some(i) {
-                for q in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()] {
+                for q in [
+                    r.left_top(),
+                    r.right_top(),
+                    r.right_bottom(),
+                    r.left_bottom(),
+                ] {
                     p.circle_filled(q, 3.5, theme::ACCENT);
                 }
             }
@@ -572,7 +726,9 @@ impl NlpApp {
             ui.label(RichText::new(e).color(theme::ERR));
         }
         if self.folder.is_none() {
-            ui.label(RichText::new("Open or create a roll folder to scan into.").color(theme::WARN));
+            ui.label(
+                RichText::new("Open or create a roll folder to scan into.").color(theme::WARN),
+            );
         }
     }
 }

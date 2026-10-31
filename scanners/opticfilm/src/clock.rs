@@ -34,7 +34,9 @@ pub fn is_virtual() -> bool {
 
 /// Seconds since an arbitrary epoch (Python `time.monotonic`).
 pub fn monotonic() -> f64 {
-    VIRTUAL.with(|v| v.get()).unwrap_or_else(|| start().elapsed().as_secs_f64())
+    VIRTUAL
+        .with(|v| v.get())
+        .unwrap_or_else(|| start().elapsed().as_secs_f64())
 }
 
 /// Python `time.sleep`.

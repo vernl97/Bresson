@@ -47,11 +47,22 @@ pub struct CapturePlaybackTransport {
 
 impl CapturePlaybackTransport {
     pub fn new(ops: &[Value]) -> Self {
-        Self { ops: ops.iter().filter(|o| o["kind"] != "delay").cloned().collect(), pos: 0, read_left: None, transactions: Vec::new() }
+        Self {
+            ops: ops
+                .iter()
+                .filter(|o| o["kind"] != "delay")
+                .cloned()
+                .collect(),
+            pos: 0,
+            read_left: None,
+            transactions: Vec::new(),
+        }
     }
 
     fn next(&self, what: &str) -> Result<&Value> {
-        self.ops.get(self.pos).ok_or_else(|| mismatch(format!("{what} after the end of the vendor sequence")))
+        self.ops
+            .get(self.pos)
+            .ok_or_else(|| mismatch(format!("{what} after the end of the vendor sequence")))
     }
 
     pub fn finished(&self) -> bool {
@@ -60,13 +71,29 @@ impl CapturePlaybackTransport {
 }
 
 impl UsbTransport for CapturePlaybackTransport {
-    fn control_msg(&mut self, rt: u8, req: u8, value: u16, index: u16, data: ControlData<'_>, _t: Option<u32>) -> Result<Vec<u8>> {
+    fn control_msg(
+        &mut self,
+        rt: u8,
+        req: u8,
+        value: u16,
+        index: u16,
+        data: ControlData<'_>,
+        _t: Option<u32>,
+    ) -> Result<Vec<u8>> {
         let op = self.next(&format!("control 0x{value:02x}"))?.clone();
         let where_ = format!("vendor op {}", self.pos);
         if op["kind"] != "control" {
-            return Err(mismatch(format!("{where_}: expected {}, got control 0x{value:02x}", op["kind"].as_str().unwrap_or("?"))));
+            return Err(mismatch(format!(
+                "{where_}: expected {}, got control 0x{value:02x}",
+                op["kind"].as_str().unwrap_or("?")
+            )));
         }
-        let want = (u(&op["rt"]), u(&op["request"]), u(&op["value"]), u(&op["index"]));
+        let want = (
+            u(&op["rt"]),
+            u(&op["request"]),
+            u(&op["value"]),
+            u(&op["index"]),
+        );
         if want != (rt as i64, req as i64, value as i64, index as i64) {
             return Err(mismatch(format!(
                 "{where_}: expected rt=0x{:02x} req=0x{:02x} value=0x{:02x} index=0x{:02x}, got rt=0x{rt:02x} \
@@ -77,7 +104,10 @@ impl UsbTransport for CapturePlaybackTransport {
         self.pos += 1;
         match data {
             ControlData::Out(d) => {
-                let vendor: Vec<i64> = op["data"].as_array().map(|a| a.iter().map(u).collect()).unwrap_or_default();
+                let vendor: Vec<i64> = op["data"]
+                    .as_array()
+                    .map(|a| a.iter().map(u).collect())
+                    .unwrap_or_default();
                 let got: Vec<i64> = d.iter().map(|&b| b as i64).collect();
                 if got != vendor {
                     return Err(mismatch(format!(
@@ -91,10 +121,17 @@ impl UsbTransport for CapturePlaybackTransport {
             }
             ControlData::In(n) => {
                 if n as i64 != u(&op["length"]) {
-                    return Err(mismatch(format!("{where_}: read length {n} != vendor {}", u(&op["length"]))));
+                    return Err(mismatch(format!(
+                        "{where_}: read length {n} != vendor {}",
+                        u(&op["length"])
+                    )));
                 }
-                let reply: Vec<u8> = op["expected"].as_array().map(|a| a.iter().map(|v| u(v) as u8).collect()).unwrap_or_default();
-                self.transactions.push(in_txn(rt, req, value, index, &reply));
+                let reply: Vec<u8> = op["expected"]
+                    .as_array()
+                    .map(|a| a.iter().map(|v| u(v) as u8).collect())
+                    .unwrap_or_default();
+                self.transactions
+                    .push(in_txn(rt, req, value, index, &reply));
                 Ok(reply)
             }
         }
@@ -103,9 +140,15 @@ impl UsbTransport for CapturePlaybackTransport {
     fn bulk_write(&mut self, data: &[u8], _t: Option<u32>) -> Result<usize> {
         let op = self.next("bulk write")?;
         let ok = op["kind"] == "write"
-            && base64::engine::general_purpose::STANDARD.decode(op["data"].as_str().unwrap_or("")).is_ok_and(|d| d == data);
+            && base64::engine::general_purpose::STANDARD
+                .decode(op["data"].as_str().unwrap_or(""))
+                .is_ok_and(|d| d == data);
         if !ok {
-            return Err(mismatch(format!("vendor op {}: unexpected bulk write of {} bytes", self.pos, data.len())));
+            return Err(mismatch(format!(
+                "vendor op {}: unexpected bulk write of {} bytes",
+                self.pos,
+                data.len()
+            )));
         }
         self.pos += 1;
         let mut t = UsbTransaction::new(UsbOp::BulkWrite);
@@ -118,7 +161,11 @@ impl UsbTransport for CapturePlaybackTransport {
     fn bulk_read(&mut self, size: usize, _t: Option<u32>) -> Result<Vec<u8>> {
         let op = self.next("bulk read")?;
         if op["kind"] != "read" {
-            return Err(mismatch(format!("vendor op {}: expected {}, got bulk read", self.pos, op["kind"].as_str().unwrap_or("?"))));
+            return Err(mismatch(format!(
+                "vendor op {}: expected {}, got bulk read",
+                self.pos,
+                op["kind"].as_str().unwrap_or("?")
+            )));
         }
         let len = u(&op["length"]) as usize;
         let left = self.read_left.get_or_insert(len);
@@ -250,13 +297,22 @@ impl SimulatedGl843V1Transport {
 }
 
 impl UsbTransport for SimulatedGl843V1Transport {
-    fn control_msg(&mut self, rt: u8, req: u8, value: u16, index: u16, data: ControlData<'_>, _t: Option<u32>) -> Result<Vec<u8>> {
+    fn control_msg(
+        &mut self,
+        rt: u8,
+        req: u8,
+        value: u16,
+        index: u16,
+        data: ControlData<'_>,
+        _t: Option<u32>,
+    ) -> Result<Vec<u8>> {
         if rt == 0x40 {
             let payload = match data {
                 ControlData::Out(d) => d,
                 ControlData::In(_) => &[][..],
             };
-            self.transactions.push(out_txn(rt, req, value, index, payload));
+            self.transactions
+                .push(out_txn(rt, req, value, index, payload));
             if value == 0x83 {
                 if payload.len() == 1 {
                     self.address = payload[0];
@@ -286,7 +342,8 @@ impl UsbTransport for SimulatedGl843V1Transport {
         } else {
             vec![0; n]
         };
-        self.transactions.push(in_txn(rt, req, value, index, &reply));
+        self.transactions
+            .push(in_txn(rt, req, value, index, &reply));
         Ok(reply)
     }
 
@@ -311,13 +368,26 @@ impl UsbTransport for SimulatedGl843V1Transport {
             let mut values = [0i64; 3];
             for (c, v) in values.iter_mut().enumerate() {
                 let mut offset = self.afe.get(&(5 + c as u8)).copied().unwrap_or(128);
-                offset = if offset & 256 != 0 { -(offset & 255) } else { offset };
-                let gain = 6.0 / (6.0 - 5.0 * self.afe.get(&(2 + c as u8)).copied().unwrap_or(0) as f64 / 63.0);
+                offset = if offset & 256 != 0 {
+                    -(offset & 255)
+                } else {
+                    offset
+                };
+                let gain = 6.0
+                    / (6.0
+                        - 5.0 * self.afe.get(&(2 + c as u8)).copied().unwrap_or(0) as f64 / 63.0);
                 *v = (((offset + 70) as f64 * 20.0 * gain) as i64).clamp(0, 65535);
             }
             [r, g, b] = values;
         }
-        let pixel = [(r & 0xFF) as u8, (r >> 8) as u8, (g & 0xFF) as u8, (g >> 8) as u8, (b & 0xFF) as u8, (b >> 8) as u8];
+        let pixel = [
+            (r & 0xFF) as u8,
+            (r >> 8) as u8,
+            (g & 0xFF) as u8,
+            (g >> 8) as u8,
+            (b & 0xFF) as u8,
+            (b >> 8) as u8,
+        ];
         let start = self.read_phase % 6;
         self.read_phase += size;
         Ok((0..size).map(|i| pixel[(start + i) % 6]).collect())

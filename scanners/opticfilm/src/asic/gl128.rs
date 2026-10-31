@@ -94,14 +94,26 @@ pub fn feed_setup_regs(scan_regs: Option<&RegMap>, final_positioning: bool) -> R
     let mut setup = match scan_regs {
         None => fixed.clone(),
         Some(sr) => {
-            let mut s = RegMap::from_vec(sr.iter().filter(|(a, _)| !FEED_OWN_REGS.contains(a)).map(|(&a, &v)| (a, v)).collect());
+            let mut s = RegMap::from_vec(
+                sr.iter()
+                    .filter(|(a, _)| !FEED_OWN_REGS.contains(a))
+                    .map(|(&a, &v)| (a, v))
+                    .collect(),
+            );
             for a in FEED_FIXED_REGS {
                 s.insert(a, fixed.reg(a));
             }
             s
         }
     };
-    setup.insert(0xAF, if final_positioning { FINAL_FEED_REG_AF } else { REFERENCE_FEED_REG_AF });
+    setup.insert(
+        0xAF,
+        if final_positioning {
+            FINAL_FEED_REG_AF
+        } else {
+            REFERENCE_FEED_REG_AF
+        },
+    );
     setup
 }
 
@@ -127,7 +139,10 @@ const CANCEL_REG01: u8 = 0x22;
 
 /// Pack 16-bit table entries little-endian, as the AHB windows expect.
 pub fn u16_table_bytes(words: &[i64]) -> Vec<u8> {
-    words.iter().flat_map(|&w| [(w & 0xFF) as u8, ((w >> 8) & 0xFF) as u8]).collect()
+    words
+        .iter()
+        .flat_map(|&w| [(w & 0xFF) as u8, ((w >> 8) & 0xFF) as u8])
+        .collect()
 }
 
 fn encode_offsets(v: [i64; 3]) -> [i64; 3] {
@@ -234,7 +249,10 @@ impl Gl128 {
 
     /// Read the status register at `0x101`.
     pub fn read_status(&mut self) -> Result<ScannerStatus> {
-        let raw = self.protocol.read_register(r::REG_STATUS).map_err(|e| Error::Asic(format!("GL128 status read failed: {e}")))?;
+        let raw = self
+            .protocol
+            .read_register(r::REG_STATUS)
+            .map_err(|e| Error::Asic(format!("GL128 status read failed: {e}")))?;
         Ok(ScannerStatus::from_reg41(raw))
     }
 
@@ -257,7 +275,12 @@ impl Gl128 {
 
     /// Load the analog frontend defaults through the GL124 write path.
     pub fn set_frontend_init(&mut self) -> Result<()> {
-        let mut fe: Vec<(u16, u16)> = self.model.frontend_regs.iter().map(|(&a, &v)| (a, v)).collect();
+        let mut fe: Vec<(u16, u16)> = self
+            .model
+            .frontend_regs
+            .iter()
+            .map(|(&a, &v)| (a, v))
+            .collect();
         fe.sort_by_key(|e| e.0);
         for (i, v) in &fe {
             self.protocol.write_fe_register_gl124(*i as u8, *v)?;
@@ -267,8 +290,15 @@ impl Gl128 {
     }
 
     /// Write per-channel FE gains and/or offsets.
-    pub fn set_frontend_channels(&mut self, offsets: Option<[i64; 3]>, gains: Option<[i64; 3]>) -> Result<()> {
-        let fe = AfeFrontend { offsets: offsets.unwrap_or([0; 3]), gains: gains.unwrap_or([0; 3]) };
+    pub fn set_frontend_channels(
+        &mut self,
+        offsets: Option<[i64; 3]>,
+        gains: Option<[i64; 3]>,
+    ) -> Result<()> {
+        let fe = AfeFrontend {
+            offsets: offsets.unwrap_or([0; 3]),
+            gains: gains.unwrap_or([0; 3]),
+        };
         for (index, value) in fe.as_fe_writes() {
             if gains.is_none() && FE_GAIN_INDICES.contains(&index) {
                 continue;
@@ -307,7 +337,12 @@ impl Gl128 {
     }
 
     /// Poll `0x101` until shading/AFE strip data is ready.
-    fn wait_shading_data_ready(&mut self, timeout_s: f64, where_: &str, motorized: bool) -> Result<()> {
+    fn wait_shading_data_ready(
+        &mut self,
+        timeout_s: f64,
+        where_: &str,
+        motorized: bool,
+    ) -> Result<()> {
         self.read_status()?;
         let deadline = monotonic() + timeout_s;
         let mut last: i32 = -1;
@@ -318,13 +353,18 @@ impl Gl128 {
                 if !status.is_buffer_empty {
                     return Ok(());
                 }
-            } else if STATIONARY_DATA_READY.contains(&status.raw) || (!status.is_buffer_empty && status.is_at_home) {
+            } else if STATIONARY_DATA_READY.contains(&status.raw)
+                || (!status.is_buffer_empty && status.is_at_home)
+            {
                 return Ok(());
             }
             sleep(0.01);
         }
         let kind = if motorized { "motorized" } else { "stationary" };
-        Err(Error::Scan(format!("{where_}: no {kind} data ready within {timeout_s:.0}s (last status=0x{:02x})", last & 0xFF)))
+        Err(Error::Scan(format!(
+            "{where_}: no {kind} data ready within {timeout_s:.0}s (last status=0x{:02x})",
+            last & 0xFF
+        )))
     }
 
     /// Abort a leftover image SCAN so stationary geometry writes stick.
@@ -377,7 +417,10 @@ impl Gl128 {
                 last_st & 0xFF
             )));
         }
-        warn!("GL128 {where_}: scan engine not idle (0x01={last01:#04x} 0x02={last02:#04x} status=0x{:02x})", last_st & 0xFF);
+        warn!(
+            "GL128 {where_}: scan engine not idle (0x01={last01:#04x} 0x02={last02:#04x} status=0x{:02x})",
+            last_st & 0xFF
+        );
         Ok(())
     }
 
@@ -399,7 +442,10 @@ impl Gl128 {
             }
             sleep(0.01);
         }
-        warn!("GL128 {where_}: motor not idle at home within {timeout_s:.1}s (last status=0x{:02x})", last & 0xFF);
+        warn!(
+            "GL128 {where_}: motor not idle at home within {timeout_s:.1}s (last status=0x{:02x})",
+            last & 0xFF
+        );
         Ok(())
     }
 
@@ -424,20 +470,29 @@ impl Gl128 {
         let dpi_calib = self.model.optical_resolution / 6;
         let timing = timing.unwrap_or_else(|| afe_strip_timing(dpi_calib, wide, !wide));
         // AFE uses the 1200-dpi dark-strip pixel clocks (session 03).
-        let (_dummy, clk_a, clk_b) = self.model.shading_strip_clocks(self.model.asic_dpi_for(1200), false, None);
+        let (_dummy, clk_a, clk_b) =
+            self.model
+                .shading_strip_clocks(self.model.asic_dpi_for(1200), false, None);
         self.write(0x2B, timing.dummy as u8)?;
         self.write(0xA5, clk_a as u8)?;
         self.write(0xAB, clk_b as u8)?;
         self.write(0xA3, 0x00)?;
         self.write_many(&RegMap::from_pairs(&CALIB_STRIP_A6_A9))?;
-        let end = if wide { AFE_WIDE_ENDPIXEL } else { AFE_ENDPIXEL };
+        let end = if wide {
+            AFE_WIDE_ENDPIXEL
+        } else {
+            AFE_ENDPIXEL
+        };
         self.protocol.write_u24(r::REG_LINCNT, 1)?;
         self.protocol.write_u16(r::REG_DPISET, dpi_calib as u32)?;
-        self.protocol.write_u24(r::REG_STRPIXEL, AFE_STRPIXEL as u32)?;
+        self.protocol
+            .write_u24(r::REG_STRPIXEL, AFE_STRPIXEL as u32)?;
         self.protocol.write_u24(r::REG_ENDPIXEL, end as u32)?;
         self.protocol.write_u24(r::REG_FEEDL, 1)?;
-        self.protocol.write_u24(r::REG_LPERIOD, timing.lperiod as u32)?;
-        self.protocol.write_u24(r::REG_EXPOSURE, self.model.exposure_lperiod as u32)?;
+        self.protocol
+            .write_u24(r::REG_LPERIOD, timing.lperiod as u32)?;
+        self.protocol
+            .write_u24(r::REG_EXPOSURE, self.model.exposure_lperiod as u32)?;
         self.write(r::REG_DEPTH_A, r::DEPTH16_A)?;
         self.write(r::REG_DEPTH_B, r::DEPTH16_B)?;
         self.write(r::REG_0X02, 0x00)?;
@@ -446,7 +501,12 @@ impl Gl128 {
     }
 
     /// Read one stationary 16-bit AFE strip. Does not move the carriage.
-    pub fn acquire_afe_strip(&mut self, size: usize, timeout_s: f64, timing: Option<AfeStripTiming>) -> Result<Vec<u8>> {
+    pub fn acquire_afe_strip(
+        &mut self,
+        size: usize,
+        timeout_s: f64,
+        timing: Option<AfeStripTiming>,
+    ) -> Result<Vec<u8>> {
         if !self.initialized {
             self.init(false)?;
         }
@@ -458,7 +518,10 @@ impl Gl128 {
         let mut last_exc: Option<Error> = None;
         for attempt in 0..=STATIONARY_START_RETRIES {
             if attempt > 0 {
-                warn!("GL128 AFE strip START retry after: {}", last_exc.as_ref().map(|e| e.to_string()).unwrap_or_default());
+                warn!(
+                    "GL128 AFE strip START retry after: {}",
+                    last_exc.as_ref().map(|e| e.to_string()).unwrap_or_default()
+                );
                 self.reset_stationary_scan_engine("AFE strip retry")?;
             }
             self.start_stationary_strip()?;
@@ -477,7 +540,8 @@ impl Gl128 {
         if let Some(e) = last_exc {
             return Err(e);
         }
-        self.protocol.bulk_read_begin(size, r::BULK_INDEX_RAM, r::AHB_RAM_BASE)?;
+        self.protocol
+            .bulk_read_begin(size, r::BULK_INDEX_RAM, r::AHB_RAM_BASE)?;
         let mut buf = Vec::with_capacity(size);
         while buf.len() < size {
             let chunk = self.protocol.bulk_read_chunk(size - buf.len())?;
@@ -488,14 +552,21 @@ impl Gl128 {
         }
         self.update_bits(r::REG_0X01, 0, r::SCAN)?;
         if buf.len() < size {
-            return Err(Error::Scan(format!("AFE strip short read: {} of {size} bytes", buf.len())));
+            return Err(Error::Scan(format!(
+                "AFE strip short read: {} of {size} bytes",
+                buf.len()
+            )));
         }
         buf.truncate(size);
         Ok(buf)
     }
 
     /// SilverFast's coarse AFE calibration; leave the FE at the result.
-    pub fn search_afe(&mut self, method: Option<ScanMethod>, resolution: Option<i64>) -> Result<AfeFrontend> {
+    pub fn search_afe(
+        &mut self,
+        method: Option<ScanMethod>,
+        resolution: Option<i64>,
+    ) -> Result<AfeFrontend> {
         if !self.initialized {
             self.init(false)?;
         }
@@ -514,21 +585,52 @@ impl Gl128 {
         sleep(0.3);
         let zero = [0; 3];
         // Throwaway strip (#124): the first line after the CCD sat unclocked reads high.
-        self.apply_frontend(AfeFrontend { gains: zero, offsets: [AFE_OFFSET_PROBE_LOW; 3] })?;
+        self.apply_frontend(AfeFrontend {
+            gains: zero,
+            offsets: [AFE_OFFSET_PROBE_LOW; 3],
+        })?;
         self.acquire_afe_strip(AFE_STRIP_BYTES, 5.0, Some(pre_timing))?;
-        let pre = self.offsets_for_black(zero, AFE_PRE_OFFSET_BLACK, pre_timing, AFE_FALLBACK_PRE_OFFSETS, "pre-offset")?;
-        self.apply_frontend(AfeFrontend { gains: zero, offsets: encode_offsets(pre) })?;
+        let pre = self.offsets_for_black(
+            zero,
+            AFE_PRE_OFFSET_BLACK,
+            pre_timing,
+            AFE_FALLBACK_PRE_OFFSETS,
+            "pre-offset",
+        )?;
+        self.apply_frontend(AfeFrontend {
+            gains: zero,
+            offsets: encode_offsets(pre),
+        })?;
         let wide = self.acquire_afe_strip(AFE_WIDE_BYTES, 5.0, Some(timing))?;
         let wide_means = channel_means_u16(&wide, AFE_WIDE_PIXELS, false)?;
-        let gains = coarse_gains_from_wide_means(wide_means, if infrared { AFE_WHITE_TARGETS_IR } else { AFE_WHITE_TARGETS_COLOR }, AFE_GAIN_MAX);
+        let gains = coarse_gains_from_wide_means(
+            wide_means,
+            if infrared {
+                AFE_WHITE_TARGETS_IR
+            } else {
+                AFE_WHITE_TARGETS_COLOR
+            },
+            AFE_GAIN_MAX,
+        );
         let offsets = self.offsets_for_black(
             gains,
-            if infrared { AFE_BLACK_TARGET_IR } else { AFE_BLACK_TARGET_COLOR },
+            if infrared {
+                AFE_BLACK_TARGET_IR
+            } else {
+                AFE_BLACK_TARGET_COLOR
+            },
             timing,
-            if infrared { AFE_FALLBACK_OFFSETS_IR } else { AFE_FALLBACK_OFFSETS_COLOR },
+            if infrared {
+                AFE_FALLBACK_OFFSETS_IR
+            } else {
+                AFE_FALLBACK_OFFSETS_COLOR
+            },
             "black offset",
         )?;
-        let result = AfeFrontend { gains, offsets: encode_offsets(offsets) };
+        let result = AfeFrontend {
+            gains,
+            offsets: encode_offsets(offsets),
+        };
         self.apply_frontend(result)?;
         self.last_afe = Some(result);
         self.last_afe_dpi = Some(scan_dpi);
@@ -543,14 +645,30 @@ impl Gl128 {
     }
 
     /// Two-point optical-black probe at `gains`; signed offsets for `target`.
-    fn offsets_for_black(&mut self, gains: [i64; 3], target: f64, timing: AfeStripTiming, fallback: [i64; 3], stage: &str) -> Result<[i64; 3]> {
+    fn offsets_for_black(
+        &mut self,
+        gains: [i64; 3],
+        target: f64,
+        timing: AfeStripTiming,
+        fallback: [i64; 3],
+        stage: &str,
+    ) -> Result<[i64; 3]> {
         let mut black = Vec::with_capacity(2);
         for code in [AFE_OFFSET_PROBE_LOW, AFE_OFFSET_PROBE_HIGH] {
-            self.apply_frontend(AfeFrontend { gains, offsets: [code; 3] })?;
+            self.apply_frontend(AfeFrontend {
+                gains,
+                offsets: [code; 3],
+            })?;
             let strip = self.acquire_afe_strip(AFE_STRIP_BYTES, 5.0, Some(timing))?;
             black.push(optical_black_means(&strip)?);
         }
-        let solved = offsets_for_black_level(black[0], black[1], target, AFE_OFFSET_PROBE_LOW, AFE_OFFSET_PROBE_HIGH);
+        let solved = offsets_for_black_level(
+            black[0],
+            black[1],
+            target,
+            AFE_OFFSET_PROBE_LOW,
+            AFE_OFFSET_PROBE_HIGH,
+        );
         let offsets = [0, 1, 2].map(|c| solved[c].unwrap_or(fallback[c]));
         if solved.iter().any(Option::is_none) {
             warn!(
@@ -569,12 +687,22 @@ impl Gl128 {
             return Err(Error::Value("shading blob is empty".into()));
         }
         self.protocol.write_ahb(AHB_SHADING, blob)?;
-        info!("GL128 uploaded shading table ({} bytes) to 0x{AHB_SHADING:08x}", blob.len());
+        info!(
+            "GL128 uploaded shading table ({} bytes) to 0x{AHB_SHADING:08x}",
+            blob.len()
+        );
         Ok(())
     }
 
     /// Resolve the `(STRPIXEL, ENDPIXEL, DPISET)` for a shading pass.
-    pub fn shading_window(&self, pixels: i64, resolution: i64, strpixel: Option<i64>, endpixel: Option<i64>, dpiset: Option<i64>) -> (i64, i64, i64) {
+    pub fn shading_window(
+        &self,
+        pixels: i64,
+        resolution: i64,
+        strpixel: Option<i64>,
+        endpixel: Option<i64>,
+        dpiset: Option<i64>,
+    ) -> (i64, i64, i64) {
         let dpi = resolution;
         let dpiset = dpiset.unwrap_or_else(|| {
             let by_dpi = &self.model.register_dpiset_by_dpi;
@@ -587,9 +715,21 @@ impl Gl128 {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn setup_shading_strip_regs(&mut self, pixels: i64, lines: i64, resolution: i64, strpixel: Option<i64>, endpixel: Option<i64>, dpiset: Option<i64>, dvdset: bool) -> Result<()> {
-        let (start, end, dpi_calib) = self.shading_window(pixels, resolution, strpixel, endpixel, dpiset);
-        let (dummy, clk_a, clk_b) = self.model.shading_strip_clocks(resolution, dvdset, Some(end - start));
+    fn setup_shading_strip_regs(
+        &mut self,
+        pixels: i64,
+        lines: i64,
+        resolution: i64,
+        strpixel: Option<i64>,
+        endpixel: Option<i64>,
+        dpiset: Option<i64>,
+        dvdset: bool,
+    ) -> Result<()> {
+        let (start, end, dpi_calib) =
+            self.shading_window(pixels, resolution, strpixel, endpixel, dpiset);
+        let (dummy, clk_a, clk_b) =
+            self.model
+                .shading_strip_clocks(resolution, dvdset, Some(end - start));
         if !dvdset {
             self.apply_stationary_scan_regs(true)?;
         }
@@ -597,7 +737,10 @@ impl Gl128 {
         self.write(0xA5, clk_a as u8)?;
         self.write(0xAB, clk_b as u8)?;
         let reg1d = self.cached(0x1D, 0x80) & !0x1F;
-        self.write(0x1D, reg1d | self.model.shading_linesel_for(resolution) as u8)?;
+        self.write(
+            0x1D,
+            reg1d | self.model.shading_linesel_for(resolution) as u8,
+        )?;
         self.write_many(&RegMap::from_pairs(&CALIB_STRIP_A6_A9))?;
         self.protocol.write_u24(r::REG_LINCNT, lines as u32)?;
         self.protocol.write_u16(r::REG_DPISET, dpi_calib as u32)?;
@@ -605,8 +748,10 @@ impl Gl128 {
         self.protocol.write_u24(r::REG_ENDPIXEL, end as u32)?;
         self.protocol.write_u24(r::REG_FEEDL, 1)?;
         self.strip_lperiod = self.model.line_period_for(resolution, Some(end - start));
-        self.protocol.write_u24(r::REG_LPERIOD, self.strip_lperiod as u32)?;
-        self.protocol.write_u24(r::REG_EXPOSURE, self.model.exposure_lperiod as u32)?;
+        self.protocol
+            .write_u24(r::REG_LPERIOD, self.strip_lperiod as u32)?;
+        self.protocol
+            .write_u24(r::REG_EXPOSURE, self.model.exposure_lperiod as u32)?;
         self.write(r::REG_DEPTH_A, r::DEPTH16_A)?;
         self.write(r::REG_DEPTH_B, r::DEPTH16_B)?;
         let reg01 = if dvdset {
@@ -622,7 +767,17 @@ impl Gl128 {
         self.write(r::REG_0X01, reg01)?;
         if dvdset {
             let mut rb = Vec::new();
-            for a in [r::REG_0X01, r::REG_0X02, 0x3B, 0xA3, 0x04, 0x05, 0x2B, 0xA5, 0xAB] {
+            for a in [
+                r::REG_0X01,
+                r::REG_0X02,
+                0x3B,
+                0xA3,
+                0x04,
+                0x05,
+                0x2B,
+                0xA5,
+                0xAB,
+            ] {
                 rb.push(self.protocol.read_register(a)?);
             }
             info!(
@@ -665,7 +820,15 @@ impl Gl128 {
         if !dvdset {
             self.reset_stationary_scan_engine("Shading strip")?;
         }
-        self.setup_shading_strip_regs(n, lines as i64, resolution, strpixel, endpixel, dpiset, dvdset)?;
+        self.setup_shading_strip_regs(
+            n,
+            lines as i64,
+            resolution,
+            strpixel,
+            endpixel,
+            dpiset,
+            dvdset,
+        )?;
         // Re-assert motor policy immediately before START.
         if dvdset {
             self.write(r::REG_0X02, r::MTRPWR | r::AGOHOME)?;
@@ -702,7 +865,8 @@ impl Gl128 {
             }
             return Err(e);
         }
-        self.protocol.bulk_read_begin(size, r::BULK_INDEX_RAM, r::AHB_RAM_BASE)?;
+        self.protocol
+            .bulk_read_begin(size, r::BULK_INDEX_RAM, r::AHB_RAM_BASE)?;
         let mut buf = Vec::with_capacity(size);
         while buf.len() < size {
             let chunk = self.protocol.bulk_read_chunk(65536.min(size - buf.len()))?;
@@ -727,7 +891,10 @@ impl Gl128 {
         }
         self.write(r::REG_0X02, 0x00)?;
         if buf.len() < size {
-            return Err(Error::Scan(format!("Shading strip short read: {} of {size} bytes", buf.len())));
+            return Err(Error::Scan(format!(
+                "Shading strip short read: {} of {size} bytes",
+                buf.len()
+            )));
         }
         buf.truncate(size);
         Ok(buf)
@@ -737,7 +904,14 @@ impl Gl128 {
     ///
     /// Returns the final measured shading blob and sets `asic_shading_ready`
     /// (never for infrared, which stores a host white profile instead).
-    pub fn run_asic_shading(&mut self, resolution: i64, method: Option<ScanMethod>, strpixel: Option<i64>, endpixel: Option<i64>, dpiset: Option<i64>) -> Result<Vec<u8>> {
+    pub fn run_asic_shading(
+        &mut self,
+        resolution: i64,
+        method: Option<ScanMethod>,
+        strpixel: Option<i64>,
+        endpixel: Option<i64>,
+        dpiset: Option<i64>,
+    ) -> Result<Vec<u8>> {
         if !self.initialized {
             self.init(false)?;
         }
@@ -750,7 +924,13 @@ impl Gl128 {
         }
         let infrared = self.scan_method == ScanMethod::Infrared;
         self.require_carriage_at_home("ASIC shading start")?;
-        let (start, end, used_dpiset) = self.shading_window(shading_width_for_resolution(resolution), resolution, strpixel, endpixel, dpiset);
+        let (start, end, used_dpiset) = self.shading_window(
+            shading_width_for_resolution(resolution),
+            resolution,
+            strpixel,
+            endpixel,
+            dpiset,
+        );
         let n = shading_acquire_width(start, end, used_dpiset, self.model.optical_resolution)?;
         let nu = n as usize;
         let declared = declared_shading_size(nu);
@@ -762,7 +942,11 @@ impl Gl128 {
         if let Some(afe) = self.last_afe {
             self.apply_frontend(afe)?;
         }
-        let settle_s = if infrared { IR_SHADING_DARK_SETTLE_S } else { COLOR_SHADING_DARK_SETTLE_S };
+        let settle_s = if infrared {
+            IR_SHADING_DARK_SETTLE_S
+        } else {
+            COLOR_SHADING_DARK_SETTLE_S
+        };
         self.lamp_off()?;
         self.reassert_lamp_off()?;
         sleep(settle_s);
@@ -771,15 +955,32 @@ impl Gl128 {
             self.await_colour_optical_dark()?;
         }
         let w = (Some(start), Some(end), Some(used_dpiset));
-        let dark_raw = self.acquire_shading_strip(resolution, Some(n), SHADING_LINES, 30.0, w.0, w.1, w.2, false)?;
+        let dark_raw = self.acquire_shading_strip(
+            resolution,
+            Some(n),
+            SHADING_LINES,
+            30.0,
+            w.0,
+            w.1,
+            w.2,
+            false,
+        )?;
         // Colour film USB is chunky (session 11); do not trust lag on a flat dark field.
-        let strip_planar = infrared && choose_usb_planar(&dark_raw[..(nu * 6).min(dark_raw.len())], nu);
+        let strip_planar =
+            infrared && choose_usb_planar(&dark_raw[..(nu * 6).min(dark_raw.len())], nu);
         let dark_measured = average_rgb16_columns(&dark_raw, nu, SHADING_LINES, strip_planar)?;
         let dark: Vec<Rgb> = if infrared {
-            info!("GL128 IR shading: zero dark terms (session 05); measured dark0={:?} (diagnostic only)", dark_measured[0]);
+            info!(
+                "GL128 IR shading: zero dark terms (session 05); measured dark0={:?} (diagnostic only)",
+                dark_measured[0]
+            );
             vec![[0; 3]; dark_measured.len()]
         } else {
-            info!("GL128 colour dark strip mean={:.0} dark0={:?}", shading_columns_mean(&dark_measured[..nu.min(dark_measured.len())]), dark_measured[0]);
+            info!(
+                "GL128 colour dark strip mean={:.0} dark0={:?}",
+                shading_columns_mean(&dark_measured[..nu.min(dark_measured.len())]),
+                dark_measured[0]
+            );
             dark_measured.clone()
         };
         let unity = make_unity_white_table(&dark, Some(declared), true)?;
@@ -810,7 +1011,16 @@ impl Gl128 {
             }
         }
         sleep(0.5);
-        let white_raw = self.acquire_shading_strip(resolution, Some(n), SHADING_LINES, 30.0, w.0, w.1, w.2, true)?;
+        let white_raw = self.acquire_shading_strip(
+            resolution,
+            Some(n),
+            SHADING_LINES,
+            30.0,
+            w.0,
+            w.1,
+            w.2,
+            true,
+        )?;
         let mut white = average_rgb16_columns(&white_raw, nu, SHADING_LINES, strip_planar)?;
         let mut raw_white: Option<Vec<Rgb>> = None;
         self.last_host_calib_dark = None;
@@ -821,18 +1031,28 @@ impl Gl128 {
             let spread = raw0.iter().max().unwrap() - raw0.iter().min().unwrap();
             raw_white = Some(white.clone());
             white = equalize_ir_white_columns(&white);
-            info!("GL128 IR shading: equalized white columns (session 05 shape); raw white0={raw0:?} spread={spread} → equalized white0={:?}", white[0]);
+            info!(
+                "GL128 IR shading: equalized white columns (session 05 shape); raw white0={raw0:?} spread={spread} → equalized white0={:?}",
+                white[0]
+            );
         }
         let gains = shading_gains_from_white(&white, SHADING_GAIN_TARGET);
-        let measured = build_measured_shading_table(&dark, &white, true, Some(declared), SHADING_GAIN_TARGET)?;
+        let measured =
+            build_measured_shading_table(&dark, &white, true, Some(declared), SHADING_GAIN_TARGET)?;
         self.upload_shading_table(&measured)?;
         self.write(r::REG_0X02, 0x00)?;
         self.require_carriage_at_home("ASIC shading end")?;
         let k = nu.min(white.len());
         if infrared {
-            let (ok, reason) = validate_ir_shading_table(&dark[..nu.min(dark.len())], &white[..k], Some(n), raw_white.as_deref().map(|rw| &rw[..nu.min(rw.len())]));
+            let (ok, reason) = validate_ir_shading_table(
+                &dark[..nu.min(dark.len())],
+                &white[..k],
+                Some(n),
+                raw_white.as_deref().map(|rw| &rw[..nu.min(rw.len())]),
+            );
             let white_prefix = &white[..k];
-            let white_mean = white_prefix.iter().flatten().sum::<i64>() as f64 / (white_prefix.len() * 3).max(1) as f64;
+            let white_mean = white_prefix.iter().flatten().sum::<i64>() as f64
+                / (white_prefix.len() * 3).max(1) as f64;
             self.asic_shading_ready = false;
             if ok {
                 self.last_ir_host_white = Some(white_prefix.iter().map(|row| row[0]).collect());
@@ -852,12 +1072,17 @@ impl Gl128 {
                 );
             }
         } else {
-            let (strip_ok, mut reason) = validate_color_shading_strip(&dark[..nu.min(dark.len())], &white[..k], Some(n));
+            let (strip_ok, mut reason) =
+                validate_color_shading_strip(&dark[..nu.min(dark.len())], &white[..k], Some(n));
             let mut ok = strip_ok;
             if ok {
                 (ok, reason) = validate_color_shading_gains(&gains[..nu.min(gains.len())]);
             }
-            let mut flat: Vec<i64> = gains[..nu.min(gains.len())].iter().flatten().copied().collect();
+            let mut flat: Vec<i64> = gains[..nu.min(gains.len())]
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
             flat.sort_unstable();
             let median_gain = flat[nu * 3 / 2];
             if ok {
@@ -908,22 +1133,43 @@ impl Gl128 {
     }
 
     /// Upload motor slope and/or scan motor tables to scanner RAM.
-    pub fn upload_tables(&mut self, resolution: i64, shading: bool, slope: bool, channel_exposure: Option<i64>) -> Result<()> {
+    pub fn upload_tables(
+        &mut self,
+        resolution: i64,
+        shading: bool,
+        slope: bool,
+        channel_exposure: Option<i64>,
+    ) -> Result<()> {
         let use_slow = shading || self.image_slope_slow;
         if slope {
-            let table = if use_slow { self.model.slope_table_slow() } else { self.model.slope_table_fast() };
+            let table = if use_slow {
+                self.model.slope_table_slow()
+            } else {
+                self.model.slope_table_fast()
+            };
             let slope_bytes = u16_table_bytes(table);
             self.protocol.write_ahb(r::AHB_SLOPE_SCAN, &slope_bytes)?;
             self.protocol.write_ahb(r::AHB_SLOPE_FAST, &slope_bytes)?;
         }
-        let ce = channel_exposure.unwrap_or_else(|| self.model.channel_exposure_for(resolution, None));
+        let ce =
+            channel_exposure.unwrap_or_else(|| self.model.channel_exposure_for(resolution, None));
         let exposure = u16_table_bytes(&self.model.scan_motor_table(ce)?);
-        for addr in [r::AHB_SCAN_MOTOR_0, r::AHB_SCAN_MOTOR_1, r::AHB_SCAN_MOTOR_2] {
+        for addr in [
+            r::AHB_SCAN_MOTOR_0,
+            r::AHB_SCAN_MOTOR_1,
+            r::AHB_SCAN_MOTOR_2,
+        ] {
             self.protocol.write_ahb(addr, &exposure)?;
         }
         debug!(
             "GL128 uploaded {} for {resolution} dpi",
-            if !slope { "exposure only" } else if use_slow { "slow slope + exposure" } else { "fast slope + exposure" }
+            if !slope {
+                "exposure only"
+            } else if use_slow {
+                "slow slope + exposure"
+            } else {
+                "fast slope + exposure"
+            }
         );
         Ok(())
     }
@@ -968,8 +1214,18 @@ impl Gl128 {
         let (boot, scan) = (g.asic_clock_boot_0x8c as u8, g.asic_clock_scan_0x8c as u8);
         self.write_clock(boot)?;
         self.write_clock(scan)?;
-        let v0b = self.model.sensor_custom_regs.get(&REG_CLK_DRAM).copied().expect("sensor 0x0B") as u8;
-        let v13 = self.model.init_regs.get(&REG_0X13).copied().expect("init 0x13") as u8;
+        let v0b = self
+            .model
+            .sensor_custom_regs
+            .get(&REG_CLK_DRAM)
+            .copied()
+            .expect("sensor 0x0B") as u8;
+        let v13 = self
+            .model
+            .init_regs
+            .get(&REG_0X13)
+            .copied()
+            .expect("init 0x13") as u8;
         self.write(REG_CLK_DRAM, v0b)?;
         self.write(REG_0X13, v13)?;
         debug!("GL128 scan clock 0x8C: {boot:#04x} -> {scan:#04x}");
@@ -1000,7 +1256,9 @@ impl Gl128 {
     pub fn button_state(&mut self, timeout_ms: u32) -> Result<HashSet<Button>> {
         let mut buttons = HashSet::new();
         let data = self.protocol.read_intr(Some(timeout_ms))?;
-        let Some(&b) = data.first() else { return Ok(buttons) };
+        let Some(&b) = data.first() else {
+            return Ok(buttons);
+        };
         for (id, button) in BUTTON_IDS {
             if b & id != 0 {
                 buttons.insert(button);
@@ -1087,7 +1345,10 @@ impl Gl128 {
     fn await_colour_optical_dark(&mut self) -> Result<()> {
         let max = COLOR_SHADING_DARK_MEAN_MAX;
         let mean = self.probe_dark_mean()?;
-        info!("GL128 colour pre-dark AFE probe mean={mean:.0} (need <= {})", max as i64);
+        info!(
+            "GL128 colour pre-dark AFE probe mean={mean:.0} (need <= {})",
+            max as i64
+        );
         if mean <= max {
             return Ok(());
         }
@@ -1095,7 +1356,10 @@ impl Gl128 {
         sleep(COLOR_SHADING_DARK_SETTLE_S);
         self.log_lamp_state("shading pre-dark retry")?;
         let mean = self.probe_dark_mean()?;
-        info!("GL128 colour pre-dark AFE probe retry mean={mean:.0} (need <= {})", max as i64);
+        info!(
+            "GL128 colour pre-dark AFE probe retry mean={mean:.0} (need <= {})",
+            max as i64
+        );
         if mean <= max {
             return Ok(());
         }
@@ -1109,7 +1373,11 @@ impl Gl128 {
     fn log_lamp_state(&mut self, where_: &str) -> Result<()> {
         let reg03 = self.protocol.read_register(r::REG_0X03)?;
         let status = self.read_status()?;
-        info!("GL128 {where_} lamp state 0x03={reg03:#04x} LAMPPWR={} LAMPSTS={}", reg03 & r::LAMPPWR != 0, status.is_lamp_on);
+        info!(
+            "GL128 {where_} lamp state 0x03={reg03:#04x} LAMPPWR={} LAMPSTS={}",
+            reg03 & r::LAMPPWR != 0,
+            status.is_lamp_on
+        );
         Ok(())
     }
 
@@ -1132,7 +1400,11 @@ impl Gl128 {
 
     /// Upload the motor ramp to both AHB slope windows.
     fn upload_fast_slopes(&mut self, use_slow: bool) -> Result<()> {
-        let table = if use_slow { self.model.slope_table_slow() } else { self.model.slope_table_fast() };
+        let table = if use_slow {
+            self.model.slope_table_slow()
+        } else {
+            self.model.slope_table_fast()
+        };
         let slope = u16_table_bytes(table);
         self.protocol.write_ahb(r::AHB_SLOPE_SCAN, &slope)?;
         self.protocol.write_ahb(r::AHB_SLOPE_FAST, &slope)
@@ -1149,7 +1421,9 @@ impl Gl128 {
             }
             sleep(HOME_POLL_S);
         }
-        Err(Error::MotorTimeout(format!("Carriage did not reach home within {timeout_s:.0}s (AGOHOME park)")))
+        Err(Error::MotorTimeout(format!(
+            "Carriage did not reach home within {timeout_s:.0}s (AGOHOME park)"
+        )))
     }
 
     /// Session-10 style warm re-init while already at home (`0x02=0x78`).
@@ -1230,7 +1504,9 @@ impl Gl128 {
     }
 
     fn read_feed_probe(&mut self) -> i32 {
-        self.protocol.read_request_register(FEED_PROBE_INDEX).map_or(-1, |v| v as i32)
+        self.protocol
+            .read_request_register(FEED_PROBE_INDEX)
+            .map_or(-1, |v| v as i32)
     }
 
     /// True when probe/status currently claim a feed has finished.
@@ -1243,7 +1519,14 @@ impl Gl128 {
     }
 
     /// Wait for a feed's step count to run out (probe `0x21=0x04` or `FEEDFSH`).
-    fn wait_feed_probe_done(&mut self, steps: i64, timeout_s: f64, stale_done: bool, require_motion: bool, ignore_probe: bool) -> Result<()> {
+    fn wait_feed_probe_done(
+        &mut self,
+        steps: i64,
+        timeout_s: f64,
+        stale_done: bool,
+        require_motion: bool,
+        ignore_probe: bool,
+    ) -> Result<()> {
         let deadline = monotonic() + timeout_s;
         let mut motion_seen = false;
         let mut next_status = 0.0;
@@ -1262,7 +1545,11 @@ impl Gl128 {
                 sleep(FEED_PROBE_POLL_S);
                 continue;
             }
-            let probe = if ignore_probe { -1 } else { self.read_feed_probe() };
+            let probe = if ignore_probe {
+                -1
+            } else {
+                self.read_feed_probe()
+            };
             let st = self.read_status_reliable()?;
             if !require_motion {
                 if probe == FEED_PROBE_DONE || (st.is_feeding_finished && !st.is_motor_enabled) {
@@ -1288,7 +1575,9 @@ impl Gl128 {
                  visible on the vendor probe (wIndex=0x21 -> 0x04)."
             )));
         }
-        Err(Error::MotorTimeout(format!("Feed of {steps} steps did not finish within {timeout_s:.0}s")))
+        Err(Error::MotorTimeout(format!(
+            "Feed of {steps} steps did not finish within {timeout_s:.0}s"
+        )))
     }
 
     /// Move the carriage `steps` using the capture-faithful feed recipe.
@@ -1298,7 +1587,12 @@ impl Gl128 {
     }
 
     /// From home: feed to reference, then to the scan-start line.
-    pub fn position_for_full_frame_scan(&mut self, scan_steps: Option<i64>, timeout_s: f64, scan_regs: Option<&RegMap>) -> Result<()> {
+    pub fn position_for_full_frame_scan(
+        &mut self,
+        scan_steps: Option<i64>,
+        timeout_s: f64,
+        scan_regs: Option<&RegMap>,
+    ) -> Result<()> {
         self.require_motor_enabled()?;
         if !self.park_ok {
             return Err(Error::Asic(
@@ -1319,8 +1613,19 @@ impl Gl128 {
         let g = self.model.g();
         let second = scan_steps.unwrap_or(g.feed_to_scan_steps);
         let first = g.feed_to_reference_steps;
-        info!("GL128 positioning from home (status 0x{:02x}): {first} then {second} steps", start.raw);
-        self.feed_capture(first, (timeout_s / 2.0).min(REFERENCE_FEED_TIMEOUT_S), true, true, false, false, scan_regs)?;
+        info!(
+            "GL128 positioning from home (status 0x{:02x}): {first} then {second} steps",
+            start.raw
+        );
+        self.feed_capture(
+            first,
+            (timeout_s / 2.0).min(REFERENCE_FEED_TIMEOUT_S),
+            true,
+            true,
+            false,
+            false,
+            scan_regs,
+        )?;
         self.feed_capture(second, timeout_s / 2.0, true, false, true, true, scan_regs)?;
         let end = self.read_status_reliable()?;
         info!("GL128 positioned for scan (status 0x{:02x})", end.raw);
@@ -1363,7 +1668,8 @@ impl Gl128 {
                 Ok(()) => {
                     self.park_ok = true;
                     // Drop AGOHOME from the cache so a second stop does not re-strobe.
-                    self.reg_cache.insert(r::REG_0X02, (reg02 & !r::AGOHOME) as u16);
+                    self.reg_cache
+                        .insert(r::REG_0X02, (reg02 & !r::AGOHOME) as u16);
                     info!("GL128 parked at home after the scan");
                 }
                 Err(Error::MotorTimeout(m)) => {

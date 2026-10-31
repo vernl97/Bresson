@@ -12,10 +12,16 @@ use super::exposure_merge::merge_exposures_result;
 use super::geometry::{Area, MM_PER_INCH, ScanGeometry, compute_geometry};
 use super::me_debug::MeScanDebug;
 use super::me_exposure::{LongExposureParams, MeExposureDecision, select_long_exposure};
-use super::pipeline::{HOST_CALIB_BORDER_INSET, HOST_CALIB_HIGHLIGHT_CEILING, HOST_CALIB_HIGHLIGHT_PERCENTILE, HOST_CALIB_PEAK_PERCENTILE, HOST_CALIB_PEAK_TARGET, ImagePipeline, inset_slice};
+use super::pipeline::{
+    HOST_CALIB_BORDER_INSET, HOST_CALIB_HIGHLIGHT_CEILING, HOST_CALIB_HIGHLIGHT_PERCENTILE,
+    HOST_CALIB_PEAK_PERCENTILE, HOST_CALIB_PEAK_TARGET, ImagePipeline, inset_slice,
+};
 use super::request::{NoProgress, Progress, ScanControl, ScanMode, ScanRequest, SubProgress};
 use crate::asic::gl845::{Gl84xVariant, Gl845};
-use crate::asic::motor::{calculate_zmod, create_fast_slope_table, create_scan_slope_table, slope_table_ahb, slope_table_to_bytes};
+use crate::asic::motor::{
+    calculate_zmod, create_fast_slope_table, create_scan_slope_table, slope_table_ahb,
+    slope_table_to_bytes,
+};
 use crate::asic::registers::gl845 as r;
 use crate::clock::{monotonic, sleep};
 use crate::device::model::{FilmModel, RegMap, ScanMethod};
@@ -45,7 +51,10 @@ pub struct HostCalib {
 
 impl HostCalib {
     pub fn from_entry(e: &CalibEntry) -> Self {
-        Self { dark: e.dark.mapv(|v| v as f32), white: e.white.mapv(|v| v as f32) }
+        Self {
+            dark: e.dark.mapv(|v| v as f32),
+            white: e.white.mapv(|v| v as f32),
+        }
     }
 }
 
@@ -101,20 +110,38 @@ impl ScanSession {
         self.model.asic
     }
 
-    pub fn run(&mut self, asic: &mut Gl845, mut calibrator: Option<&mut Calibrator>, req: &ScanRequest, ctl: &mut ScanControl) -> Result<ScanImage> {
+    pub fn run(
+        &mut self,
+        asic: &mut Gl845,
+        mut calibrator: Option<&mut Calibrator>,
+        req: &ScanRequest,
+        ctl: &mut ScanControl,
+    ) -> Result<ScanImage> {
         let model = self.model.clone();
         if req.infrared && !model.supports_infrared {
-            return Err(Error::Value(format!("{} does not support infrared", model.model)));
+            return Err(Error::Value(format!(
+                "{} does not support infrared",
+                model.model
+            )));
         }
         let multi_pass_ok = self.asic_name() == "GL845";
         if (req.multi_exposure || req.infrared) && !multi_pass_ok {
-            return Err(Error::NotImplemented(format!("Multi-exposure / combined IR scans are not implemented for {}", self.asic_name())));
+            return Err(Error::NotImplemented(format!(
+                "Multi-exposure / combined IR scans are not implemented for {}",
+                self.asic_name()
+            )));
         }
         if req.multi_exposure && !model.supports_multi_exposure.unwrap_or(false) {
-            return Err(Error::NotImplemented(format!("{} has no validated multi-exposure envelope", model.model)));
+            return Err(Error::NotImplemented(format!(
+                "{} has no validated multi-exposure envelope",
+                model.model
+            )));
         }
         if (req.infrared || req.multi_exposure) && req.mode != ScanMode::Color {
-            return Err(Error::Value(format!("Combined infrared / multi-exposure scans require mode='color', got mode={:?}", req.mode.as_str())));
+            return Err(Error::Value(format!(
+                "Combined infrared / multi-exposure scans require mode='color', got mode={:?}",
+                req.mode.as_str()
+            )));
         }
         if !multi_pass_ok && (req.me_short_exposure.is_some() || req.me_long_exposure.is_some()) {
             return Err(Error::NotImplemented(format!(
@@ -135,10 +162,15 @@ impl ScanSession {
             )));
         }
         if req.mode == ScanMode::Gray {
-            return Err(Error::Value("Grayscale is experimental / not implemented yet".into()));
+            return Err(Error::Value(
+                "Grayscale is experimental / not implemented yet".into(),
+            ));
         }
         if req.mode == ScanMode::Infrared && !model.supports_infrared {
-            return Err(Error::Value(format!("{} does not support infrared", model.model)));
+            return Err(Error::Value(format!(
+                "{} does not support infrared",
+                model.model
+            )));
         }
         if !asic.initialized {
             asic.init(false)?;
@@ -175,7 +207,17 @@ impl ScanSession {
             }
         }
         if !req.infrared && !req.multi_exposure {
-            let r = self.acquire_pass(asic, calibrator.as_deref_mut(), &geometry, method, req.apply_calib, ctl, true, None, auto_exposure);
+            let r = self.acquire_pass(
+                asic,
+                calibrator.as_deref_mut(),
+                &geometry,
+                method,
+                req.apply_calib,
+                ctl,
+                true,
+                None,
+                auto_exposure,
+            );
             let rgb = match r {
                 Ok(v) => v,
                 Err(e) => {
@@ -186,7 +228,12 @@ impl ScanSession {
                 }
             };
             let ir = (req.mode == ScanMode::Infrared).then(|| green_plane(&rgb));
-            return Ok(ScanImage::new(rgb, geometry.resolution, device_model(&model), ir));
+            return Ok(ScanImage::new(
+                rgb,
+                geometry.resolution,
+                device_model(&model),
+                ir,
+            ));
         }
         self.run_multi_pass(asic, calibrator, &geometry, req, ctl, auto_exposure)
     }
@@ -203,12 +250,26 @@ impl ScanSession {
     }
 
     /// GL845 sequential passes: colour short → (IR) → (colour long), parking between.
-    fn run_multi_pass(&mut self, asic: &mut Gl845, mut calibrator: Option<&mut Calibrator>, geometry: &ScanGeometry, req: &ScanRequest, ctl: &mut ScanControl, auto_exposure: bool) -> Result<ScanImage> {
+    fn run_multi_pass(
+        &mut self,
+        asic: &mut Gl845,
+        mut calibrator: Option<&mut Calibrator>,
+        geometry: &ScanGeometry,
+        req: &ScanRequest,
+        ctl: &mut ScanControl,
+        auto_exposure: bool,
+    ) -> Result<ScanImage> {
         let model = self.model.clone();
         self.last_align_shift_ir = None;
         self.last_me_debug = None;
-        let exp_short = req.me_short_exposure.filter(|&v| v != 0).unwrap_or(geometry.exposure_lperiod);
-        let short_geo = ScanGeometry { exposure_lperiod: exp_short, ..geometry.clone() };
+        let exp_short = req
+            .me_short_exposure
+            .filter(|&v| v != 0)
+            .unwrap_or(geometry.exposure_lperiod);
+        let short_geo = ScanGeometry {
+            exposure_lperiod: exp_short,
+            ..geometry.clone()
+        };
         let n_pass = 1 + req.infrared as i64 + req.multi_exposure as i64;
         let mut pass_idx = 0i64;
         let mut rgb_long = None;
@@ -216,44 +277,82 @@ impl ScanSession {
         let mut decision: Option<MeExposureDecision> = None;
         let mut ir_plane = None;
 
-        let mut body = |this: &mut Self, asic: &mut Gl845, ctl: &mut ScanControl| -> Result<Array3<u16>> {
-            let mut pass = |this: &mut Self, asic: &mut Gl845, ctl: &mut ScanControl, geo: &ScanGeometry, method: ScanMethod| -> Result<Array3<u16>> {
-                let idx = pass_idx;
-                pass_idx += 1;
-                if idx > 0 {
-                    ctl.check("Scan cancelled between passes")?;
-                    asic.park(crate::asic::gl845::DEFAULT_HOME_TIMEOUT_S)?;
-                    ctl.check("Scan cancelled between passes")?;
+        let mut body =
+            |this: &mut Self, asic: &mut Gl845, ctl: &mut ScanControl| -> Result<Array3<u16>> {
+                let mut pass = |this: &mut Self,
+                                asic: &mut Gl845,
+                                ctl: &mut ScanControl,
+                                geo: &ScanGeometry,
+                                method: ScanMethod|
+                 -> Result<Array3<u16>> {
+                    let idx = pass_idx;
+                    pass_idx += 1;
+                    if idx > 0 {
+                        ctl.check("Scan cancelled between passes")?;
+                        asic.park(crate::asic::gl845::DEFAULT_HOME_TIMEOUT_S)?;
+                        ctl.check("Scan cancelled between passes")?;
+                    }
+                    let mut sub = SubProgress {
+                        ctl,
+                        idx: idx as f64,
+                        n: n_pass as f64,
+                    };
+                    this.acquire_pass(
+                        asic,
+                        calibrator.as_deref_mut(),
+                        geo,
+                        method,
+                        req.apply_calib,
+                        &mut sub,
+                        // ME colour planes stay linear for the merge; IR keeps its makeup.
+                        !(req.multi_exposure && method == ScanMethod::Transparency),
+                        // Colour calib is measured at the model LPERIOD, never the long one.
+                        Some(if method == ScanMethod::Transparency {
+                            geometry
+                        } else {
+                            geo
+                        }),
+                        auto_exposure && method == ScanMethod::Transparency,
+                    )
+                };
+                let rgb_short = pass(this, asic, ctl, &short_geo, ScanMethod::Transparency)?;
+                if req.infrared {
+                    let ir_lp =
+                        exposure_lperiod_for(&model, geometry.resolution, ScanMethod::Infrared);
+                    let ir_rgb = pass(
+                        this,
+                        asic,
+                        ctl,
+                        &ScanGeometry {
+                            exposure_lperiod: ir_lp,
+                            ..geometry.clone()
+                        },
+                        ScanMethod::Infrared,
+                    )?;
+                    ir_plane = Some(green_plane(&ir_rgb));
                 }
-                let mut sub = SubProgress { ctl, idx: idx as f64, n: n_pass as f64 };
-                this.acquire_pass(
-                    asic,
-                    calibrator.as_deref_mut(),
-                    geo,
-                    method,
-                    req.apply_calib,
-                    &mut sub,
-                    // ME colour planes stay linear for the merge; IR keeps its makeup.
-                    !(req.multi_exposure && method == ScanMethod::Transparency),
-                    // Colour calib is measured at the model LPERIOD, never the long one.
-                    Some(if method == ScanMethod::Transparency { geometry } else { geo }),
-                    auto_exposure && method == ScanMethod::Transparency,
-                )
+                if req.multi_exposure {
+                    let (el, d) = this.select_me_long(
+                        &rgb_short,
+                        exp_short,
+                        geometry.resolution,
+                        req.me_long_exposure,
+                    );
+                    exp_long = Some(el);
+                    decision = d;
+                    rgb_long = Some(pass(
+                        this,
+                        asic,
+                        ctl,
+                        &ScanGeometry {
+                            exposure_lperiod: el,
+                            ..geometry.clone()
+                        },
+                        ScanMethod::Transparency,
+                    )?);
+                }
+                Ok(rgb_short)
             };
-            let rgb_short = pass(this, asic, ctl, &short_geo, ScanMethod::Transparency)?;
-            if req.infrared {
-                let ir_lp = exposure_lperiod_for(&model, geometry.resolution, ScanMethod::Infrared);
-                let ir_rgb = pass(this, asic, ctl, &ScanGeometry { exposure_lperiod: ir_lp, ..geometry.clone() }, ScanMethod::Infrared)?;
-                ir_plane = Some(green_plane(&ir_rgb));
-            }
-            if req.multi_exposure {
-                let (el, d) = this.select_me_long(&rgb_short, exp_short, geometry.resolution, req.me_long_exposure);
-                exp_long = Some(el);
-                decision = d;
-                rgb_long = Some(pass(this, asic, ctl, &ScanGeometry { exposure_lperiod: el, ..geometry.clone() }, ScanMethod::Transparency)?);
-            }
-            Ok(rgb_short)
-        };
         let rgb_short = match body(self, asic, ctl) {
             Ok(v) => v,
             Err(e) => {
@@ -282,7 +381,15 @@ impl ScanSession {
                 align_shift_long = Some(s);
             }
             // No model pins a fixed noise model: the merge fits it from the pair.
-            let merged = merge_exposures_result(&rgb_short, &rgb_long, exp_short, exp_long, Some(align_shift_long.unwrap_or((0.0, 0.0))), None, None)?;
+            let merged = merge_exposures_result(
+                &rgb_short,
+                &rgb_long,
+                exp_short,
+                exp_long,
+                Some(align_shift_long.unwrap_or((0.0, 0.0))),
+                None,
+                None,
+            )?;
             self.last_me_debug = Some(MeScanDebug {
                 rgb_short: rgb_short.clone(),
                 rgb_long: rgb_long.clone(),
@@ -292,20 +399,44 @@ impl ScanSession {
                 align_shift_long,
                 align_shift_ir: self.last_align_shift_ir,
                 exposure_proposed: decision.as_ref().map(|d| d.proposed),
-                exposure_reason: Some(decision.as_ref().map_or("manual-override".to_string(), |d| d.reason.clone())),
+                exposure_reason: Some(
+                    decision
+                        .as_ref()
+                        .map_or("manual-override".to_string(), |d| d.reason.clone()),
+                ),
             });
-            primary = self.pipeline.expose_film_base(merged.rgb, "me deliverable", HOST_CALIB_PEAK_TARGET, HOST_CALIB_PEAK_PERCENTILE, true, HOST_CALIB_HIGHLIGHT_CEILING, HOST_CALIB_HIGHLIGHT_PERCENTILE);
-            primary = self.pipeline.clamp_border_highlights(primary, HOST_CALIB_BORDER_INSET, HOST_CALIB_PEAK_PERCENTILE);
+            primary = self.pipeline.expose_film_base(
+                merged.rgb,
+                "me deliverable",
+                HOST_CALIB_PEAK_TARGET,
+                HOST_CALIB_PEAK_PERCENTILE,
+                true,
+                HOST_CALIB_HIGHLIGHT_CEILING,
+                HOST_CALIB_HIGHLIGHT_PERCENTILE,
+            );
+            primary = self.pipeline.clamp_border_highlights(
+                primary,
+                HOST_CALIB_BORDER_INSET,
+                HOST_CALIB_PEAK_PERCENTILE,
+            );
         }
         let image = ScanImage::new(primary, geometry.resolution, device_model(&model), ir_plane);
         if image.ir_tracks_image() == Some(true) {
-            warn!("IR plane follows the picture (silver black-and-white film?); it is not a dust map — skip IR dust removal for this frame");
+            warn!(
+                "IR plane follows the picture (silver black-and-white film?); it is not a dust map — skip IR dust removal for this frame"
+            );
         }
         Ok(image)
     }
 
     /// Pick the ME long LPERIOD, clamped to the model's validated envelope.
-    fn select_me_long(&self, rgb_short: &Array3<u16>, exp_short: i64, resolution: i64, me_long_exposure: Option<i64>) -> (i64, Option<MeExposureDecision>) {
+    fn select_me_long(
+        &self,
+        rgb_short: &Array3<u16>,
+        exp_short: i64,
+        resolution: i64,
+        me_long_exposure: Option<i64>,
+    ) -> (i64, Option<MeExposureDecision>) {
         let m = &self.model;
         let lo = m.me_long_clamp_min.unwrap_or(exp_short);
         let hi = m.me_long_clamp_max.unwrap_or(0xFFFF).min(0xFFFF);
@@ -338,7 +469,10 @@ impl ScanSession {
             },
         );
         let el = decision.selected.min(hi).max(lo);
-        info!("ME long exposure {resolution}dpi: short={exp_short} proposed={} selected={el} reason={}", decision.proposed, decision.reason);
+        info!(
+            "ME long exposure {resolution}dpi: short={exp_short} proposed={} selected={el} reason={}",
+            decision.proposed, decision.reason
+        );
         (el, Some(decision))
     }
 
@@ -368,7 +502,11 @@ impl ScanSession {
         let mut use_host_flag = false;
         if apply_calib && let Some(cal) = calibrator {
             // Genesys: host dark/white stretch.
-            let mode = if method == ScanMethod::Infrared { ScanMode::Infrared } else { ScanMode::Color };
+            let mode = if method == ScanMethod::Infrared {
+                ScanMode::Infrared
+            } else {
+                ScanMode::Color
+            };
             let entry = cal.ensure_host_calib(asic, calib_geo, method, mode)?;
             let mut hc = HostCalib::from_entry(&entry);
             if method == ScanMethod::Transparency {
@@ -395,18 +533,33 @@ impl ScanSession {
             _ => (None, None),
         };
         let planar = self.model.gl128.as_ref().is_some_and(|g| g.usb_planar_rgb);
-        self.pipeline.assemble(&raw, &geometry, dark, white, Some(planar), expose_base, None)
+        self.pipeline.assemble(
+            &raw,
+            &geometry,
+            dark,
+            white,
+            Some(planar),
+            expose_base,
+            None,
+        )
     }
 
     /// Cover most of a slow feed with a tiny low-resolution scan first.
-    fn prefeed(&mut self, asic: &mut Gl845, geometry: &ScanGeometry, method: ScanMethod, progress: &mut dyn Progress) -> Result<ScanGeometry> {
+    fn prefeed(
+        &mut self,
+        asic: &mut Gl845,
+        geometry: &ScanGeometry,
+        method: ScanMethod,
+        progress: &mut dyn Progress,
+    ) -> Result<ScanGeometry> {
         let model = self.model.clone();
         let margin = model.prefeed_margin_steps.unwrap_or(0);
         if margin <= 0 {
             return Ok(geometry.clone());
         }
         let pre_res = *model.resolutions_dpi.iter().min().unwrap();
-        let fast = (pre_res * exposure_lperiod_for(&model, pre_res, ScanMethod::Transparency)) as f64;
+        let fast =
+            (pre_res * exposure_lperiod_for(&model, pre_res, ScanMethod::Transparency)) as f64;
         let slow = (geometry.resolution * geometry.exposure_lperiod) as f64;
         let pre_steps = geometry.starty - margin;
         if slow <= PREFEED_MIN_SPEEDUP * fast || pre_steps <= margin {
@@ -425,25 +578,50 @@ impl ScanSession {
         let _ = progress.cancelled();
         self.acquire_raw(asic, &pre, method, true, true, &mut CancelOnly(&*progress))?;
         // Line capture advances the motor by one line per scanned line.
-        let moved = pre_steps + crate::num::floor_div(pre.lincnt_register() * model.motor_base_ydpi, pre_res) + model.prefeed_offset_steps.unwrap_or(0);
-        info!("prefeed {moved} steps at {pre_res} dpi in {:.1}s; image feed {} → {}", monotonic() - t0, geometry.starty, geometry.starty - moved);
-        Ok(ScanGeometry { starty: geometry.starty - moved, ..geometry.clone() })
+        let moved = pre_steps
+            + crate::num::floor_div(pre.lincnt_register() * model.motor_base_ydpi, pre_res)
+            + model.prefeed_offset_steps.unwrap_or(0);
+        info!(
+            "prefeed {moved} steps at {pre_res} dpi in {:.1}s; image feed {} → {}",
+            monotonic() - t0,
+            geometry.starty,
+            geometry.starty - moved
+        );
+        Ok(ScanGeometry {
+            starty: geometry.starty - moved,
+            ..geometry.clone()
+        })
     }
 
     /// Scale white when the image LPERIOD differs from the calib LPERIOD.
-    fn calib_for_exposure(&self, calib: HostCalib, geometry: &ScanGeometry, method: ScanMethod) -> HostCalib {
+    fn calib_for_exposure(
+        &self,
+        calib: HostCalib,
+        geometry: &ScanGeometry,
+        method: ScanMethod,
+    ) -> HostCalib {
         let base = exposure_lperiod_for(&self.model, geometry.resolution, method);
         let ratio = geometry.exposure_lperiod as f64 / base as f64;
         if (ratio - 1.0).abs() < 1e-6 {
             return calib;
         }
         let r32 = ratio as f32;
-        let white = Array2::from_shape_fn(calib.dark.dim(), |p| calib.dark[p] + (calib.white[p] - calib.dark[p]) * r32);
-        HostCalib { dark: calib.dark, white }
+        let white = Array2::from_shape_fn(calib.dark.dim(), |p| {
+            calib.dark[p] + (calib.white[p] - calib.dark[p]) * r32
+        });
+        HostCalib {
+            dark: calib.dark,
+            white,
+        }
     }
 
     /// Pick a single-pass LPERIOD that puts this frame's film peak near the target.
-    fn auto_exposure(&mut self, asic: &mut Gl845, geometry: &ScanGeometry, calib: &CalibEntry) -> Result<i64> {
+    fn auto_exposure(
+        &mut self,
+        asic: &mut Gl845,
+        geometry: &ScanGeometry,
+        calib: &CalibEntry,
+    ) -> Result<i64> {
         let model = self.model.clone();
         let base = exposure_lperiod_for(&model, geometry.resolution, ScanMethod::Transparency);
         let target = model.auto_exposure_target.unwrap_or(0.0);
@@ -451,11 +629,26 @@ impl ScanSession {
         if target <= 0.0 || hi <= base {
             return Ok(base);
         }
-        let pre = compute_geometry(*model.resolutions_dpi.iter().min().unwrap(), &model, geometry.area)?;
-        let raw = self.acquire_raw(asic, &pre, ScanMethod::Transparency, true, true, &mut NoProgress)?;
+        let pre = compute_geometry(
+            *model.resolutions_dpi.iter().min().unwrap(),
+            &model,
+            geometry.area,
+        )?;
+        let raw = self.acquire_raw(
+            asic,
+            &pre,
+            ScanMethod::Transparency,
+            true,
+            true,
+            &mut NoProgress,
+        )?;
         asic.park(crate::asic::gl845::DEFAULT_HOME_TIMEOUT_S)?;
-        let rgb = self.pipeline.assemble(&raw, &pre, None, None, None, false, None)?;
-        let dark: Vec<f64> = (0..3).map(|c| crate::num::mean(calib.dark.column(c).iter().map(|&v| v as f64))).collect();
+        let rgb = self
+            .pipeline
+            .assemble(&raw, &pre, None, None, None, false, None)?;
+        let dark: Vec<f64> = (0..3)
+            .map(|c| crate::num::mean(calib.dark.column(c).iter().map(|&v| v as f64)))
+            .collect();
         let p = super::pipeline::channel_percentiles(rgb.view(), 99.5);
         let peak = (0..3).map(|c| p[c] - dark[c]).fold(f64::MIN, f64::max);
         let dark_max = dark.iter().cloned().fold(f64::MIN, f64::max);
@@ -466,7 +659,15 @@ impl ScanSession {
     }
 
     /// Configure ASIC, run one capture, return raw optical bytes.
-    pub fn acquire_raw(&mut self, asic: &mut Gl845, geometry: &ScanGeometry, method: ScanMethod, lamp_on: bool, start_motor: bool, progress: &mut dyn Progress) -> Result<Vec<u8>> {
+    pub fn acquire_raw(
+        &mut self,
+        asic: &mut Gl845,
+        geometry: &ScanGeometry,
+        method: ScanMethod,
+        lamp_on: bool,
+        start_motor: bool,
+        progress: &mut dyn Progress,
+    ) -> Result<Vec<u8>> {
         asic.set_scan_method(method);
         self.lamp_requested = lamp_on;
         if lamp_on {
@@ -474,7 +675,10 @@ impl ScanSession {
             asic.lamp_on()?;
             let settle_s = self.model.lamp_settle_s.unwrap_or(0.0);
             if !was_lit && settle_s > 0.0 {
-                info!("lamp settle {settle_s:.2}s before {} capture", method.as_str());
+                info!(
+                    "lamp settle {settle_s:.2}s before {} capture",
+                    method.as_str()
+                );
                 sleep(settle_s);
             }
         } else {
@@ -503,9 +707,18 @@ impl ScanSession {
     // --- configure ---
 
     /// Program the ASIC registers and slope tables for `geometry`.
-    pub fn configure(&mut self, asic: &mut Gl845, geometry: &ScanGeometry, home_seek: bool) -> Result<()> {
+    pub fn configure(
+        &mut self,
+        asic: &mut Gl845,
+        geometry: &ScanGeometry,
+        home_seek: bool,
+    ) -> Result<()> {
         let model = self.model.clone();
-        let mut cache = if !asic.reg_cache.is_empty() { asic.reg_cache.clone() } else { model.boot_register_map() };
+        let mut cache = if !asic.reg_cache.is_empty() {
+            asic.reg_cache.clone()
+        } else {
+            model.boot_register_map()
+        };
         let method = asic.scan_method;
         for (&a, &v) in sensor_regs_for(&model, geometry.resolution).iter() {
             cache.insert(a, v);
@@ -513,7 +726,11 @@ impl ScanSession {
         asic.apply_frontend_for_scan(Some(geometry.resolution), Some(method))?;
         let g = |c: &RegMap, a: u16, d: u16| c.get_or(a, d) as i64;
         // Optical: SHDAREA on, DVDSET off (host-side calib), SCAN off
-        cache.insert(0x01, ((g(&cache, 0x01, 0x22) | r::SHDAREA as i64) & !(r::DVDSET as i64) & !(r::SCAN as i64)) as u16);
+        cache.insert(
+            0x01,
+            ((g(&cache, 0x01, 0x22) | r::SHDAREA as i64) & !(r::DVDSET as i64) & !(r::SCAN as i64))
+                as u16,
+        );
         if home_seek {
             // keep the current LAMPPWR state
         } else if method == ScanMethod::Infrared || !self.lamp_requested {
@@ -543,7 +760,10 @@ impl ScanSession {
             4800 => 0xC0,
             _ => 0x40,
         };
-        cache.insert(0x05, ((g(&cache, 0x05, 0x48) & !0xC0 & !0x08) | dpihw_bits) as u16);
+        cache.insert(
+            0x05,
+            ((g(&cache, 0x05, 0x48) & !0xC0 & !0x08) | dpihw_bits) as u16,
+        );
         cache.insert(0x2E, 0x7F);
         cache.insert(0x2F, 0x7F);
 
@@ -567,7 +787,13 @@ impl ScanSession {
 
         let step_mult = 1;
         let mp = model.motor_profile;
-        let scan_slope = create_scan_slope_table(geometry.resolution, geometry.exposure_lperiod, model.motor_base_ydpi, step_mult, Some(&mp));
+        let scan_slope = create_scan_slope_table(
+            geometry.resolution,
+            geometry.exposure_lperiod,
+            model.motor_base_ydpi,
+            step_mult,
+            Some(&mp),
+        );
         let fast_slope = create_fast_slope_table(step_mult, Some(&mp));
         let mut c02 = r::MTRPWR;
         if home_seek {
@@ -594,7 +820,13 @@ impl ScanSession {
         cache.insert(0x23, (min_restep & 0xFF) as u16);
         let ccdlmt = (g(&cache, 0x0C, 0) & 0x0F) + 1;
         let exposure_mod = geometry.exposure_lperiod * ccdlmt * tgtime;
-        let (z1, z2) = calculate_zmod(exposure_mod, &scan_slope.table, scan_slope.table.len() as i64, feedl, min_restep * step_mult);
+        let (z1, z2) = calculate_zmod(
+            exposure_mod,
+            &scan_slope.table,
+            scan_slope.table.len() as i64,
+            feedl,
+            min_restep * step_mult,
+        );
         let step_sel = mp.step_type << 5;
         set24(&mut cache, 0x60, (z1 & 0xFFFF) | (step_sel << 16));
         set24(&mut cache, 0x63, (z2 & 0xFFFF) | (step_sel << 16));
@@ -613,10 +845,12 @@ impl ScanSession {
         let payload = slope_table_to_bytes(&scan_slope.table);
         let fast_payload = slope_table_to_bytes(&fast_slope.table);
         for nr in [0, 1, 2] {
-            asic.protocol.write_ahb(slope_table_ahb(nr).unwrap(), &payload)?;
+            asic.protocol
+                .write_ahb(slope_table_ahb(nr).unwrap(), &payload)?;
         }
         for nr in [3, 4] {
-            asic.protocol.write_ahb(slope_table_ahb(nr).unwrap(), &fast_payload)?;
+            asic.protocol
+                .write_ahb(slope_table_ahb(nr).unwrap(), &fast_payload)?;
         }
         self.feedl = feedl;
         info!(
@@ -638,9 +872,13 @@ impl ScanSession {
         let reg01 = asic.protocol.read_register(0x01)? | r::SCAN;
         asic.protocol.write_register(0x01, reg01)?;
         asic.reg_cache.insert(0x01, reg01 as u16);
-        asic.protocol.write_register(0x0F, if start_motor { 0x01 } else { 0x00 })?;
+        asic.protocol
+            .write_register(0x0F, if start_motor { 0x01 } else { 0x00 })?;
         asic.update_home_sensor_gpio()?;
-        info!("scan started motor={}", if start_motor { "True" } else { "False" });
+        info!(
+            "scan started motor={}",
+            if start_motor { "True" } else { "False" }
+        );
         Ok(())
     }
 
@@ -664,7 +902,11 @@ impl ScanSession {
     }
 
     fn wait_feed(&mut self, asic: &mut Gl845, progress: &dyn Progress) -> Result<()> {
-        let base = if self.model.exposure_lperiod != 0 { self.model.exposure_lperiod } else { 14000 };
+        let base = if self.model.exposure_lperiod != 0 {
+            self.model.exposure_lperiod
+        } else {
+            14000
+        };
         let lp = self.lperiod.unwrap_or(base);
         let timeout_s = FEED_TIMEOUT_S * (lp as f64 / base as f64).max(1.0);
         let start = monotonic();
@@ -686,11 +928,15 @@ impl ScanSession {
                 last_steps = steps;
                 last_move = now;
             } else if now - last_move > FEED_STALL_S {
-                return Err(Error::MotorTimeout(format!("Feed stalled at {steps}/{target} steps for {FEED_STALL_S:.0}s")));
+                return Err(Error::MotorTimeout(format!(
+                    "Feed stalled at {steps}/{target} steps for {FEED_STALL_S:.0}s"
+                )));
             }
             sleep(0.05);
         }
-        Err(Error::MotorTimeout(format!("Feed did not complete within {timeout_s:.0}s ({last_steps}/{target} steps)")))
+        Err(Error::MotorTimeout(format!(
+            "Feed did not complete within {timeout_s:.0}s ({last_steps}/{target} steps)"
+        )))
     }
 
     fn wait_data(&mut self, asic: &mut Gl845, progress: &dyn Progress) -> Result<()> {
@@ -703,10 +949,18 @@ impl ScanSession {
             }
             sleep(0.02);
         }
-        Err(Error::Scan(format!("No scan data within {DATA_TIMEOUT_S:.0}s")))
+        Err(Error::Scan(format!(
+            "No scan data within {DATA_TIMEOUT_S:.0}s"
+        )))
     }
 
-    fn acquire(&mut self, asic: &mut Gl845, geometry: &ScanGeometry, progress: &mut dyn Progress, wait_feed: bool) -> Result<Vec<u8>> {
+    fn acquire(
+        &mut self,
+        asic: &mut Gl845,
+        geometry: &ScanGeometry,
+        progress: &mut dyn Progress,
+        wait_feed: bool,
+    ) -> Result<Vec<u8>> {
         if wait_feed {
             self.wait_feed(asic, progress)?;
         }
@@ -750,10 +1004,18 @@ pub fn start_home_seek(asic: &mut Gl845, starty: i64) -> Result<()> {
     let resolution = *model.resolutions_dpi.iter().min().unwrap();
     let width_mm = HOME_SCAN_PIXELS as f64 * MM_PER_INCH / resolution as f64 + 0.01;
     let height_mm = HOME_SCAN_LINES as f64 * MM_PER_INCH / resolution as f64 + 0.01;
-    let area = [0.0, 0.0, (width_mm / model.x_size_ta_mm).min(1.0), (height_mm / model.y_size_ta_mm).min(1.0)];
+    let area = [
+        0.0,
+        0.0,
+        (width_mm / model.x_size_ta_mm).min(1.0),
+        (height_mm / model.y_size_ta_mm).min(1.0),
+    ];
     let mut geometry = compute_geometry(resolution, model, Some(area))?;
     if geometry.pixels < HOME_SCAN_PIXELS || geometry.lines < HOME_SCAN_LINES {
-        return Err(Error::Scan(format!("Home-scan geometry is too small: {}x{}", geometry.pixels, geometry.lines)));
+        return Err(Error::Scan(format!(
+            "Home-scan geometry is too small: {}x{}",
+            geometry.pixels, geometry.lines
+        )));
     }
     geometry.startx = 0;
     geometry.starty = starty;
@@ -774,6 +1036,9 @@ pub fn start_home_seek(asic: &mut Gl845, starty: i64) -> Result<()> {
     asic.set_scan_method(prior);
     r?;
     session.begin_scan(asic, true)?;
-    info!("started reverse home scan pixels={} lines={} starty={starty}", geometry.pixels, geometry.lines);
+    info!(
+        "started reverse home scan pixels={} lines={} starty={starty}",
+        geometry.pixels, geometry.lines
+    );
     Ok(())
 }

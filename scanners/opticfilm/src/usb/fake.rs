@@ -5,8 +5,8 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 
 use super::protocol::{
-    REGISTER_LINK_OK, REQUEST_BUFFER, REQUEST_REGISTER, REQUEST_TYPE_IN, REQUEST_TYPE_OUT, VALUE_BUF_ENDACCESS, VALUE_BUFFER,
-    VALUE_GET_REGISTER, VALUE_SET_REGISTER,
+    REGISTER_LINK_OK, REQUEST_BUFFER, REQUEST_REGISTER, REQUEST_TYPE_IN, REQUEST_TYPE_OUT,
+    VALUE_BUF_ENDACCESS, VALUE_BUFFER, VALUE_GET_REGISTER, VALUE_SET_REGISTER,
 };
 use super::trace::{UsbOp, UsbTransaction};
 use super::transport::{ControlData, UsbTransport};
@@ -39,9 +39,14 @@ pub struct FakeCore {
 
 impl FakeCore {
     pub fn new() -> Self {
-        let mut c = Self { abort_drain_bytes: 42, ..Default::default() };
+        let mut c = Self {
+            abort_drain_bytes: 42,
+            ..Default::default()
+        };
         c.registers.entry(r::REG_0X41).or_insert(IDLE_STATUS_REG41);
-        c.registers.entry(se::REG_STATUS).or_insert(IDLE_STATUS_REG41);
+        c.registers
+            .entry(se::REG_STATUS)
+            .or_insert(IDLE_STATUS_REG41);
         c
     }
 
@@ -59,7 +64,13 @@ impl FakeCore {
                     UsbOp::ControlWrite => ControlLogData::Data(t.data.clone().unwrap_or_default()),
                     _ => return None,
                 };
-                Some((t.request_type.unwrap_or(0), t.request.unwrap_or(0), t.value.unwrap_or(0), t.index.unwrap_or(0), d))
+                Some((
+                    t.request_type.unwrap_or(0),
+                    t.request.unwrap_or(0),
+                    t.value.unwrap_or(0),
+                    t.index.unwrap_or(0),
+                    d,
+                ))
             })
             .collect()
     }
@@ -116,7 +127,10 @@ pub struct FakeUsbTransport<D: FakeDevice = NoDevice> {
 
 impl FakeUsbTransport<NoDevice> {
     pub fn new() -> Self {
-        Self { core: FakeCore::new(), dev: NoDevice }
+        Self {
+            core: FakeCore::new(),
+            dev: NoDevice,
+        }
     }
 }
 
@@ -151,7 +165,9 @@ impl<D: FakeDevice> FakeUsbTransport<D> {
 
         if rtype == REQUEST_TYPE_IN && request == REQUEST_BUFFER {
             if value & 0xFF != VALUE_GET_REGISTER {
-                return Err(Error::Usb(format!("unexpected GET_REGISTER value=0x{value:04x} index=0x{index:04x}")));
+                return Err(Error::Usb(format!(
+                    "unexpected GET_REGISTER value=0x{value:04x} index=0x{index:04x}"
+                )));
             }
             let addr = gl845_read_address(value, index);
             self.dev.before_register_read(&mut self.core, addr);
@@ -159,14 +175,19 @@ impl<D: FakeDevice> FakeUsbTransport<D> {
         }
         if rtype == REQUEST_TYPE_IN && request == REQUEST_REGISTER {
             self.dev.before_probe_read(&mut self.core, index);
-            return Ok(vec![self.core.request_register.get(&index).copied().unwrap_or(0)]);
+            return Ok(vec![
+                self.core.request_register.get(&index).copied().unwrap_or(0),
+            ]);
         }
         if rtype == REQUEST_TYPE_OUT && request == REQUEST_BUFFER {
             if value & 0xFF == VALUE_SET_REGISTER {
                 let payload = txn.data.as_deref().unwrap_or(&[]);
                 let high = if value & 0x100 != 0 { 0x100 } else { 0 };
                 if payload.len() < 2 || payload.len() % 2 != 0 {
-                    return Err(Error::Usb(format!("SET_REGISTER payload length {}", payload.len())));
+                    return Err(Error::Usb(format!(
+                        "SET_REGISTER payload length {}",
+                        payload.len()
+                    )));
                 }
                 for p in payload.chunks_exact(2) {
                     let addr = high | p[0] as u16;
@@ -176,12 +197,19 @@ impl<D: FakeDevice> FakeUsbTransport<D> {
                 return Ok(Vec::new());
             }
             if value == VALUE_BUFFER {
-                self.dev.after_buffer_write(&mut self.core, index, txn.data.as_deref().unwrap_or(&[]));
+                self.dev.after_buffer_write(
+                    &mut self.core,
+                    index,
+                    txn.data.as_deref().unwrap_or(&[]),
+                );
                 return Ok(Vec::new());
             }
-            return Err(Error::Usb(format!("unexpected BUFFER out value=0x{value:04x}")));
+            return Err(Error::Usb(format!(
+                "unexpected BUFFER out value=0x{value:04x}"
+            )));
         }
-        if rtype == REQUEST_TYPE_OUT && request == REQUEST_REGISTER && value == VALUE_BUF_ENDACCESS {
+        if rtype == REQUEST_TYPE_OUT && request == REQUEST_REGISTER && value == VALUE_BUF_ENDACCESS
+        {
             return Ok(Vec::new());
         }
         Err(Error::Usb(format!(
@@ -191,7 +219,15 @@ impl<D: FakeDevice> FakeUsbTransport<D> {
 }
 
 impl<D: FakeDevice> UsbTransport for FakeUsbTransport<D> {
-    fn control_msg(&mut self, rt: u8, req: u8, value: u16, index: u16, data: ControlData<'_>, timeout_ms: Option<u32>) -> Result<Vec<u8>> {
+    fn control_msg(
+        &mut self,
+        rt: u8,
+        req: u8,
+        value: u16,
+        index: u16,
+        data: ControlData<'_>,
+        timeout_ms: Option<u32>,
+    ) -> Result<Vec<u8>> {
         self.raise_queued_error()?;
         let txn = UsbTransaction::control(rt, req, value, index, data, timeout_ms);
         let r = self.handle_control(&txn);
@@ -201,7 +237,9 @@ impl<D: FakeDevice> UsbTransport for FakeUsbTransport<D> {
 
     fn bulk_read(&mut self, size: usize, timeout_ms: Option<u32>) -> Result<Vec<u8>> {
         self.raise_queued_error()?;
-        self.core.transactions.push(UsbTransaction::bulk_read(size, timeout_ms));
+        self.core
+            .transactions
+            .push(UsbTransaction::bulk_read(size, timeout_ms));
         if let Some(mut chunk) = self.core.bulk_in_queue.pop_front() {
             chunk.truncate(size);
             return Ok(chunk);
@@ -211,7 +249,9 @@ impl<D: FakeDevice> UsbTransport for FakeUsbTransport<D> {
 
     fn bulk_write(&mut self, data: &[u8], timeout_ms: Option<u32>) -> Result<usize> {
         self.raise_queued_error()?;
-        self.core.transactions.push(UsbTransaction::bulk_write(data, timeout_ms));
+        self.core
+            .transactions
+            .push(UsbTransaction::bulk_write(data, timeout_ms));
         Ok(data.len())
     }
 
@@ -257,7 +297,16 @@ impl MockScannerTransport {
             bulk_offset: 0,
         };
         dev.sync_status(&mut core);
-        for (a, v) in [(0x48, 0x1F), (0x49, 0xFF), (0x4A, 0xFF), (0x42, 0x02), (0x43, 0x00), (0x44, 0x00), (0x45, 0x01), (0x06, r::PWRBIT)] {
+        for (a, v) in [
+            (0x48, 0x1F),
+            (0x49, 0xFF),
+            (0x4A, 0xFF),
+            (0x42, 0x02),
+            (0x43, 0x00),
+            (0x44, 0x00),
+            (0x45, 0x01),
+            (0x06, r::PWRBIT),
+        ] {
             core.registers.entry(a).or_insert(v);
         }
         Self { core, dev }
@@ -384,7 +433,11 @@ impl FakeDevice for MockScanner {
     fn bulk_in_bytes(&mut self, core: &mut FakeCore, size: usize) -> Vec<u8> {
         let width = Self::line_width(core) as u64;
         let lperiod = ((core.reg(0x38) as u64) << 8) | core.reg(0x39) as u64;
-        let (gain_num, mut gain_den) = if lperiod != 0 { (lperiod, 14000u64) } else { (1, 1) };
+        let (gain_num, mut gain_den) = if lperiod != 0 {
+            (lperiod, 14000u64)
+        } else {
+            (1, 1)
+        };
         let lit = core.reg(0x03) & r::LAMPPWR != 0 || core.reg(0xA8) & r::IR_LAMP_A8_MASK != 0;
         if !lit {
             gain_den *= 64;

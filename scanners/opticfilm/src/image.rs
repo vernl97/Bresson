@@ -31,18 +31,36 @@ pub struct ScanImage {
 
 impl PartialEq for ScanImage {
     fn eq(&self, o: &Self) -> bool {
-        self.rgb == o.rgb && self.dpi == o.dpi && self.device_model == o.device_model && self.ir == o.ir
+        self.rgb == o.rgb
+            && self.dpi == o.dpi
+            && self.device_model == o.device_model
+            && self.ir == o.ir
     }
 }
 
 impl ScanImage {
-    pub fn new(rgb: Array3<u16>, dpi: i64, device_model: impl Into<String>, ir: Option<Array2<u16>>) -> Self {
-        Self { rgb, dpi, device_model: device_model.into(), ir, ir_tracks: OnceLock::new() }
+    pub fn new(
+        rgb: Array3<u16>,
+        dpi: i64,
+        device_model: impl Into<String>,
+        ir: Option<Array2<u16>>,
+    ) -> Self {
+        Self {
+            rgb,
+            dpi,
+            device_model: device_model.into(),
+            ir,
+            ir_tracks: OnceLock::new(),
+        }
     }
 
     /// True when `ir` follows the picture (silver film), `None` without IR.
     pub fn ir_tracks_image(&self) -> Option<bool> {
-        *self.ir_tracks.get_or_init(|| self.ir.as_ref().map(|ir| infrared_tracks_image(&self.rgb, ir, 0.06, 8).unwrap_or(false)))
+        *self.ir_tracks.get_or_init(|| {
+            self.ir
+                .as_ref()
+                .map(|ir| infrared_tracks_image(&self.rgb, ir, 0.06, 8).unwrap_or(false))
+        })
     }
 
     /// Write a 16-bit RGB TIFF (the scanned frame only; no IR sidecar).
@@ -61,14 +79,29 @@ pub const IR_IMAGE_SPREAD_RATIO: f64 = 0.5;
 pub const VISIBLE_MIN_SPREAD: f64 = 0.1;
 
 /// True when the IR plane records the picture, so it is unusable as a dust map.
-pub fn infrared_tracks_image(rgb: &Array3<u16>, ir: &Array2<u16>, inset: f64, block: usize) -> Result<bool> {
+pub fn infrared_tracks_image(
+    rgb: &Array3<u16>,
+    ir: &Array2<u16>,
+    inset: f64,
+    block: usize,
+) -> Result<bool> {
     let vis: Array2<f64> = rgb.mapv(|v| v as f64).mean_axis(Axis(2)).expect("channels");
     if vis.dim() != ir.dim() {
-        return Err(Error::Value(format!("rgb {:?} and ir {:?} differ in size", vis.dim(), ir.dim())));
+        return Err(Error::Value(format!(
+            "rgb {:?} and ir {:?} differ in size",
+            vis.dim(),
+            ir.dim()
+        )));
     }
     let (h, w) = ir.dim();
-    let (y0, y1) = ((h as f64 * inset) as usize, (h as f64 * (1.0 - inset)) as usize);
-    let (x0, x1) = ((w as f64 * inset) as usize, (w as f64 * (1.0 - inset)) as usize);
+    let (y0, y1) = (
+        (h as f64 * inset) as usize,
+        (h as f64 * (1.0 - inset)) as usize,
+    );
+    let (x0, x1) = (
+        (w as f64 * inset) as usize,
+        (w as f64 * (1.0 - inset)) as usize,
+    );
     let hh = ((y1 - y0) / block) * block;
     let ww = ((x1 - x0) / block) * block;
     if hh < 2 * block || ww < 2 * block {
@@ -99,9 +132,12 @@ pub fn infrared_tracks_image(rgb: &Array3<u16>, ir: &Array2<u16>, inset: f64, bl
     if mi <= 0.0 || mv <= 0.0 || std(&v) == 0.0 || std(&i) == 0.0 {
         return Ok(false);
     }
-    let spread = |a: &[f64], med: f64| (percentile(a.iter().copied(), 95.0) - percentile(a.iter().copied(), 5.0)) / med;
+    let spread = |a: &[f64], med: f64| {
+        (percentile(a.iter().copied(), 95.0) - percentile(a.iter().copied(), 5.0)) / med
+    };
     let (ir_spread, vis_spread) = (spread(&i, mi), spread(&v, mv));
-    let varies = ir_spread >= IR_IMAGE_SPREAD || (vis_spread >= VISIBLE_MIN_SPREAD && ir_spread >= IR_IMAGE_SPREAD_RATIO * vis_spread);
+    let varies = ir_spread >= IR_IMAGE_SPREAD
+        || (vis_spread >= VISIBLE_MIN_SPREAD && ir_spread >= IR_IMAGE_SPREAD_RATIO * vis_spread);
     Ok(varies && corrcoef(&v, &i) > IR_IMAGE_CORRELATION)
 }
 
@@ -122,7 +158,12 @@ fn corrcoef(a: &[f64], b: &[f64]) -> f64 {
 pub const SOFTWARE: &str = concat!("opticfilm ", env!("CARGO_PKG_VERSION"));
 
 fn tiff_path(path: &Path) -> PathBuf {
-    match path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .as_deref()
+    {
         Some("tif") | Some("tiff") => path.to_path_buf(),
         _ => path.with_extension("tif"),
     }
@@ -136,7 +177,9 @@ fn terr(e: impl std::fmt::Display) -> Error {
 pub fn save_rgb16_tiff(rgb: &Array3<u16>, path: impl AsRef<Path>, dpi: i64) -> Result<PathBuf> {
     let (h, w, c) = rgb.dim();
     if c != 3 {
-        return Err(Error::Scan(format!("rgb must be HxWx3, got shape ({h}, {w}, {c})")));
+        return Err(Error::Scan(format!(
+            "rgb must be HxWx3, got shape ({h}, {w}, {c})"
+        )));
     }
     let out = tiff_path(path.as_ref());
     let f = BufWriter::new(File::create(&out).map_err(terr)?);
@@ -144,9 +187,19 @@ pub fn save_rgb16_tiff(rgb: &Array3<u16>, path: impl AsRef<Path>, dpi: i64) -> R
         .map_err(terr)?
         .with_compression(Compression::Deflate(DeflateLevel::Balanced))
         .with_predictor(Predictor::Horizontal);
-    let mut img = enc.new_image::<colortype::RGB16>(w as u32, h as u32).map_err(terr)?;
-    img.resolution(ResolutionUnit::Inch, Rational { n: dpi as u32, d: 1 });
-    img.encoder().write_tag(Tag::Software, SOFTWARE).map_err(terr)?;
+    let mut img = enc
+        .new_image::<colortype::RGB16>(w as u32, h as u32)
+        .map_err(terr)?;
+    img.resolution(
+        ResolutionUnit::Inch,
+        Rational {
+            n: dpi as u32,
+            d: 1,
+        },
+    );
+    img.encoder()
+        .write_tag(Tag::Software, SOFTWARE)
+        .map_err(terr)?;
     let data: Vec<u16> = rgb.as_standard_layout().iter().copied().collect();
     img.write_data(&data).map_err(terr)?;
     Ok(out)
@@ -161,9 +214,19 @@ pub fn save_gray16_tiff(gray: &Array2<u16>, path: impl AsRef<Path>, dpi: i64) ->
         .map_err(terr)?
         .with_compression(Compression::Deflate(DeflateLevel::Balanced))
         .with_predictor(Predictor::Horizontal);
-    let mut img = enc.new_image::<colortype::Gray16>(w as u32, h as u32).map_err(terr)?;
-    img.resolution(ResolutionUnit::Inch, Rational { n: dpi as u32, d: 1 });
-    img.encoder().write_tag(Tag::Software, SOFTWARE).map_err(terr)?;
+    let mut img = enc
+        .new_image::<colortype::Gray16>(w as u32, h as u32)
+        .map_err(terr)?;
+    img.resolution(
+        ResolutionUnit::Inch,
+        Rational {
+            n: dpi as u32,
+            d: 1,
+        },
+    );
+    img.encoder()
+        .write_tag(Tag::Software, SOFTWARE)
+        .map_err(terr)?;
     let data: Vec<u16> = gray.as_standard_layout().iter().copied().collect();
     img.write_data(&data).map_err(terr)?;
     Ok(out)
@@ -180,13 +243,22 @@ pub fn load_rgb16_tiff(path: impl AsRef<Path>, default_dpi: i64) -> Result<(Arra
         DecodingResult::U16(v) => v,
         DecodingResult::U8(v) => v.iter().map(|&b| ((b as u16) << 8) | b as u16).collect(),
         DecodingResult::F32(v) => v.iter().map(|&x| x.clamp(0.0, 65535.0) as u16).collect(),
-        other => return Err(Error::Scan(format!("unsupported TIFF sample type {:?}", std::mem::discriminant(&other)))),
+        other => {
+            return Err(Error::Scan(format!(
+                "unsupported TIFF sample type {:?}",
+                std::mem::discriminant(&other)
+            )));
+        }
     };
     let c = samples.len() / (w * h).max(1);
     let arr = match c {
         1 => Array3::from_shape_fn((h, w, 3), |(y, x, _)| samples[y * w + x]),
         3 => Array3::from_shape_vec((h, w, 3), samples).map_err(terr)?,
-        _ => return Err(Error::Scan(format!("expected HxWx3 RGB TIFF, got {c} channels"))),
+        _ => {
+            return Err(Error::Scan(format!(
+                "expected HxWx3 RGB TIFF, got {c} channels"
+            )));
+        }
     };
     Ok((arr, dpi.unwrap_or(default_dpi)))
 }

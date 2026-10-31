@@ -30,7 +30,13 @@ impl<'a, T: Eq + Hash> SequenceMatcher<'a, T> {
     }
 
     /// Longest matching block in `a[alo:ahi]` and `b[blo:bhi]` (earliest on ties).
-    pub fn find_longest_match(&self, alo: usize, ahi: usize, blo: usize, bhi: usize) -> (usize, usize, usize) {
+    pub fn find_longest_match(
+        &self,
+        alo: usize,
+        ahi: usize,
+        blo: usize,
+        bhi: usize,
+    ) -> (usize, usize, usize) {
         let (a, b) = (self.a, self.b);
         let (mut besti, mut bestj, mut bestsize) = (alo, blo, 0usize);
         let mut j2len: HashMap<usize, usize> = HashMap::new();
@@ -44,7 +50,11 @@ impl<'a, T: Eq + Hash> SequenceMatcher<'a, T> {
                     if j >= bhi {
                         break;
                     }
-                    let k = if j > 0 { j2len.get(&(j - 1)).copied().unwrap_or(0) } else { 0 } + 1;
+                    let k = if j > 0 {
+                        j2len.get(&(j - 1)).copied().unwrap_or(0)
+                    } else {
+                        0
+                    } + 1;
                     newj2len.insert(j, k);
                     if k > bestsize {
                         besti = i + 1 - k;
@@ -60,7 +70,10 @@ impl<'a, T: Eq + Hash> SequenceMatcher<'a, T> {
             bestj -= 1;
             bestsize += 1;
         }
-        while besti + bestsize < ahi && bestj + bestsize < bhi && a[besti + bestsize] == b[bestj + bestsize] {
+        while besti + bestsize < ahi
+            && bestj + bestsize < bhi
+            && a[besti + bestsize] == b[bestj + bestsize]
+        {
             bestsize += 1;
         }
         (besti, bestj, bestsize)

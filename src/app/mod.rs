@@ -316,8 +316,7 @@ impl NlpApp {
                     .filter(|e| e.file_type().is_ok_and(|t| t.is_file() || t.is_symlink()))
                     .map(|e| e.path())
                     .filter(|p| {
-                        decode::is_folder_scan(p)
-                            && !p.to_string_lossy().ends_with("-prepped.tif")
+                        decode::is_folder_scan(p) && !p.to_string_lossy().ends_with("-prepped.tif")
                     })
                     .collect()
             })
@@ -479,7 +478,10 @@ impl NlpApp {
             if loading >= cap {
                 break;
             }
-            if matches!(self.frames.get(i).map(|f| &f.proxy), Some(ProxyState::NotLoaded)) {
+            if matches!(
+                self.frames.get(i).map(|f| &f.proxy),
+                Some(ProxyState::NotLoaded)
+            ) {
                 self.request_proxy(i);
                 loading += 1;
             }
@@ -1711,7 +1713,12 @@ mod ui_tests {
         settle(&mut h, 90.0);
         h.state_mut().open_editor(2);
         settle(&mut h, 60.0);
-        for k in [egui::Key::Num4, egui::Key::Num7, egui::Key::Num9, egui::Key::Num9] {
+        for k in [
+            egui::Key::Num4,
+            egui::Key::Num7,
+            egui::Key::Num9,
+            egui::Key::Num9,
+        ] {
             h.key_press(k);
             h.run_steps(2);
         }
@@ -1723,7 +1730,10 @@ mod ui_tests {
         h.key_press(egui::Key::Escape);
         h.run_steps(3);
         assert!(!h.state().shortcuts_open, "Esc closes the shortcut sheet");
-        assert!(h.state().view == View::Editor, "Esc on the sheet stays in the editor");
+        assert!(
+            h.state().view == View::Editor,
+            "Esc on the sheet stays in the editor"
+        );
         h.key_press(egui::Key::Num0);
         h.run_steps(2);
         h.state_mut().unconvert(&[2]);
@@ -1798,10 +1808,12 @@ mod ui_tests {
         h.hover_at(egui::pos2(500.0, 160.0));
         h.run_steps(4);
         shot(&mut h, &out, "g2_flags_hover");
+        assert!(h.state().selected.len() == 2);
         h.state_mut().grid.filter = grid::GridFilter::Picks;
         h.run_steps(3);
         shot(&mut h, &out, "g3_picks");
         assert_eq!(h.state().shown_frames(), vec![0, 2, 5]);
+        assert_eq!(h.state().sel_vec(), vec![2], "hidden frames leave the selection");
         h.state_mut().grid.filter = grid::GridFilter::NeedsLook;
         h.run_steps(3);
         shot(&mut h, &out, "g4_needs_look");
@@ -1983,8 +1995,16 @@ mod ui_tests {
             h.step();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(h.state().scan.error.is_none(), "scan failed: {:?}", h.state().scan.error);
-        assert!(!h.state().scan.busy && done(h.state()), "scanner still busy: {}", h.state().scan.status);
+        assert!(
+            h.state().scan.error.is_none(),
+            "scan failed: {:?}",
+            h.state().scan.error
+        );
+        assert!(
+            !h.state().scan.busy && done(h.state()),
+            "scanner still busy: {}",
+            h.state().scan.status
+        );
         h.run_steps(2);
     }
 
@@ -1994,7 +2014,11 @@ mod ui_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
         let builder = Harness::builder().with_size(egui::vec2(1480.0, 940.0));
-        let builder = if out.is_some() { builder.wgpu() } else { builder };
+        let builder = if out.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
         let d = dir.clone();
         let mut h = builder.build_eframe(move |cc| NlpApp::new(cc, Some(d.clone())));
         h.run_steps(3);
@@ -2010,7 +2034,10 @@ mod ui_tests {
     #[test]
     fn scan_panel_scans_into_the_roll() {
         let (dir, out, mut h) = scan_roll("film");
-        h.state_mut().open_scanner(scanner::ScannerChoice::Simulated("plustek-opticfilm-8200i-se".into()));
+        h.state_mut()
+            .open_scanner(scanner::ScannerChoice::Simulated(
+                "plustek-opticfilm-8200i-se".into(),
+            ));
         wait_scan(&mut h, |a| a.scan.info.is_some());
         assert!(h.state().scan.info.as_ref().is_some_and(|i| i.scan_ready));
         h.state_mut().prescan();
@@ -2025,7 +2052,12 @@ mod ui_tests {
         assert_eq!(names, ["scan_001.dng", "scan_002.dng"]);
         for f in &app.frames {
             assert!(f.sc.is_converted(), "{} converted", f.name);
-            assert_eq!(f.sc.settings.source, crate::engine::settings::Source::VueScanRaw, "{}", f.name);
+            assert_eq!(
+                f.sc.settings.source,
+                crate::engine::settings::Source::VueScanRaw,
+                "{}",
+                f.name
+            );
         }
         assert!(dir.join("NLP").join("scan_001.ir.tif").exists());
         if let Some(out) = out {
@@ -2039,14 +2071,28 @@ mod ui_tests {
     #[test]
     fn scan_panel_scans_flatbed_boxes() {
         let (dir, out, mut h) = scan_roll("flatbed");
-        h.state_mut().open_scanner(scanner::ScannerChoice::SimulatedFlatbed);
+        h.state_mut()
+            .open_scanner(scanner::ScannerChoice::SimulatedFlatbed);
         wait_scan(&mut h, |a| a.scan.info.is_some());
-        assert_eq!(h.state().scan.info.as_ref().map(|i| i.kind), Some(scanner::ScannerKind::Flatbed));
-        assert!(h.state().scan.crops.is_empty(), "flatbeds start without boxes");
+        assert_eq!(
+            h.state().scan.info.as_ref().map(|i| i.kind),
+            Some(scanner::ScannerKind::Flatbed)
+        );
+        assert!(
+            h.state().scan.crops.is_empty(),
+            "flatbeds start without boxes"
+        );
         h.state_mut().prescan();
         wait_scan(&mut h, |_| true);
         // The strip's first three frames (24 × 36 mm at 38 mm pitch from 10 mm, on a 63.5 × 228.6 mm unit).
-        let frame = |k: f32| [19.75 / 63.5, (10.0 + 38.0 * k) / 228.6, 43.75 / 63.5, (46.0 + 38.0 * k) / 228.6];
+        let frame = |k: f32| {
+            [
+                19.75 / 63.5,
+                (10.0 + 38.0 * k) / 228.6,
+                43.75 / 63.5,
+                (46.0 + 38.0 * k) / 228.6,
+            ]
+        };
         {
             let app = h.state_mut();
             app.defaults.scan.dpi = 300;
@@ -2064,7 +2110,12 @@ mod ui_tests {
         assert_eq!(names, ["scan_001.dng", "scan_002.dng", "scan_003.dng"]);
         for f in &app.frames {
             assert!(f.sc.is_converted(), "{} converted", f.name);
-            assert_eq!(f.sc.settings.source, crate::engine::settings::Source::VueScanRaw, "{}", f.name);
+            assert_eq!(
+                f.sc.settings.source,
+                crate::engine::settings::Source::VueScanRaw,
+                "{}",
+                f.name
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

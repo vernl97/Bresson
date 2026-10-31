@@ -23,7 +23,9 @@ impl ScanMode {
             "color" => Ok(Self::Color),
             "infrared" => Ok(Self::Infrared),
             "gray" => Ok(Self::Gray),
-            _ => Err(Error::Value(format!("Unsupported mode {s:?} (color|infrared)"))),
+            _ => Err(Error::Value(format!(
+                "Unsupported mode {s:?} (color|infrared)"
+            ))),
         }
     }
 
@@ -36,7 +38,11 @@ impl ScanMode {
     }
 
     pub fn method(self) -> ScanMethod {
-        if self == Self::Infrared { ScanMethod::Infrared } else { ScanMethod::Transparency }
+        if self == Self::Infrared {
+            ScanMethod::Infrared
+        } else {
+            ScanMethod::Transparency
+        }
     }
 }
 
@@ -80,7 +86,9 @@ impl Default for ScanRequest {
 
 impl ScanRequest {
     pub fn resolution(&self) -> i64 {
-        self.geometry.as_ref().map_or(self.resolution, |g| g.resolution)
+        self.geometry
+            .as_ref()
+            .map_or(self.resolution, |g| g.resolution)
     }
 }
 
@@ -95,7 +103,9 @@ pub struct ScanControl {
 
 impl ScanControl {
     pub fn is_cancelled(&self) -> bool {
-        self.cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst))
+        self.cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::SeqCst))
     }
 
     pub fn check(&self, what: &str) -> Result<()> {

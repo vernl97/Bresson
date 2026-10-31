@@ -44,7 +44,12 @@ pub struct Scanner {
 
 impl Scanner {
     /// Wrap an opened transport. `model` defaults to the USB id mapping.
-    pub fn new(transport: Box<dyn UsbTransport>, info: UsbDeviceInfo, model: Option<FilmModel>, calib_cache: Option<PathBuf>) -> Result<Self> {
+    pub fn new(
+        transport: Box<dyn UsbTransport>,
+        info: UsbDeviceInfo,
+        model: Option<FilmModel>,
+        calib_cache: Option<PathBuf>,
+    ) -> Result<Self> {
         let base = match model {
             Some(m) => m,
             None => model_for_device(info.product_id, info.bcd_device)?,
@@ -81,20 +86,36 @@ impl Scanner {
         let handle = UsbDeviceHandle::open(device_id)?;
         let info = handle.info.clone();
         let s = Self::new(Box::new(handle), info, None, calib_cache)?;
-        info!("Scanner open: {} model={} asic={} scan_ready={}", s.info.device_id(), s.model.name, s.model.asic, model_is_scan_ready(&s.model));
+        info!(
+            "Scanner open: {} model={} asic={} scan_ready={}",
+            s.info.device_id(),
+            s.model.name,
+            s.model.asic,
+            model_is_scan_ready(&s.model)
+        );
         Ok(s)
     }
 
     /// Open `model` against a mock USB device (no hardware). Does not change
     /// `model.scan_ready`; real [`Scanner::open`] stays gated.
-    pub fn open_fake(model: FilmModel, transport: Option<Box<dyn UsbTransport>>, calib_cache: Option<PathBuf>) -> Result<Self> {
+    pub fn open_fake(
+        model: FilmModel,
+        transport: Option<Box<dyn UsbTransport>>,
+        calib_cache: Option<PathBuf>,
+    ) -> Result<Self> {
         let inner: Box<dyn UsbTransport> = match transport {
             Some(t) => t,
-            None if model.kind == ModelKind::Opticfilm7600iV1 => Box::new(SimulatedGl843V1Transport::default()),
+            None if model.kind == ModelKind::Opticfilm7600iV1 => {
+                Box::new(SimulatedGl843V1Transport::default())
+            }
             None => Box::new(MockScannerTransport::new()),
         };
         let info = UsbDeviceInfo {
-            vendor_id: if model.usb_vendor_id != 0 { model.usb_vendor_id as u16 } else { VID_PLUSTEK },
+            vendor_id: if model.usb_vendor_id != 0 {
+                model.usb_vendor_id as u16
+            } else {
+                VID_PLUSTEK
+            },
             product_id: model.usb_product_id as u16,
             bus: Some(0),
             address: Some(0),
@@ -108,7 +129,10 @@ impl Scanner {
         if let Asic::Gl128(a) = &mut s.asic {
             a.motor_moves_enabled = true;
         }
-        info!("Scanner open_fake: model={} asic={} (mock USB)", s.model.name, s.model.asic);
+        info!(
+            "Scanner open_fake: model={} asic={} (mock USB)",
+            s.model.name, s.model.asic
+        );
         Ok(s)
     }
 
@@ -169,7 +193,10 @@ impl Scanner {
     }
 
     pub fn read_registers(&mut self, addresses: &[u16]) -> Result<Vec<(u16, u8)>> {
-        addresses.iter().map(|&a| Ok((a, self.read_register(a)?))).collect()
+        addresses
+            .iter()
+            .map(|&a| Ok((a, self.read_register(a)?)))
+            .collect()
     }
 
     // --- device control ---
@@ -187,7 +214,10 @@ impl Scanner {
     pub fn button_state(&mut self, timeout_ms: Option<u32>) -> Result<HashSet<Button>> {
         match &mut self.asic {
             Asic::Gl128(a) => a.button_state(timeout_ms.unwrap_or(5000)),
-            _ => Err(Error::NotImplemented(format!("{} has no button endpoint support", self.model.model))),
+            _ => Err(Error::NotImplemented(format!(
+                "{} has no button endpoint support",
+                self.model.model
+            ))),
         }
     }
 
@@ -231,11 +261,21 @@ impl Scanner {
     }
 
     /// Run dark/white shading (or GL128 IR white-only) and update the cache.
-    pub fn calibrate(&mut self, resolution: i64, mode: ScanMode, force: bool, area: Option<Area>, geometry: Option<&ScanGeometry>) -> Result<CalibEntry> {
+    pub fn calibrate(
+        &mut self,
+        resolution: i64,
+        mode: ScanMode,
+        force: bool,
+        area: Option<Area>,
+        geometry: Option<&ScanGeometry>,
+    ) -> Result<CalibEntry> {
         self.ensure_scan_ready()?;
         self.ensure_open()?;
         if self.model.kind == ModelKind::Opticfilm7600iV1 {
-            return Err(Error::NotImplemented(format!("{} calibrates within each scan", self.model.model)));
+            return Err(Error::NotImplemented(format!(
+                "{} calibrates within each scan",
+                self.model.model
+            )));
         }
         if !self.asic.initialized() {
             self.asic.init(false)?;
@@ -250,7 +290,8 @@ impl Scanner {
                 a.motor_moves_enabled = false;
                 a.enter_scan_clock()?;
             }
-            self.calibrator.run(&mut self.asic, resolution, mode, force, area, geometry)
+            self.calibrator
+                .run(&mut self.asic, resolution, mode, force, area, geometry)
         })();
         if was_armed {
             self.arm_bringup_motor();
@@ -281,7 +322,12 @@ impl Scanner {
         validate_manual_exposure(req.me_long_exposure, "me_long_exposure")?;
         validate_n_passes(req.n_passes)?;
         if self.model.asic == "GL128" {
-            check_gl128_multi_pass(&self.model, req.resolution(), req.multi_exposure, req.n_passes)?;
+            check_gl128_multi_pass(
+                &self.model,
+                req.resolution(),
+                req.multi_exposure,
+                req.n_passes,
+            )?;
         }
         self.ensure_scan_ready()?;
         self.ensure_open()?;
@@ -299,7 +345,12 @@ impl Scanner {
             Asic::Gl128(a) => {
                 let mut s = Gl128ScanSession::new(model);
                 let img = s.run(a, Some(&mut self.calibrator), req, ctl)?;
-                (img, s.last_me_debug, s.last_multi_pass_debug, s.last_align_shift_ir)
+                (
+                    img,
+                    s.last_me_debug,
+                    s.last_multi_pass_debug,
+                    s.last_align_shift_ir,
+                )
             }
             Asic::Gl843V1(a) => {
                 let mut s = Gl843V1ScanSession::new(model);

@@ -26,8 +26,12 @@ fn as_json(g: &ScanGeometry) -> Value {
 
 fn num_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => (x.as_f64().unwrap() - y.as_f64().unwrap()).abs() < 1e-9,
-        (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| num_eq(p, q)),
+        (Value::Number(x), Value::Number(y)) => {
+            (x.as_f64().unwrap() - y.as_f64().unwrap()).abs() < 1e-9
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| num_eq(p, q))
+        }
         _ => a == b,
     }
 }
@@ -42,7 +46,9 @@ fn geometry_matches_python_for_every_model_and_dpi() {
         let got = if row.get("calib").is_some() {
             compute_calib_geometry(dpi, &model, None)
         } else {
-            let area = row["area"].as_array().map(|a| [0, 1, 2, 3].map(|i| a[i].as_f64().unwrap()));
+            let area = row["area"]
+                .as_array()
+                .map(|a| [0, 1, 2, 3].map(|i| a[i].as_f64().unwrap()));
             compute_geometry(dpi, &model, area)
         };
         let ctx = format!("{} {dpi} {:?}", model.name, row.get("area"));
@@ -54,7 +60,11 @@ fn geometry_matches_python_for_every_model_and_dpi() {
                 let want = &row["geometry"];
                 let got = as_json(&g);
                 for (k, v) in want.as_object().unwrap() {
-                    assert!(num_eq(&got[k], v), "{ctx}: field {k}: rust {} python {v}", got[k]);
+                    assert!(
+                        num_eq(&got[k], v),
+                        "{ctx}: field {k}: rust {} python {v}",
+                        got[k]
+                    );
                 }
             }
         }

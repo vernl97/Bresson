@@ -52,7 +52,11 @@ pub fn model_for_device(product_id: u16, bcd_device: u16) -> Result<FilmModel> {
         PID_OPTICFILM_7600I => g::model_7600i_v2(),
         PID_OPTICFILM_8100_V2 => g::model_8100_v2(),
         PID_OPTICFILM_8300I_SE => g::model_8300i_se(),
-        _ => return Err(Error::UnsupportedDevice(format!("No model mapping for product_id=0x{product_id:04x}"))),
+        _ => {
+            return Err(Error::UnsupportedDevice(format!(
+                "No model mapping for product_id=0x{product_id:04x}"
+            )));
+        }
     })
 }
 

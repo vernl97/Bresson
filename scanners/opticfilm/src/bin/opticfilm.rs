@@ -60,14 +60,21 @@ struct Args {
 
 fn parse() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut a = Args { cmd: it.next().ok_or("missing command")?, ..Default::default() };
-    let val = |it: &mut dyn Iterator<Item = String>, flag: &str| it.next().ok_or(format!("{flag} needs a value"));
+    let mut a = Args {
+        cmd: it.next().ok_or("missing command")?,
+        ..Default::default()
+    };
+    let val = |it: &mut dyn Iterator<Item = String>, flag: &str| {
+        it.next().ok_or(format!("{flag} needs a value"))
+    };
     while let Some(f) = it.next() {
         match f.as_str() {
             "--device" => a.device = Some(val(&mut it, &f)?),
             "--fake" => a.fake = Some(val(&mut it, &f)?),
             "--dpi" => a.req.resolution = val(&mut it, &f)?.parse().map_err(|_| "bad --dpi")?,
-            "--mode" => a.req.mode = ScanMode::parse(&val(&mut it, &f)?).map_err(|e| e.to_string())?,
+            "--mode" => {
+                a.req.mode = ScanMode::parse(&val(&mut it, &f)?).map_err(|e| e.to_string())?
+            }
             "--ir" => a.req.infrared = true,
             "--me" => a.req.multi_exposure = true,
             "--me-fixed" => {
@@ -75,10 +82,19 @@ fn parse() -> Result<Args, String> {
                 a.req.me_long_mode = MeLongMode::Fixed;
             }
             "--passes" => a.req.n_passes = val(&mut it, &f)?.parse().map_err(|_| "bad --passes")?,
-            "--exposure" => a.req.single_pass_exposure = Some(val(&mut it, &f)?.parse().map_err(|_| "bad --exposure")?),
+            "--exposure" => {
+                a.req.single_pass_exposure =
+                    Some(val(&mut it, &f)?.parse().map_err(|_| "bad --exposure")?)
+            }
             "--area" => {
-                let v: Vec<f64> = val(&mut it, &f)?.split(',').map(|s| s.trim().parse::<f64>()).collect::<Result<_, _>>().map_err(|_| "bad --area")?;
-                let [x1, y1, x2, y2] = v[..] else { return Err("--area needs four numbers".into()) };
+                let v: Vec<f64> = val(&mut it, &f)?
+                    .split(',')
+                    .map(|s| s.trim().parse::<f64>())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| "bad --area")?;
+                let [x1, y1, x2, y2] = v[..] else {
+                    return Err("--area needs four numbers".into());
+                };
                 a.req.area = Some([x1, y1, x2, y2]);
             }
             "--no-calib" => a.req.apply_calib = false,
@@ -109,9 +125,17 @@ fn open(a: &Args) -> Result<Scanner, Error> {
     match &a.fake {
         Some(name) => {
             let model = model_by_name(name)
-                .or_else(|| known_models().iter().find(|m| m.name.ends_with(&format!("-{name}"))).cloned())
-                .ok_or_else(|| Error::Value(format!("unknown model {name:?} (see `opticfilm models`)")))?;
-            let cache = std::env::temp_dir().join(format!("opticfilm-fake-{}.json", std::process::id()));
+                .or_else(|| {
+                    known_models()
+                        .iter()
+                        .find(|m| m.name.ends_with(&format!("-{name}")))
+                        .cloned()
+                })
+                .ok_or_else(|| {
+                    Error::Value(format!("unknown model {name:?} (see `opticfilm models`)"))
+                })?;
+            let cache =
+                std::env::temp_dir().join(format!("opticfilm-fake-{}.json", std::process::id()));
             Scanner::open_fake(model, None, Some(cache))
         }
         None => Scanner::open(a.device.as_deref(), None),
@@ -130,13 +154,28 @@ fn run(a: Args) -> Result<(), Error> {
                 println!("no Plustek scanners found");
             }
             for d in devs {
-                let model = opticfilm::device::model_for_device(d.product_id, d.bcd_device).map(|m| m.model.to_string()).unwrap_or_else(|_| "unknown".into());
-                println!("{}  {}  bcd={:04x}  {}", d.device_id(), model, d.bcd_device, d.asic_hint());
+                let model = opticfilm::device::model_for_device(d.product_id, d.bcd_device)
+                    .map(|m| m.model.to_string())
+                    .unwrap_or_else(|_| "unknown".into());
+                println!(
+                    "{}  {}  bcd={:04x}  {}",
+                    d.device_id(),
+                    model,
+                    d.bcd_device,
+                    d.asic_hint()
+                );
             }
         }
         "models" => {
             for m in known_models() {
-                println!("{:30} {:05} {:04x}:{:04x}  {}", m.name, m.asic, m.usb_vendor_id, m.usb_product_id, support(m.scan_ready, m.name));
+                println!(
+                    "{:30} {:05} {:04x}:{:04x}  {}",
+                    m.name,
+                    m.asic,
+                    m.usb_vendor_id,
+                    m.usb_product_id,
+                    support(m.scan_ready, m.name)
+                );
             }
         }
         "status" => {
@@ -162,11 +201,25 @@ fn run(a: Args) -> Result<(), Error> {
             eprintln!();
             let out = a.out.clone().unwrap_or_else(|| PathBuf::from("scan.tif"));
             let path = img.save_tiff(&out)?;
-            println!("{} ({}x{} px, {} dpi)", path.display(), img.rgb.dim().1, img.rgb.dim().0, img.dpi);
+            println!(
+                "{} ({}x{} px, {} dpi)",
+                path.display(),
+                img.rgb.dim().1,
+                img.rgb.dim().0,
+                img.dpi
+            );
             if let Some(ir) = &img.ir {
                 let stem = path.with_extension("");
                 let ir_path = save_gray16_tiff(ir, format!("{}_IR.tif", stem.display()), img.dpi)?;
-                println!("{}{}", ir_path.display(), if img.ir_tracks_image() == Some(true) { " (follows the picture: not a dust map)" } else { "" });
+                println!(
+                    "{}{}",
+                    ir_path.display(),
+                    if img.ir_tracks_image() == Some(true) {
+                        " (follows the picture: not a dust map)"
+                    } else {
+                        ""
+                    }
+                );
             }
         }
         "calibrate" => {
@@ -177,7 +230,11 @@ fn run(a: Args) -> Result<(), Error> {
                 e.method.as_str(),
                 e.resolution,
                 e.pixels,
-                if e.asic_shading { "ASIC shading table" } else { "host dark/white" }
+                if e.asic_shading {
+                    "ASIC shading table"
+                } else {
+                    "host dark/white"
+                }
             );
         }
         "buttons" => {
@@ -190,7 +247,11 @@ fn run(a: Args) -> Result<(), Error> {
                 }
             }
         }
-        other => return Err(Error::Value(format!("unknown command {other:?}\n\n{USAGE}"))),
+        other => {
+            return Err(Error::Value(format!(
+                "unknown command {other:?}\n\n{USAGE}"
+            )));
+        }
     }
     Ok(())
 }

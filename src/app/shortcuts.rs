@@ -48,7 +48,10 @@ impl NlpApp {
                 "Editor",
                 vec![
                     ("← →".into(), "Previous / next frame"),
-                    (format!("{} {}", k(none, Key::Space), k(none, Key::Escape)), "Back to the roll"),
+                    (
+                        format!("{} {}", k(none, Key::Space), k(none, Key::Escape)),
+                        "Back to the roll",
+                    ),
                     (k(none, Key::B), "Before / after"),
                     (k(shift, Key::B), "Split view"),
                     (k(none, Key::J), "Show clipping"),
@@ -100,8 +103,14 @@ impl NlpApp {
                             .color(theme::TEXT),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::icon_button(ui, widgets::Icon::Close, "Close (Esc)", false, true)
-                            .clicked()
+                        if widgets::icon_button(
+                            ui,
+                            widgets::Icon::Close,
+                            "Close (Esc)",
+                            false,
+                            true,
+                        )
+                        .clicked()
                         {
                             self.shortcuts_open = false;
                         }
@@ -130,7 +139,11 @@ impl NlpApp {
 }
 
 fn group(ui: &mut egui::Ui, title: &str, rows: &[(String, &str)]) {
-    ui.label(RichText::new(title).font(theme::medium(12.5)).color(theme::MUTED));
+    ui.label(
+        RichText::new(title)
+            .font(theme::medium(12.5))
+            .color(theme::MUTED),
+    );
     ui.add_space(4.0);
     egui::Grid::new(("shortcuts", title))
         .num_columns(2)

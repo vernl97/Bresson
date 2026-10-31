@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Scan geometry helpers for OpticFilm models.
 
+use crate::device::ScanMethod;
 use crate::device::model::FilmModel;
 use crate::device::sensor_lookup::{dummy_pixel_for, exposure_lperiod_for};
-use crate::device::ScanMethod;
 use crate::error::{Error, Result};
 use crate::num::{floor_div, py_int, py_round};
 
@@ -67,7 +67,11 @@ impl ScanGeometry {
 
     /// ASIC `LINCNT` value (falls back to USB line count).
     pub fn lincnt_register(&self) -> i64 {
-        if self.register_lincnt != 0 { self.register_lincnt } else { self.optical_line_count }
+        if self.register_lincnt != 0 {
+            self.register_lincnt
+        } else {
+            self.optical_line_count
+        }
     }
 
     /// Resolution the ASIC is programmed at (>= `resolution`).
@@ -83,9 +87,13 @@ impl ScanGeometry {
 }
 
 fn stagger_for(resolution: i64, model: &FilmModel) -> (Vec<i64>, i64) {
-    let shifts = model
-        .stagger_y_for(resolution)
-        .unwrap_or_else(|| model.stagger_y_by_dpi.get(&resolution).cloned().unwrap_or_default());
+    let shifts = model.stagger_y_for(resolution).unwrap_or_else(|| {
+        model
+            .stagger_y_by_dpi
+            .get(&resolution)
+            .cloned()
+            .unwrap_or_default()
+    });
     if shifts.is_empty() {
         return (Vec::new(), 0);
     }
@@ -95,24 +103,36 @@ fn stagger_for(resolution: i64, model: &FilmModel) -> (Vec<i64>, i64) {
 
 /// Scale base-ydpi line-distance shift to `asic_dpi` (truncating, or the model's rounding).
 fn scaled_ld_shift(ld: i64, asic_dpi: i64, model: &FilmModel) -> i64 {
-    model.scaled_ld_shift(ld, asic_dpi).unwrap_or_else(|| floor_div(ld * asic_dpi, model.motor_base_ydpi))
+    model
+        .scaled_ld_shift(ld, asic_dpi)
+        .unwrap_or_else(|| floor_div(ld * asic_dpi, model.motor_base_ydpi))
 }
 
 fn lcm(a: i64, b: i64) -> i64 {
     fn gcd(a: i64, b: i64) -> i64 {
         if b == 0 { a.abs() } else { gcd(b, a % b) }
     }
-    if a == 0 || b == 0 { 0 } else { (a / gcd(a, b) * b).abs() }
+    if a == 0 || b == 0 {
+        0
+    } else {
+        (a / gcd(a, b) * b).abs()
+    }
 }
 
 /// Session geometry for a color transparency scan.
 ///
 /// `area` is optional normalized (x1,y1,x2,y2) in 0..1 over the TA window.
-pub fn compute_geometry(resolution: i64, model: &FilmModel, area: Option<Area>) -> Result<ScanGeometry> {
+pub fn compute_geometry(
+    resolution: i64,
+    model: &FilmModel,
+    area: Option<Area>,
+) -> Result<ScanGeometry> {
     if !model.resolutions_dpi.contains(&resolution) {
         return Err(Error::Value(format!("Unsupported resolution {resolution}")));
     }
-    let [x1, y1, x2, y2] = area.unwrap_or([0.0, 0.0, 1.0, 1.0]).map(|v| v.clamp(0.0, 1.0));
+    let [x1, y1, x2, y2] = area
+        .unwrap_or([0.0, 0.0, 1.0, 1.0])
+        .map(|v| v.clamp(0.0, 1.0));
     if x2 <= x1 || y2 <= y1 {
         return Err(Error::Value("Invalid scan area".into()));
     }
@@ -129,13 +149,21 @@ pub fn compute_geometry(resolution: i64, model: &FilmModel, area: Option<Area>) 
             disable_buffer_full_move: false,
             area_y1: y1,
             is_default_full_frame: full_frame,
-            area: if full_frame { None } else { Some([x1, y1, x2, y2]) },
+            area: if full_frame {
+                None
+            } else {
+                Some([x1, y1, x2, y2])
+            },
         },
     )
 }
 
 /// Geometry for dark/white shading strip (genesys `init_regs_for_shading`).
-pub fn compute_calib_geometry(resolution: i64, model: &FilmModel, height_mm: Option<f64>) -> Result<ScanGeometry> {
+pub fn compute_calib_geometry(
+    resolution: i64,
+    model: &FilmModel,
+    height_mm: Option<f64>,
+) -> Result<ScanGeometry> {
     if !model.resolutions_dpi.contains(&resolution) {
         return Err(Error::Value(format!("Unsupported resolution {resolution}")));
     }
@@ -189,15 +217,24 @@ fn geometry_from_mm(resolution: i64, model: &FilmModel, a: GeomArgs) -> Result<S
         return Err(Error::Value("Scan height too small".into()));
     }
     let frame_inches = g.map_or(0.0, |g| g.full_frame_output_inches);
-    let mut frame_lines = if a.is_default_full_frame && !dbfm && frame_inches > 0.0 { py_round(frame_inches * asic_dpi as f64) } else { 0 };
+    let mut frame_lines = if a.is_default_full_frame && !dbfm && frame_inches > 0.0 {
+        py_round(frame_inches * asic_dpi as f64)
+    } else {
+        0
+    };
 
     let mut startx = py_int(a.tl_x_mm * asic_dpi as f64 / MM_PER_INCH);
-    let starty = a.starty_override.unwrap_or_else(|| py_int(a.tl_y_mm * model.motor_base_ydpi as f64 / MM_PER_INCH));
+    let starty = a
+        .starty_override
+        .unwrap_or_else(|| py_int(a.tl_y_mm * model.motor_base_ydpi as f64 / MM_PER_INCH));
 
-    let (Some(&offset), Some(&register_dpiset)) =
-        (model.output_pixel_offset_by_dpi.get(&resolution), model.register_dpiset_by_dpi.get(&resolution))
-    else {
-        return Err(Error::Value(format!("No sensor DPI maps for resolution {resolution}")));
+    let (Some(&offset), Some(&register_dpiset)) = (
+        model.output_pixel_offset_by_dpi.get(&resolution),
+        model.register_dpiset_by_dpi.get(&resolution),
+    ) else {
+        return Err(Error::Value(format!(
+            "No sensor DPI maps for resolution {resolution}"
+        )));
     };
 
     let optical_res = model.optical_resolution;
@@ -208,25 +245,40 @@ fn geometry_from_mm(resolution: i64, model: &FilmModel, a: GeomArgs) -> Result<S
         // Native 7200 clocks: session 03 full-width STR 242 / END 10610.
         let origin_native = offset * optical_res / asic_dpi;
         let end_inactive = g.map_or(0, |g| g.optical_end_inactive_native);
-        let frame_shift = if dbfm || end_inactive <= 0 { 0 } else { end_inactive };
+        let frame_shift = if dbfm || end_inactive <= 0 {
+            0
+        } else {
+            end_inactive
+        };
         let factor = (optical_res / asic_dpi).max(1);
         let frame_x_mm = model.x_offset_ta_mm;
         let (px, opx, psx);
         if !dbfm && span_align > 1 && a.tl_x_mm >= frame_x_mm {
             // SilverFast's image window: STR steps from the full-frame STR in
             // whole output pixels, width round(w × dpi) made even.
-            let frame_str = origin_native + frame_shift + py_round(frame_x_mm * optical_res as f64 / MM_PER_INCH);
-            psx = frame_str + py_round((a.tl_x_mm - frame_x_mm) * asic_dpi as f64 / MM_PER_INCH) * factor;
-            let mut p = 2.max(floor_div(py_round(a.width_mm * asic_dpi as f64 / MM_PER_INCH), 2) * 2);
+            let frame_str = origin_native
+                + frame_shift
+                + py_round(frame_x_mm * optical_res as f64 / MM_PER_INCH);
+            psx = frame_str
+                + py_round((a.tl_x_mm - frame_x_mm) * asic_dpi as f64 / MM_PER_INCH) * factor;
+            let mut p =
+                2.max(floor_div(py_round(a.width_mm * asic_dpi as f64 / MM_PER_INCH), 2) * 2);
             // Keep the right edge inside the full frame's own window.
-            let frame_end = frame_str + floor_div(py_round(model.x_size_ta_mm * asic_dpi as f64 / MM_PER_INCH), 2) * 2 * factor;
+            let frame_end = frame_str
+                + floor_div(
+                    py_round(model.x_size_ta_mm * asic_dpi as f64 / MM_PER_INCH),
+                    2,
+                ) * 2
+                    * factor;
             while p > 2 && psx + p * factor > frame_end {
                 p -= 2;
             }
             px = p;
             opx = p * factor;
         } else {
-            psx = origin_native + frame_shift + py_round(a.tl_x_mm * optical_res as f64 / MM_PER_INCH);
+            psx = origin_native
+                + frame_shift
+                + py_round(a.tl_x_mm * optical_res as f64 / MM_PER_INCH);
             let mut o = 1.max(py_round(a.width_mm * optical_res as f64 / MM_PER_INCH));
             if span_align > 1 && o >= span_align {
                 let align = lcm(span_align, 2 * factor);
@@ -240,7 +292,11 @@ fn geometry_from_mm(resolution: i64, model: &FilmModel, a: GeomArgs) -> Result<S
         pixel_startx = psx;
         pixel_endx = psx + opx;
         startx = 0.max(floor_div(psx * asic_dpi, optical_res) - offset);
-        usb_end_drop = if dbfm || end_inactive <= 0 { 0 } else { end_inactive * resolution / optical_res };
+        usb_end_drop = if dbfm || end_inactive <= 0 {
+            0
+        } else {
+            end_inactive * resolution / optical_res
+        };
     } else {
         let mut px = py_int(a.width_mm * asic_dpi as f64 / MM_PER_INCH);
         // GL845: align to 16 when xres==yres and xres>1200.
@@ -271,7 +327,11 @@ fn geometry_from_mm(resolution: i64, model: &FilmModel, a: GeomArgs) -> Result<S
     let shift_b = scaled_ld_shift(model.ld_shift_b, asic_dpi, model);
     let max_shift = shift_r.max(shift_g).max(shift_b);
     let (stagger_y, num_staggered) = stagger_for(asic_dpi, model);
-    let y_oversample = if g.is_some_and(|g| g.y_oversampled) { (optical_res / asic_dpi).max(1) } else { 1 };
+    let y_oversample = if g.is_some_and(|g| g.y_oversampled) {
+        (optical_res / asic_dpi).max(1)
+    } else {
+        1
+    };
     let mut lincnt_per_line = g.map_or(0, |g| g.image_lincnt_per_line);
     if dbfm || lincnt_per_line <= 0 {
         lincnt_per_line = y_oversample;

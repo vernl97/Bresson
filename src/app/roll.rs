@@ -72,7 +72,11 @@ pub fn film_fields(ui: &mut egui::Ui, id: &str, m: &mut FilmMetadata, notes: boo
 /// A muted sub-heading between the groups of film fields.
 fn group_heading(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);
-    ui.label(RichText::new(title).font(theme::medium(11.5)).color(theme::MUTED));
+    ui.label(
+        RichText::new(title)
+            .font(theme::medium(11.5))
+            .color(theme::MUTED),
+    );
 }
 
 /// A label above a single-line field that fills its column.

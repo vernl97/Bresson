@@ -9,6 +9,7 @@
 mod common;
 
 use common::caplog;
+use opticfilm::Scanner;
 use opticfilm::asic::registers::{gl128 as se, gl845 as r};
 use opticfilm::asic::{Asic, Gl128};
 use opticfilm::clock;
@@ -19,10 +20,11 @@ use opticfilm::scan::calibrate::Calibrator;
 use opticfilm::scan::geometry::compute_geometry;
 use opticfilm::scan::request::{ScanControl, ScanRequest};
 use opticfilm::scan::session_gl128::Gl128ScanSession;
-use opticfilm::usb::fake::{FakeCore, FakeDevice, FakeUsbTransport, MockScanner, MockScannerTransport};
+use opticfilm::usb::fake::{
+    FakeCore, FakeDevice, FakeUsbTransport, MockScanner, MockScannerTransport,
+};
 use opticfilm::usb::trace::UsbOp;
 use opticfilm::usb::transport::find_transport;
-use opticfilm::Scanner;
 
 const TINY: [f64; 4] = [0.0, 0.0, 0.08, 0.08];
 
@@ -41,7 +43,15 @@ type StuckTransport = FakeUsbTransport<StuckMock>;
 impl StuckMock {
     fn transport(stuck: bool) -> StuckTransport {
         let MockScannerTransport { core, dev } = MockScannerTransport::new();
-        FakeUsbTransport::with_device(core, StuckMock { inner: dev, stuck, reg02_armed: false, away: false })
+        FakeUsbTransport::with_device(
+            core,
+            StuckMock {
+                inner: dev,
+                stuck,
+                reg02_armed: false,
+                away: false,
+            },
+        )
     }
 
     fn stuck_status(&self, core: &mut FakeCore) {
@@ -92,7 +102,9 @@ fn se_model() -> FilmModel {
 
 fn asic_on(usb: StuckTransport, m: FilmModel) -> Gl128 {
     clock::use_virtual(1000.0);
-    let Asic::Gl128(mut a) = Asic::create(Box::new(usb), m).unwrap() else { panic!("not GL128") };
+    let Asic::Gl128(mut a) = Asic::create(Box::new(usb), m).unwrap() else {
+        panic!("not GL128")
+    };
     a.init(false).unwrap();
     a
 }
@@ -111,7 +123,9 @@ fn boots(a: &mut Gl128) -> usize {
             t.operation == UsbOp::ControlWrite
                 && t.value == Some(0x82)
                 && t.index == Some(0x01)
-                && t.data.as_ref().is_some_and(|d| d.len() >= 4 && u32::from_le_bytes([d[0], d[1], d[2], d[3]]) == 0x000F_FF00)
+                && t.data.as_ref().is_some_and(|d| {
+                    d.len() >= 4 && u32::from_le_bytes([d[0], d[1], d[2], d[3]]) == 0x000F_FF00
+                })
         })
         .count()
 }
@@ -123,7 +137,10 @@ fn reset_raises_when_motor_stuck_with_power_off() {
     let err = a.reset_stationary_scan_engine("AFE strip").unwrap_err();
     let msg = err.to_string();
     assert!(matches!(err, Error::ScannerStuck(_)), "{err:?}");
-    assert!(msg.contains("status 0xc9") && msg.contains("Switch the scanner off and on"), "{msg}");
+    assert!(
+        msg.contains("status 0xc9") && msg.contains("Switch the scanner off and on"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -157,20 +174,37 @@ fn reset_only_warns_when_carriage_is_not_at_home() {
 
 /// Motor feeds started (`0x0F = 0x01` register writes) on the mock so far.
 fn feeds(scanner: &mut Scanner) -> usize {
-    let Asic::Gl128(a) = scanner.asic().unwrap() else { panic!() };
+    let Asic::Gl128(a) = scanner.asic().unwrap() else {
+        panic!()
+    };
     mock(a)
         .core
         .transactions
         .iter()
-        .filter(|t| t.operation == UsbOp::ControlWrite && t.data.as_deref().is_some_and(|d| d.chunks_exact(2).any(|w| w == [0x0F, 0x01])))
+        .filter(|t| {
+            t.operation == UsbOp::ControlWrite
+                && t.data
+                    .as_deref()
+                    .is_some_and(|d| d.chunks_exact(2).any(|w| w == [0x0F, 0x01]))
+        })
         .count()
 }
 
 fn scan_on(stuck: bool, apply_calib: bool) -> (opticfilm::Result<opticfilm::ScanImage>, usize) {
     clock::use_virtual(1000.0);
     let dir = common::tmp_path(&format!("stuck-scan-{stuck}"));
-    let mut scanner = Scanner::open_fake(se_model(), Some(Box::new(StuckMock::transport(stuck))), Some(dir.join("c.json"))).unwrap();
-    let req = ScanRequest { resolution: 600, area: Some(TINY), apply_calib, ..Default::default() };
+    let mut scanner = Scanner::open_fake(
+        se_model(),
+        Some(Box::new(StuckMock::transport(stuck))),
+        Some(dir.join("c.json")),
+    )
+    .unwrap();
+    let req = ScanRequest {
+        resolution: 600,
+        area: Some(TINY),
+        apply_calib,
+        ..Default::default()
+    };
     let res = scanner.scan(&req, &mut ScanControl::default());
     let n = feeds(&mut scanner);
     scanner.close();
@@ -223,7 +257,10 @@ fn reinit_is_a_no_op_without_an_image_pass() {
 fn reinit_after_image_pass_boots_once_and_keeps_host_state() {
     let m83 = model("plustek-opticfilm-8300i-se");
     let mut a = asic_on(StuckMock::transport(false), m83.clone());
-    let afe = AfeFrontend { gains: [30, 25, 30], offsets: [16, 22, 20] };
+    let afe = AfeFrontend {
+        gains: [30, 25, 30],
+        offsets: [16, 22, 20],
+    };
     a.last_afe = Some(afe);
     a.asic_shading_ready = true;
     a.image_pass_since_init = true;
@@ -240,11 +277,16 @@ fn reinit_after_image_pass_boots_once_and_keeps_host_state() {
         .core
         .transactions
         .iter()
-        .filter(|t| t.operation == UsbOp::ControlWrite && t.request == Some(0x0C) && t.value == Some(0x8C))
+        .filter(|t| {
+            t.operation == UsbOp::ControlWrite && t.request == Some(0x0C) && t.value == Some(0x8C)
+        })
         .map(|t| t.data.as_ref().unwrap()[0])
         .collect();
     // Boot leaves the boot clock (0x0E), which runs the 8300i SE motor too fast.
-    assert_eq!(*clock.last().unwrap() as i64, m83.gl128.as_ref().unwrap().asic_clock_scan_0x8c);
+    assert_eq!(
+        *clock.last().unwrap() as i64,
+        m83.gl128.as_ref().unwrap().asic_clock_scan_0x8c
+    );
 }
 
 #[test]
@@ -253,7 +295,10 @@ fn image_configure_flags_the_asic_and_shading_configure_does_not() {
     a.motor_moves_enabled = false; // configure only, no feeds
     let mut session = Gl128ScanSession::new(se_model());
     let g = compute_geometry(600, &se_model(), Some(TINY)).unwrap();
-    let shading = opticfilm::scan::geometry::ScanGeometry { disable_buffer_full_move: true, ..g.clone() };
+    let shading = opticfilm::scan::geometry::ScanGeometry {
+        disable_buffer_full_move: true,
+        ..g.clone()
+    };
     session.configure(&mut a, &shading).unwrap();
     assert!(!a.image_pass_since_init);
     session.configure(&mut a, &g).unwrap();

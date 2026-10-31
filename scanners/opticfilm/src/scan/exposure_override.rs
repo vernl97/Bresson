@@ -13,7 +13,9 @@ pub const MAX_N_PASSES: i64 = 9;
 
 pub fn validate_n_passes(value: i64) -> Result<i64> {
     if !(1..=MAX_N_PASSES).contains(&value) {
-        return Err(Error::Value(format!("n_passes must be between 1 and {MAX_N_PASSES}, got {value}")));
+        return Err(Error::Value(format!(
+            "n_passes must be between 1 and {MAX_N_PASSES}, got {value}"
+        )));
     }
     Ok(value)
 }
@@ -22,7 +24,9 @@ pub fn validate_n_passes(value: i64) -> Result<i64> {
 pub fn validate_manual_exposure(value: Option<i64>, label: &str) -> Result<Option<i64>> {
     let Some(v) = value else { return Ok(None) };
     if v <= 0 {
-        return Err(Error::Value(format!("{label} must be a positive integer, got {v}")));
+        return Err(Error::Value(format!(
+            "{label} must be a positive integer, got {v}"
+        )));
     }
     if v > MAX_EXPOSURE_REGISTER {
         return Err(Error::Value(format!(

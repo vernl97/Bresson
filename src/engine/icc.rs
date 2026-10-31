@@ -28,10 +28,34 @@ impl Curve {
                 let pow = |v: f64| v.max(0.0).powf(*g);
                 match kind {
                     0 => pow(x),
-                    1 => if x >= -b / a { pow(a * x + b) } else { 0.0 },
-                    2 => if x >= -b / a { pow(a * x + b) + c } else { *c },
-                    3 => if x >= *d { pow(a * x + b) } else { c * x },
-                    _ => if x >= *d { pow(a * x + b) + e } else { c * x + f },
+                    1 => {
+                        if x >= -b / a {
+                            pow(a * x + b)
+                        } else {
+                            0.0
+                        }
+                    }
+                    2 => {
+                        if x >= -b / a {
+                            pow(a * x + b) + c
+                        } else {
+                            *c
+                        }
+                    }
+                    3 => {
+                        if x >= *d {
+                            pow(a * x + b)
+                        } else {
+                            c * x
+                        }
+                    }
+                    _ => {
+                        if x >= *d {
+                            pow(a * x + b) + e
+                        } else {
+                            c * x + f
+                        }
+                    }
                 }
             }
         }
@@ -50,7 +74,10 @@ impl Profile {
     /// Linear profile RGB → linear MelissaRGB, rows normalised so the
     /// profile's white stays neutral.
     pub fn to_melissa(&self) -> Mat3 {
-        let m = color::mat_mul(&color::mat_inv(&color::rgb_to_xyz(&color::MELISSA)), &self.to_xyz);
+        let m = color::mat_mul(
+            &color::mat_inv(&color::rgb_to_xyz(&color::MELISSA)),
+            &self.to_xyz,
+        );
         m.map(|r| {
             let s: f64 = r.iter().sum();
             r.map(|v| v / s)
@@ -139,7 +166,11 @@ pub fn parse(b: &[u8]) -> Option<Profile> {
             b.get(off..off.checked_add(len)?)
         })
     };
-    let (r, g, bl) = (xyz(tag(b"rXYZ")?)?, xyz(tag(b"gXYZ")?)?, xyz(tag(b"bXYZ")?)?);
+    let (r, g, bl) = (
+        xyz(tag(b"rXYZ")?)?,
+        xyz(tag(b"gXYZ")?)?,
+        xyz(tag(b"bXYZ")?)?,
+    );
     let to_xyz = [
         [r[0], g[0], bl[0]],
         [r[1], g[1], bl[1]],
@@ -193,7 +224,18 @@ mod tests {
     #[test]
     fn parametric_curves() {
         // sRGB as an ICC type-3 parametric curve.
-        let c = Curve::Para(3, [2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045, 0.0, 0.0]);
+        let c = Curve::Para(
+            3,
+            [
+                2.4,
+                1.0 / 1.055,
+                0.055 / 1.055,
+                1.0 / 12.92,
+                0.04045,
+                0.0,
+                0.0,
+            ],
+        );
         for i in 0..=10 {
             let x = i as f64 / 10.0;
             assert!((c.eval(x) - color::srgb_decode(x as f32) as f64).abs() < 1e-4);

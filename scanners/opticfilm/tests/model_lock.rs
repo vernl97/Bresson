@@ -10,8 +10,9 @@ use opticfilm::device::generated::{tables_8200i_se, tables_8300i_se};
 use opticfilm::device::{FilmModel, model_by_name};
 use opticfilm::error::Error;
 use opticfilm::scan::bringup::{
-    GeometryProfile, PRESCAN_DPI, bringup_scan_geometry, clamp_area, crop_scan_geometry, default_frame_crop_norm, effective_scan_area,
-    image_crop_to_scan_area, preview_safe_scan_area, scan_area_to_image_crop,
+    GeometryProfile, PRESCAN_DPI, bringup_scan_geometry, clamp_area, crop_scan_geometry,
+    default_frame_crop_norm, effective_scan_area, image_crop_to_scan_area, preview_safe_scan_area,
+    scan_area_to_image_crop,
 };
 use opticfilm::scan::geometry::{ScanGeometry, compute_calib_geometry, compute_geometry};
 use opticfilm::scan::pipeline::{count_usb_end_dummy_columns, trim_to_optical_span};
@@ -31,13 +32,21 @@ fn m(name: &str) -> FilmModel {
 }
 
 fn gl128(model: &FilmModel, armed: bool) -> Gl128 {
-    let Asic::Gl128(mut a) = Asic::create(Box::new(MockScannerTransport::new()), model.clone()).unwrap() else { panic!() };
+    let Asic::Gl128(mut a) =
+        Asic::create(Box::new(MockScannerTransport::new()), model.clone()).unwrap()
+    else {
+        panic!()
+    };
     a.motor_moves_enabled = armed;
     a
 }
 
 fn regs(a: &mut Gl128) -> std::collections::HashMap<u16, u8> {
-    find_transport::<MockScannerTransport>(a.protocol.transport()).unwrap().core.registers.clone()
+    find_transport::<MockScannerTransport>(a.protocol.transport())
+        .unwrap()
+        .core
+        .registers
+        .clone()
 }
 
 fn u24(r: &std::collections::HashMap<u16, u8>, a: u16) -> i64 {
@@ -64,7 +73,13 @@ fn identity_and_scan_flags() {
     let v2 = m(V2);
     assert_eq!(v2.g().feed_to_scan_steps, 13128);
     assert_eq!(v2.g().ladder_feed2_steps, 13128);
-    assert_eq!(v2.lperiod_by_dpi.as_ref().unwrap().get(&opticfilm::device::MdKey(None, Some(7200))), Some(&16035));
+    assert_eq!(
+        v2.lperiod_by_dpi
+            .as_ref()
+            .unwrap()
+            .get(&opticfilm::device::MdKey(None, Some(7200))),
+        Some(&16035)
+    );
 }
 
 #[test]
@@ -75,7 +90,11 @@ fn full_window_str_end_and_preview_safe_gate() {
         assert_eq!((area[0], area[2]), (0.0, 1.0));
         let want = if name == S83 { 1209 } else { 4836 };
         assert_eq!(meta.feed2, 13128, "{name}");
-        assert_eq!((meta.target_lincnt, meta.max_lincnt), (want, want), "{name}");
+        assert_eq!(
+            (meta.target_lincnt, meta.max_lincnt),
+            (want, want),
+            "{name}"
+        );
         let (g, meta) = bringup_scan_geometry(&model, 1200, GeometryProfile::PreviewSafe).unwrap();
         assert_eq!(g.lincnt_register(), want);
         assert!(g.lincnt_register() <= model.max_lincnt_for(meta.feed2, 1200));
@@ -83,7 +102,11 @@ fn full_window_str_end_and_preview_safe_gate() {
         assert_eq!(model.feed_to_scan_steps_for_area(None), 13128);
         assert!(full.lincnt_register() <= model.max_lincnt_for(13128, 1200));
         let (g, _) = bringup_scan_geometry(&model, 1800, GeometryProfile::PreviewSafe).unwrap();
-        assert_eq!((g.pixels, g.pixel_startx, g.pixel_endx, g.usb_end_drop), (2592, 242, 10610, 0), "{name}");
+        assert_eq!(
+            (g.pixels, g.pixel_startx, g.pixel_endx, g.usb_end_drop),
+            (2592, 242, 10610, 0),
+            "{name}"
+        );
         let mut starts = Vec::new();
         for dpi in [1200, 1800, 3600, 7200] {
             let (g, _) = bringup_scan_geometry(&model, dpi, GeometryProfile::PreviewSafe).unwrap();
@@ -102,7 +125,10 @@ fn full_window_str_end_and_preview_safe_gate() {
 fn session_windows_match_silverfast() {
     let model = m(SE);
     let g = compute_geometry(1200, &model, Some([0.0, 0.0, 1.0, 0.5])).unwrap();
-    assert_eq!((g.pixel_startx, g.pixel_endx, g.pixels, g.usb_end_drop), (242, 10610, 1728, 0));
+    assert_eq!(
+        (g.pixel_startx, g.pixel_endx, g.pixels, g.usb_end_drop),
+        (242, 10610, 1728, 0)
+    );
     assert_eq!(g.line_bytes, g.pixels * 6);
     // Session 04: STR 578 / 2478 px crop.
     let (str_, end, origin) = (578.0, 10490.0, 120.0);
@@ -166,9 +192,15 @@ fn crop_widths_are_even_and_snap_to_output_pixels() {
 #[test]
 fn lperiod_and_shading_clocks_at_7200() {
     assert_eq!(m(V2).line_period_for(7200, None), 16035);
-    assert_eq!(m(V2).shading_strip_clocks(7200, true, None), (0x10, 0x01, 0x01));
+    assert_eq!(
+        m(V2).shading_strip_clocks(7200, true, None),
+        (0x10, 0x01, 0x01)
+    );
     assert_eq!(m(S83).line_period_for(7200, None), 16035);
-    assert_eq!(m(S83).shading_strip_clocks(7200, true, None), (0x26, 0x02, 0x02));
+    assert_eq!(
+        m(S83).shading_strip_clocks(7200, true, None),
+        (0x26, 0x02, 0x02)
+    );
 }
 
 #[test]
@@ -195,19 +227,39 @@ fn image_feed2_uses_area_y1_when_area_missing() {
     for name in [SE, V2] {
         let model = m(name);
         let (geo, _) = crop_scan_geometry(&model, 1800, [0.1, 0.2, 0.9, 0.8]).unwrap();
-        assert_eq!(image_feed2_steps(&model, &geo, false), model.feed_to_scan_steps_for_area(geo.area));
-        let lost = ScanGeometry { area: None, ..geo.clone() };
+        assert_eq!(
+            image_feed2_steps(&model, &geo, false),
+            model.feed_to_scan_steps_for_area(geo.area)
+        );
+        let lost = ScanGeometry {
+            area: None,
+            ..geo.clone()
+        };
         let from_y1 = model.feed_to_scan_steps_for_area(Some([0.0, lost.area_y1, 1.0, 1.0]));
         assert_eq!(image_feed2_steps(&model, &lost, false), from_y1);
         assert_ne!(from_y1, model.feed_to_scan_steps_for_area(None));
     }
 }
 
-fn configure_exposure(name: &str, exposure: Option<i64>, long: bool, dpi: i64) -> std::collections::HashMap<u16, u8> {
+fn configure_exposure(
+    name: &str,
+    exposure: Option<i64>,
+    long: bool,
+    dpi: i64,
+) -> std::collections::HashMap<u16, u8> {
     let model = m(name);
     let mut a = gl128(&model, false);
     a.init(false).unwrap();
-    let geo = compute_geometry(dpi, &model, if dpi == 7200 { Some([0.0, 0.0, 1.0, 0.12]) } else { None }).unwrap();
+    let geo = compute_geometry(
+        dpi,
+        &model,
+        if dpi == 7200 {
+            Some([0.0, 0.0, 1.0, 0.12])
+        } else {
+            None
+        },
+    )
+    .unwrap();
     let mut s = Gl128ScanSession::new(model);
     s.set_pass(exposure, long, false);
     s.configure(&mut a, &geo).unwrap();
@@ -237,14 +289,28 @@ fn gl128_configure_exposure_registers() {
 fn infrared_combined_scan_is_refused_on_the_8100_v2() {
     let model = m(V2);
     let mut a = gl128(&model, true);
-    let req = ScanRequest { resolution: 150, area: Some([0.0, 0.0, 0.2, 0.1]), infrared: true, apply_calib: false, ..Default::default() };
-    let e = Gl128ScanSession::new(model).run(&mut a, None, &req, &mut ScanControl::default()).unwrap_err();
-    assert!(matches!(&e, Error::Scan(m) if m.contains("no infrared")), "{e:?}");
+    let req = ScanRequest {
+        resolution: 150,
+        area: Some([0.0, 0.0, 0.2, 0.1]),
+        infrared: true,
+        apply_calib: false,
+        ..Default::default()
+    };
+    let e = Gl128ScanSession::new(model)
+        .run(&mut a, None, &req, &mut ScanControl::default())
+        .unwrap_err();
+    assert!(
+        matches!(&e, Error::Scan(m) if m.contains("no infrared")),
+        "{e:?}"
+    );
 }
 
 /// `(ahb address, payload)` per `write_ahb` in the transaction log.
 fn ahb_writes(a: &mut Gl128) -> Vec<(u32, Vec<u8>)> {
-    let t = &find_transport::<MockScannerTransport>(a.protocol.transport()).unwrap().core.transactions;
+    let t = &find_transport::<MockScannerTransport>(a.protocol.transport())
+        .unwrap()
+        .core
+        .transactions;
     let mut out: Vec<(u32, Vec<u8>)> = Vec::new();
     for x in t {
         match x.operation {
@@ -252,7 +318,11 @@ fn ahb_writes(a: &mut Gl128) -> Vec<(u32, Vec<u8>)> {
                 let d = x.data.as_ref().unwrap();
                 out.push((u32::from_le_bytes([d[0], d[1], d[2], d[3]]), Vec::new()));
             }
-            UsbOp::BulkWrite => out.last_mut().unwrap().1.extend_from_slice(x.data.as_ref().unwrap()),
+            UsbOp::BulkWrite => out
+                .last_mut()
+                .unwrap()
+                .1
+                .extend_from_slice(x.data.as_ref().unwrap()),
             _ => {}
         }
     }
@@ -260,21 +330,47 @@ fn ahb_writes(a: &mut Gl128) -> Vec<(u32, Vec<u8>)> {
 }
 
 fn pack(w: &[i64]) -> Vec<u8> {
-    w.iter().flat_map(|&v| [(v & 0xFF) as u8, (v >> 8) as u8]).collect()
+    w.iter()
+        .flat_map(|&v| [(v & 0xFF) as u8, (v >> 8) as u8])
+        .collect()
 }
 
 #[test]
 fn positioning_uploads_slow_then_fast_ramps() {
     for (name, steps, fast, slow) in [
-        (SE, 13704, tables_8200i_se::SLOPE_TABLE_FAST, tables_8200i_se::SLOPE_TABLE_SLOW),
-        (V2, 13128, tables_8200i_se::SLOPE_TABLE_FAST, tables_8200i_se::SLOPE_TABLE_SLOW),
-        (S83, 13128, tables_8300i_se::SLOPE_TABLE_FAST, tables_8300i_se::SLOPE_TABLE_SLOW),
+        (
+            SE,
+            13704,
+            tables_8200i_se::SLOPE_TABLE_FAST,
+            tables_8200i_se::SLOPE_TABLE_SLOW,
+        ),
+        (
+            V2,
+            13128,
+            tables_8200i_se::SLOPE_TABLE_FAST,
+            tables_8200i_se::SLOPE_TABLE_SLOW,
+        ),
+        (
+            S83,
+            13128,
+            tables_8300i_se::SLOPE_TABLE_FAST,
+            tables_8300i_se::SLOPE_TABLE_SLOW,
+        ),
     ] {
         let model = m(name);
         let mut a = gl128(&model, true);
-        a.position_for_full_frame_scan(Some(steps), 60.0, None).unwrap();
-        let slope: Vec<Vec<u8>> = ahb_writes(&mut a).into_iter().filter(|(addr, _)| *addr == 0x1000_C000 || *addr == 0x1001_0000).map(|(_, d)| d).collect();
-        assert_eq!(slope, vec![pack(slow), pack(slow), pack(fast), pack(fast)], "{name}");
+        a.position_for_full_frame_scan(Some(steps), 60.0, None)
+            .unwrap();
+        let slope: Vec<Vec<u8>> = ahb_writes(&mut a)
+            .into_iter()
+            .filter(|(addr, _)| *addr == 0x1000_C000 || *addr == 0x1001_0000)
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(
+            slope,
+            vec![pack(slow), pack(slow), pack(fast), pack(fast)],
+            "{name}"
+        );
     }
 }
 
@@ -286,10 +382,17 @@ fn prescan_crop_mapping() {
     let want = clamp_area([0.6, 0.2, 0.9, 0.8]);
     assert!(ta.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-12));
     let back = scan_area_to_image_crop(&model, ta);
-    assert!(back.iter().zip([0.1, 0.2, 0.4, 0.8]).all(|(a, b)| (a - b).abs() < 1e-12));
+    assert!(
+        back.iter()
+            .zip([0.1, 0.2, 0.4, 0.8])
+            .all(|(a, b)| (a - b).abs() < 1e-12)
+    );
     let [x1, y1, x2, y2] = default_frame_crop_norm(&model);
     assert!(0.0 <= x1 && x1 < x2 && x2 <= 1.0 && 0.0 <= y1 && y1 < y2 && y2 <= 1.0);
-    assert_eq!(default_frame_crop_norm(&m("plustek-opticfilm-7600i-v1")), [0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(
+        default_frame_crop_norm(&m("plustek-opticfilm-7600i-v1")),
+        [0.0, 0.0, 1.0, 1.0]
+    );
 }
 
 #[test]
@@ -297,9 +400,17 @@ fn usb_end_dummy_handling() {
     let model = m(SE);
     let geo = compute_geometry(1800, &model, Some([0.2, 0.2, 0.6, 0.5])).unwrap();
     let wide = Array3::<u16>::zeros((8, geo.pixels as usize + 5, 3));
-    assert_eq!(trim_to_optical_span(wide, &geo).dim().1, geo.pixels as usize);
+    assert_eq!(
+        trim_to_optical_span(wide, &geo).dim().1,
+        geo.pixels as usize
+    );
     for dpi in [1200, 1800, 3600, 7200] {
-        assert_eq!(compute_geometry(dpi, &model, Some([0.15, 0.2, 0.7, 0.6])).unwrap().usb_end_drop, 0);
+        assert_eq!(
+            compute_geometry(dpi, &model, Some([0.15, 0.2, 0.7, 0.6]))
+                .unwrap()
+                .usb_end_drop,
+            0
+        );
     }
     let mut rgb = Array3::<u16>::from_elem((8, 80, 3), 18_000);
     assert_eq!(count_usb_end_dummy_columns(&rgb, 24, 2048.0), 0);

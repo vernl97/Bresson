@@ -48,17 +48,32 @@ impl Gl128Sim {
     /// A simulated scanner at home, idle, lamp off.
     pub fn transport() -> Gl128SimTransport {
         let MockScannerTransport { core, dev } = MockScannerTransport::new();
-        FakeUsbTransport::with_device(core, Gl128Sim { inner: dev, afe: HashMap::new(), strip: false, strip_pixels: 1, strip_offset: 0 })
+        FakeUsbTransport::with_device(
+            core,
+            Gl128Sim {
+                inner: dev,
+                afe: HashMap::new(),
+                strip: false,
+                strip_pixels: 1,
+                strip_offset: 0,
+            },
+        )
     }
 
     fn u24(core: &FakeCore, addr: u16) -> i64 {
-        ((core.reg(addr) as i64) << 16) | ((core.reg(addr + 1) as i64) << 8) | core.reg(addr + 2) as i64
+        ((core.reg(addr) as i64) << 16)
+            | ((core.reg(addr + 1) as i64) << 8)
+            | core.reg(addr + 2) as i64
     }
 
     fn gain_offset(&self, ch: usize) -> (i64, i64) {
         let code = (self.afe.get(&(0x02 + ch as u8)).copied().unwrap_or(0) & 0x3F) as i64;
         let raw = self.afe.get(&(0x05 + ch as u8)).copied().unwrap_or(0);
-        let off = if raw & 0x100 != 0 { -((raw & 0xFF) as i64) } else { (raw & 0xFF) as i64 };
+        let off = if raw & 0x100 != 0 {
+            -((raw & 0xFF) as i64)
+        } else {
+            (raw & 0xFF) as i64
+        };
         (code, off)
     }
 
@@ -91,7 +106,10 @@ impl FakeDevice for Gl128Sim {
 
     fn after_register_write(&mut self, core: &mut FakeCore, addr: u16, value: u8) {
         if addr == 0x5E {
-            self.afe.insert(core.reg(0x51), ((core.reg(0x5D) as u16) << 8) | value as u16);
+            self.afe.insert(
+                core.reg(0x51),
+                ((core.reg(0x5D) as u16) << 8) | value as u16,
+            );
             return;
         }
         if addr == 0x0F && value == 0x01 && core.reg(0x02) & 0x10 == 0 {
@@ -129,7 +147,9 @@ impl FakeDevice for Gl128Sim {
             let col = (sample / 3) % n;
             let x = start + col * span / n;
             let (code, off) = params[ch];
-            let v = ((Self::signal(core, ch, x) + BLACK[ch]) * 378 / (378 - 5 * code) + OFFSET_STEP * off).clamp(0, 0xFFFF);
+            let v = ((Self::signal(core, ch, x) + BLACK[ch]) * 378 / (378 - 5 * code)
+                + OFFSET_STEP * off)
+                .clamp(0, 0xFFFF);
             out[i] = (v & 0xFF) as u8;
             out[i + 1] = (v >> 8) as u8;
             i += 2;

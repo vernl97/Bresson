@@ -9,7 +9,7 @@
 use ndarray::{Array3, ArrayView3, s};
 
 use crate::error::{Error, Result};
-use crate::num::{lstsq_line, median, median_f32, quantiles_sorted_f32, sort_f32, linspace};
+use crate::num::{linspace, lstsq_line, median, median_f32, quantiles_sorted_f32, sort_f32};
 use crate::pass_align::align_pass_to_reference;
 
 const FULL_SCALE: f64 = 65535.0;
@@ -51,7 +51,11 @@ pub struct FusionStats {
 
 impl FusionStats {
     pub fn zero_weight_fraction(&self) -> f64 {
-        if self.total_pixels == 0 { 0.0 } else { self.zero_weight_pixels as f64 / self.total_pixels as f64 }
+        if self.total_pixels == 0 {
+            0.0
+        } else {
+            self.zero_weight_pixels as f64 / self.total_pixels as f64
+        }
     }
 }
 
@@ -67,10 +71,18 @@ pub struct PassMergeStats {
 
 impl PassMergeStats {
     pub fn zero_weight_fraction(&self) -> f64 {
-        if self.total_pixels == 0 { 0.0 } else { self.zero_weight_pixels as f64 / self.total_pixels as f64 }
+        if self.total_pixels == 0 {
+            0.0
+        } else {
+            self.zero_weight_pixels as f64 / self.total_pixels as f64
+        }
     }
     pub fn outlier_fraction(&self) -> f64 {
-        if self.total_pixels == 0 { 0.0 } else { self.outlier_pixels as f64 / self.total_pixels as f64 }
+        if self.total_pixels == 0 {
+            0.0
+        } else {
+            self.outlier_pixels as f64 / self.total_pixels as f64
+        }
     }
 }
 
@@ -91,7 +103,8 @@ pub fn estimate_pg_noise_params(flats: &[ArrayView3<u16>], patch: usize) -> (f64
     let (mut means, mut vars) = (Vec::new(), Vec::new());
     for flat in flats {
         let (h, w, c) = flat.dim();
-        let lum = |y: usize, x: usize| (0..c).map(|k| flat[[y, x, k]] as f64).sum::<f64>() / c as f64;
+        let lum =
+            |y: usize, x: usize| (0..c).map(|k| flat[[y, x, k]] as f64).sum::<f64>() / c as f64;
         if h < patch || w < patch {
             continue;
         }
@@ -99,7 +112,10 @@ pub fn estimate_pg_noise_params(flats: &[ArrayView3<u16>], patch: usize) -> (f64
         while y + patch <= h {
             let mut x = 0;
             while x + patch <= w {
-                let vals: Vec<f64> = (y..y + patch).flat_map(|yy| (x..x + patch).map(move |xx| (yy, xx))).map(|(yy, xx)| lum(yy, xx)).collect();
+                let vals: Vec<f64> = (y..y + patch)
+                    .flat_map(|yy| (x..x + patch).map(move |xx| (yy, xx)))
+                    .map(|(yy, xx)| lum(yy, xx))
+                    .collect();
                 let m = vals.iter().sum::<f64>() / vals.len() as f64;
                 let v = vals.iter().map(|t| (t - m).powi(2)).sum::<f64>() / vals.len() as f64;
                 means.push(m);
@@ -112,8 +128,12 @@ pub fn estimate_pg_noise_params(flats: &[ArrayView3<u16>], patch: usize) -> (f64
     if means.len() < 8 {
         return (SNR_ALPHA, SNR_BETA);
     }
-    let (m, v): (Vec<f64>, Vec<f64>) =
-        means.iter().zip(&vars).filter(|(m, v)| **m > 50.0 && **m < 0.9 * FULL_SCALE && v.is_finite()).map(|(a, b)| (*a, *b)).unzip();
+    let (m, v): (Vec<f64>, Vec<f64>) = means
+        .iter()
+        .zip(&vars)
+        .filter(|(m, v)| **m > 50.0 && **m < 0.9 * FULL_SCALE && v.is_finite())
+        .map(|(a, b)| (*a, *b))
+        .unzip();
     if m.len() < 8 {
         return (SNR_ALPHA, SNR_BETA);
     }
@@ -122,22 +142,61 @@ pub fn estimate_pg_noise_params(flats: &[ArrayView3<u16>], patch: usize) -> (f64
 }
 
 /// Fuse short and long RGB negatives into one uint16 frame (SNR / IVW).
-pub fn merge_exposures(short: &Array3<u16>, long: &Array3<u16>, exposure_short: i64, exposure_long: i64, align_shift: Option<(f64, f64)>, alpha: Option<f64>, beta: Option<f64>) -> Result<Array3<u16>> {
-    Ok(merge_exposures_result(short, long, exposure_short, exposure_long, align_shift, alpha, beta)?.rgb)
+pub fn merge_exposures(
+    short: &Array3<u16>,
+    long: &Array3<u16>,
+    exposure_short: i64,
+    exposure_long: i64,
+    align_shift: Option<(f64, f64)>,
+    alpha: Option<f64>,
+    beta: Option<f64>,
+) -> Result<Array3<u16>> {
+    Ok(merge_exposures_result(
+        short,
+        long,
+        exposure_short,
+        exposure_long,
+        align_shift,
+        alpha,
+        beta,
+    )?
+    .rgb)
 }
 
 /// Like [`merge_exposures`] but returns weight stats.
-pub fn merge_exposures_result(short: &Array3<u16>, long: &Array3<u16>, exposure_short: i64, exposure_long: i64, align_shift: Option<(f64, f64)>, alpha: Option<f64>, beta: Option<f64>) -> Result<MergeResult> {
+pub fn merge_exposures_result(
+    short: &Array3<u16>,
+    long: &Array3<u16>,
+    exposure_short: i64,
+    exposure_long: i64,
+    align_shift: Option<(f64, f64)>,
+    alpha: Option<f64>,
+    beta: Option<f64>,
+) -> Result<MergeResult> {
     if short.dim() != long.dim() || short.dim().2 != 3 {
-        return Err(Error::Value(format!("expected matching HxWx3 arrays, got {:?} and {:?}", short.dim(), long.dim())));
+        return Err(Error::Value(format!(
+            "expected matching HxWx3 arrays, got {:?} and {:?}",
+            short.dim(),
+            long.dim()
+        )));
     }
     if exposure_long <= 0 || exposure_short <= 0 {
         return Err(Error::Value("exposure values must be positive".into()));
     }
     let (long_a, shift_used) = align_pass_to_reference(short, long, align_shift)?;
     let usb_ratio = exposure_long as f64 / exposure_short as f64;
-    let (rgb, stats) = merge_snr(short, &long_a, usb_ratio, linear_shift_var_scale(shift_used), alpha, beta);
-    Ok(MergeResult { rgb, fusion_stats: Some(MergeStats::Fusion(stats)) })
+    let (rgb, stats) = merge_snr(
+        short,
+        &long_a,
+        usb_ratio,
+        linear_shift_var_scale(shift_used),
+        alpha,
+        beta,
+    );
+    Ok(MergeResult {
+        rgb,
+        fusion_stats: Some(MergeStats::Fusion(stats)),
+    })
 }
 
 /// Stride down large frames for global ratio / median estimates (`a[::sy, ::sx]`).
@@ -188,7 +247,9 @@ fn estimate_exposure_ratio(a: &Array3<f32>, b: &Array3<f32>, usb_ratio: f64) -> 
     let lo = (0.01 * FULL_SCALE) as f32;
     let hi = (0.85 * FULL_SCALE) as f32;
     let (h, w, _) = a.dim();
-    let mean3 = |arr: &Array3<f32>, y: usize, x: usize| (arr[[y, x, 0]] + arr[[y, x, 1]] + arr[[y, x, 2]]) / 3.0;
+    let mean3 = |arr: &Array3<f32>, y: usize, x: usize| {
+        (arr[[y, x, 0]] + arr[[y, x, 1]] + arr[[y, x, 2]]) / 3.0
+    };
     let mut lum_ratios = Vec::new();
     for y in 0..h {
         for x in 0..w {
@@ -198,7 +259,11 @@ fn estimate_exposure_ratio(a: &Array3<f32>, b: &Array3<f32>, usb_ratio: f64) -> 
             }
         }
     }
-    let fallback = if lum_ratios.len() >= 100 { median_f32(lum_ratios) } else { usb_ratio as f32 };
+    let fallback = if lum_ratios.len() >= 100 {
+        median_f32(lum_ratios)
+    } else {
+        usb_ratio as f32
+    };
     let mut ratios = [fallback; 3];
     for (c, r) in ratios.iter_mut().enumerate() {
         let mut v = Vec::new();
@@ -218,7 +283,14 @@ fn estimate_exposure_ratio(a: &Array3<f32>, b: &Array3<f32>, usb_ratio: f64) -> 
 }
 
 /// Per-channel Poisson-Gaussian `α`, `β` from the aligned pass pair; NaN where the fit fails.
-fn fit_pg_noise_from_pair(a: &Array3<f32>, b: &Array3<f32>, r: [f32; 3], long_var_scale: f64, floor: f64, clip_start: f64) -> ([f64; 3], [f64; 3]) {
+fn fit_pg_noise_from_pair(
+    a: &Array3<f32>,
+    b: &Array3<f32>,
+    r: [f32; 3],
+    long_var_scale: f64,
+    floor: f64,
+    clip_start: f64,
+) -> ([f64; 3], [f64; 3]) {
     let mut alpha = [f64::NAN; 3];
     let mut beta = [f64::NAN; 3];
     let cs = clip_start as f32;
@@ -226,7 +298,11 @@ fn fit_pg_noise_from_pair(a: &Array3<f32>, b: &Array3<f32>, r: [f32; 3], long_va
         let rc = r[c] as f64;
         let rc32 = rc as f32;
         let (mut level, mut d) = (Vec::new(), Vec::new());
-        for (ac, bc) in a.slice(s![.., .., c]).iter().zip(b.slice(s![.., .., c]).iter()) {
+        for (ac, bc) in a
+            .slice(s![.., .., c])
+            .iter()
+            .zip(b.slice(s![.., .., c]).iter())
+        {
             let l = bc / rc32;
             if l > floor as f32 && *bc < cs && *ac < cs {
                 level.push(l);
@@ -247,14 +323,24 @@ fn fit_pg_noise_from_pair(a: &Array3<f32>, b: &Array3<f32>, r: [f32; 3], long_va
             .collect();
         let (mut xs, mut vs, mut ns) = (Vec::new(), Vec::new(), Vec::new());
         for k in 0..NOISE_FIT_BINS {
-            let dk: Vec<f32> = idx.iter().zip(&d).filter(|(i, _)| **i == k).map(|(_, &v)| v).collect();
+            let dk: Vec<f32> = idx
+                .iter()
+                .zip(&d)
+                .filter(|(i, _)| **i == k)
+                .map(|(_, &v)| v)
+                .collect();
             let n = dk.len();
             if n < NOISE_FIT_MIN_PER_BIN {
                 continue;
             }
             let med = median_f32(dk.clone());
             let mad = median_f32(dk.iter().map(|v| (v - med).abs()).collect()) as f64;
-            let lv: Vec<f32> = idx.iter().zip(&level).filter(|(i, _)| **i == k).map(|(_, &v)| v).collect();
+            let lv: Vec<f32> = idx
+                .iter()
+                .zip(&level)
+                .filter(|(i, _)| **i == k)
+                .map(|(_, &v)| v)
+                .collect();
             xs.push(median_f32(lv) as f64);
             vs.push((1.4826 * mad).powi(2));
             ns.push(n as f64);
@@ -267,11 +353,17 @@ fn fit_pg_noise_from_pair(a: &Array3<f32>, b: &Array3<f32>, r: [f32; 3], long_va
         for _ in 0..3 {
             let sw: Vec<f64> = ns.iter().zip(&pred).map(|(n, p)| n.sqrt() / p).collect();
             coef = lstsq_line(&xs, &vs, &sw);
-            pred = xs.iter().map(|x| (coef[0] * x + coef[1]).max(1e-6)).collect();
+            pred = xs
+                .iter()
+                .map(|x| (coef[0] * x + coef[1]).max(1e-6))
+                .collect();
         }
         let a_fit = coef[0] / (1.0 + long_var_scale / rc);
         let b_fit = coef[1] / (1.0 + long_var_scale / (rc * rc));
-        if !(a_fit.is_finite() && b_fit.is_finite()) || !(NOISE_FIT_ALPHA_MIN..=NOISE_FIT_ALPHA_MAX).contains(&a_fit) || b_fit > NOISE_FIT_BETA_MAX {
+        if !(a_fit.is_finite() && b_fit.is_finite())
+            || !(NOISE_FIT_ALPHA_MIN..=NOISE_FIT_ALPHA_MAX).contains(&a_fit)
+            || b_fit > NOISE_FIT_BETA_MAX
+        {
             continue;
         }
         alpha[c] = a_fit;
@@ -295,7 +387,23 @@ struct Px {
 
 /// One pixel's quantities: (xa, xb, ca, cb, va, vb, lum_xa, lum_xb, va_lum, vb_lum, has).
 #[allow(clippy::type_complexity)]
-fn pixel_terms(p: &Px, a: [f32; 3], b: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3], [f32; 3], [f32; 3], [f64; 3], f32, f32, f32, f64, bool) {
+fn pixel_terms(
+    p: &Px,
+    a: [f32; 3],
+    b: [f32; 3],
+) -> (
+    [f32; 3],
+    [f32; 3],
+    [f32; 3],
+    [f32; 3],
+    [f32; 3],
+    [f64; 3],
+    f32,
+    f32,
+    f32,
+    f64,
+    bool,
+) {
     let xb = [0, 1, 2].map(|c| b[c] / p.r[c]);
     let ca = a.map(|v| smooth_confidence(v, p.floor, p.clip_start, p.clip_end));
     let cb = b.map(|v| smooth_confidence(v, p.floor, p.clip_start, p.clip_end));
@@ -308,8 +416,11 @@ fn pixel_terms(p: &Px, a: [f32; 3], b: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3
     let lum_xa = (conf[0] * a[0] + conf[1] * a[1] + conf[2] * a[2]) / wsafe;
     let lum_xb = (conf[0] * xb[0] + conf[1] * xb[1] + conf[2] * xb[2]) / wsafe;
     let va_lum = (conf[0] * va[0] + conf[1] * va[1] + conf[2] * va[2]) / wsafe;
-    let vb_lum = (conf[0] as f64 * vb[0] + conf[1] as f64 * vb[1] + conf[2] as f64 * vb[2]) / wsafe as f64;
-    (xb, ca, cb, conf, va, vb, lum_xa, lum_xb, va_lum, vb_lum, has)
+    let vb_lum =
+        (conf[0] as f64 * vb[0] + conf[1] as f64 * vb[1] + conf[2] as f64 * vb[2]) / wsafe as f64;
+    (
+        xb, ca, cb, conf, va, vb, lum_xa, lum_xb, va_lum, vb_lum, has,
+    )
 }
 
 fn z_of(lum_xa: f32, lum_xb: f32, va_lum: f32, vb_lum: f64) -> f64 {
@@ -317,7 +428,14 @@ fn z_of(lum_xa: f32, lum_xb: f32, va_lum: f32, vb_lum: f64) -> f64 {
 }
 
 /// Clipping-aware inverse-variance fusion in short-exposure radiometric scale.
-fn merge_snr(short: &Array3<u16>, long: &Array3<u16>, usb_ratio: f64, long_var_scale: f64, alpha: Option<f64>, beta: Option<f64>) -> (Array3<u16>, FusionStats) {
+fn merge_snr(
+    short: &Array3<u16>,
+    long: &Array3<u16>,
+    usb_ratio: f64,
+    long_var_scale: f64,
+    alpha: Option<f64>,
+    beta: Option<f64>,
+) -> (Array3<u16>, FusionStats) {
     let (floor, clip_start, clip_end) = (SNR_FLOOR, SNR_CLIP_START, SNR_CLIP_END);
     let a_sub = subsample(short);
     let b_sub = subsample(long);
@@ -325,9 +443,14 @@ fn merge_snr(short: &Array3<u16>, long: &Array3<u16>, usb_ratio: f64, long_var_s
     let (alpha_c, beta_c, fitted) = match (alpha, beta) {
         (Some(a), Some(b)) => ([a; 3], [b; 3], [false; 3]),
         _ => {
-            let (fa, fb) = fit_pg_noise_from_pair(&a_sub, &b_sub, r, long_var_scale, floor, clip_start);
+            let (fa, fb) =
+                fit_pg_noise_from_pair(&a_sub, &b_sub, r, long_var_scale, floor, clip_start);
             let fitted = fa.map(f64::is_finite);
-            ([0, 1, 2].map(|c| if fitted[c] { fa[c] } else { SNR_ALPHA }), [0, 1, 2].map(|c| if fitted[c] { fb[c] } else { SNR_BETA }), fitted)
+            (
+                [0, 1, 2].map(|c| if fitted[c] { fa[c] } else { SNR_ALPHA }),
+                [0, 1, 2].map(|c| if fitted[c] { fb[c] } else { SNR_BETA }),
+                fitted,
+            )
         }
     };
     let px = Px {
@@ -367,7 +490,8 @@ fn merge_snr(short: &Array3<u16>, long: &Array3<u16>, usb_ratio: f64, long_var_s
             for x in 0..w {
                 let a = [0, 1, 2].map(|c| short[[y, x, c]] as f32);
                 let b = [0, 1, 2].map(|c| long[[y, x, c]] as f32);
-                let (xb, ca, cb, conf, va, vb, lum_xa, lum_xb, va_lum, vb_lum, has) = pixel_terms(&px, a, b);
+                let (xb, ca, cb, conf, va, vb, lum_xa, lum_xb, va_lum, vb_lum, has) =
+                    pixel_terms(&px, a, b);
                 let z_local = z_of(lum_xa, lum_xb, va_lum, vb_lum) - z_median;
                 let c_res = residual_confidence(z_local);
                 let gate = (conf[0] + conf[1] + conf[2]) / 3.0;
@@ -375,9 +499,17 @@ fn merge_snr(short: &Array3<u16>, long: &Array3<u16>, usb_ratio: f64, long_var_s
                 let wa = [0, 1, 2].map(|c| ca[c] / va[c].max(1e-12));
                 let wb = [0, 1, 2].map(|c| cb[c] as f64 / vb[c].max(1e-12));
                 // `wa * xa` is float32 in numpy; `wb` (and so the sum) is float64.
-                let ivw = [0, 1, 2].map(|c| ((wa[c] * a[c]) as f64 + wb[c] * xb[c] as f64) / (wa[c] as f64 + wb[c]).max(1e-12));
-                let lum_diff = if has { (lum_xa - lum_xb).abs() as f64 } else { 0.0 };
-                let spread = ivw.iter().cloned().fold(f64::MIN, f64::max) - ivw.iter().cloned().fold(f64::MAX, f64::min);
+                let ivw = [0, 1, 2].map(|c| {
+                    ((wa[c] * a[c]) as f64 + wb[c] * xb[c] as f64)
+                        / (wa[c] as f64 + wb[c]).max(1e-12)
+                });
+                let lum_diff = if has {
+                    (lum_xa - lum_xb).abs() as f64
+                } else {
+                    0.0
+                };
+                let spread = ivw.iter().cloned().fold(f64::MIN, f64::max)
+                    - ivw.iter().cloned().fold(f64::MAX, f64::min);
                 let misaligned = lum_diff > LUMA_DISAGREE_TAU && spread > IVW_CHANNEL_SPREAD_TAU;
                 let mut all_zero = true;
                 for c in 0..3 {
@@ -388,7 +520,13 @@ fn merge_snr(short: &Array3<u16>, long: &Array3<u16>, usb_ratio: f64, long_var_s
                     let both_zero = ca[c] + cb[c] <= 1e-6;
                     all_zero &= both_zero;
                     if both_zero {
-                        o = if a[c] >= cs32 { a[c] as f64 } else if b[c] < cs32 { xb[c] as f64 } else { 0.0 };
+                        o = if a[c] >= cs32 {
+                            a[c] as f64
+                        } else if b[c] < cs32 {
+                            xb[c] as f64
+                        } else {
+                            0.0
+                        };
                     }
                     out[[y, x, c]] = o.clamp(0.0, 65535.0) as u16;
                     wa_band += wa[c] as f64;
@@ -424,18 +562,31 @@ fn merge_snr(short: &Array3<u16>, long: &Array3<u16>, usb_ratio: f64, long_var_s
 /// Stack N same-exposure captures for an SNR gain (no exposure fusion).
 ///
 /// Frames must already be aligned to a common reference.
-pub fn merge_n_passes(frames: &[Array3<u16>], alpha: Option<f64>, beta: Option<f64>) -> Result<MergeResult> {
+pub fn merge_n_passes(
+    frames: &[Array3<u16>],
+    alpha: Option<f64>,
+    beta: Option<f64>,
+) -> Result<MergeResult> {
     let Some(reference) = frames.first() else {
-        return Err(Error::Value("merge_n_passes needs >= 1 frame, got 0".into()));
+        return Err(Error::Value(
+            "merge_n_passes needs >= 1 frame, got 0".into(),
+        ));
     };
     let alpha = alpha.unwrap_or(SNR_ALPHA) as f32;
     let beta = beta.unwrap_or(SNR_BETA) as f32;
     if reference.dim().2 != 3 {
-        return Err(Error::Value(format!("expected HxWx3 arrays, got {:?}", reference.dim())));
+        return Err(Error::Value(format!(
+            "expected HxWx3 arrays, got {:?}",
+            reference.dim()
+        )));
     }
     for (i, f) in frames.iter().enumerate().skip(1) {
         if f.dim() != reference.dim() {
-            return Err(Error::Value(format!("frame {i} shape {:?} does not match frame 0 shape {:?}", f.dim(), reference.dim())));
+            return Err(Error::Value(format!(
+                "frame {i} shape {:?} does not match frame 0 shape {:?}",
+                f.dim(),
+                reference.dim()
+            )));
         }
     }
     let (h, w, _) = reference.dim();
@@ -443,7 +594,13 @@ pub fn merge_n_passes(frames: &[Array3<u16>], alpha: Option<f64>, beta: Option<f
     if frames.len() == 1 {
         return Ok(MergeResult {
             rgb: reference.clone(),
-            fusion_stats: Some(MergeStats::Pass(PassMergeStats { n_frames: 1, total_pixels: total, mean_confidence: 1.0, outlier_pixels: 0, zero_weight_pixels: 0 })),
+            fusion_stats: Some(MergeStats::Pass(PassMergeStats {
+                n_frames: 1,
+                total_pixels: total,
+                mean_confidence: 1.0,
+                outlier_pixels: 0,
+                zero_weight_pixels: 0,
+            })),
         });
     }
     let n = frames.len();
@@ -459,7 +616,8 @@ pub fn merge_n_passes(frames: &[Array3<u16>], alpha: Option<f64>, beta: Option<f
             for x in 0..w {
                 for (i, f) in frames.iter().enumerate() {
                     xs[i] = [0, 1, 2].map(|c| f[[y, x, c]] as f32);
-                    cs[i] = xs[i].map(|v| smooth_confidence(v, SNR_FLOOR, SNR_CLIP_START, SNR_CLIP_END));
+                    cs[i] = xs[i]
+                        .map(|v| smooth_confidence(v, SNR_FLOOR, SNR_CLIP_START, SNR_CLIP_END));
                     lum[i] = (xs[i][0] + xs[i][1] + xs[i][2]) / 3.0;
                 }
                 let luma_median = median_f32(lum.clone());
@@ -470,7 +628,11 @@ pub fn merge_n_passes(frames: &[Array3<u16>], alpha: Option<f64>, beta: Option<f
                     outlier_any |= is_outlier;
                     weights[i] = [0, 1, 2].map(|c| {
                         let variance = alpha * xs[i][c].max(0.0) + beta;
-                        if is_outlier { 0.0 } else { cs[i][c] / variance.max(1e-12) }
+                        if is_outlier {
+                            0.0
+                        } else {
+                            cs[i][c] / variance.max(1e-12)
+                        }
                     });
                 }
                 let mut no_weight_all = true;

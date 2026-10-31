@@ -14,8 +14,9 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    Backend, CAP_INACTIVE, CAP_SOFT_SELECT, Constraint, DeviceInfo, Error, Frame, Handle, INFO_RELOAD_OPTIONS, OptionInfo,
-    OptionType, Parameters, Result, Status, Unit, Value, f64_to_fixed,
+    Backend, CAP_INACTIVE, CAP_SOFT_SELECT, Constraint, DeviceInfo, Error, Frame, Handle,
+    INFO_RELOAD_OPTIONS, OptionInfo, OptionType, Parameters, Result, Status, Unit, Value,
+    f64_to_fixed,
 };
 
 pub const DEVICE_NAME: &str = "nlp:simulated-flatbed";
@@ -66,7 +67,10 @@ pub struct FakeSane {
 
 impl FakeSane {
     pub fn new(config: FakeConfig) -> Self {
-        Self { config, log: Arc::default() }
+        Self {
+            config,
+            log: Arc::default(),
+        }
     }
 
     /// Shared view of what the device saw.
@@ -87,9 +91,15 @@ impl Backend for FakeSane {
 
     fn open(&mut self, name: &str) -> Result<Box<dyn Handle>> {
         if name != DEVICE_NAME {
-            return Err(Error::Status { call: "sane_open", status: Status::Inval });
+            return Err(Error::Status {
+                call: "sane_open",
+                status: Status::Inval,
+            });
         }
-        Ok(Box::new(FakeHandle::new(self.config.clone(), self.log.clone())))
+        Ok(Box::new(FakeHandle::new(
+            self.config.clone(),
+            self.log.clone(),
+        )))
     }
 }
 
@@ -140,28 +150,91 @@ impl FakeHandle {
     }
 
     fn descriptors(&self) -> Vec<OptionInfo> {
-        let strings = |v: &[&str]| Constraint::StringList(v.iter().map(|s| s.to_string()).collect());
-        let opt = |index: i32, name: &str, value_type: OptionType, unit: Unit, constraint: Constraint, active: bool| OptionInfo {
+        let strings =
+            |v: &[&str]| Constraint::StringList(v.iter().map(|s| s.to_string()).collect());
+        let opt = |index: i32,
+                   name: &str,
+                   value_type: OptionType,
+                   unit: Unit,
+                   constraint: Constraint,
+                   active: bool| OptionInfo {
             index,
             name: name.into(),
             title: name.into(),
             value_type,
             unit,
-            size: if value_type == OptionType::String { 32 } else { 4 },
+            size: if value_type == OptionType::String {
+                32
+            } else {
+                4
+            },
             words: 1,
             cap: CAP_SOFT_SELECT | if active { 0 } else { CAP_INACTIVE },
             constraint,
         };
         let (w, h) = self.bed();
-        let range = |max: f64| Constraint::Range { min: 0, max: f64_to_fixed(max), quant: 0 };
+        let range = |max: f64| Constraint::Range {
+            min: 0,
+            max: f64_to_fixed(max),
+            quant: 0,
+        };
         vec![
-            opt(1, "mode", OptionType::String, Unit::None, strings(&MODES), true),
-            opt(2, "depth", OptionType::Int, Unit::Bit, Constraint::WordList(vec![8, 16]), true),
-            opt(3, "resolution", OptionType::Int, Unit::Dpi, Constraint::WordList(RESOLUTIONS.to_vec()), true),
-            opt(4, "source", OptionType::String, Unit::None, strings(&SOURCES), true),
-            opt(5, "film-type", OptionType::String, Unit::None, strings(&FILM_TYPES), self.tpu()),
-            opt(6, "custom-gamma", OptionType::Bool, Unit::None, Constraint::None, true),
-            opt(7, "preview", OptionType::Bool, Unit::None, Constraint::None, true),
+            opt(
+                1,
+                "mode",
+                OptionType::String,
+                Unit::None,
+                strings(&MODES),
+                true,
+            ),
+            opt(
+                2,
+                "depth",
+                OptionType::Int,
+                Unit::Bit,
+                Constraint::WordList(vec![8, 16]),
+                true,
+            ),
+            opt(
+                3,
+                "resolution",
+                OptionType::Int,
+                Unit::Dpi,
+                Constraint::WordList(RESOLUTIONS.to_vec()),
+                true,
+            ),
+            opt(
+                4,
+                "source",
+                OptionType::String,
+                Unit::None,
+                strings(&SOURCES),
+                true,
+            ),
+            opt(
+                5,
+                "film-type",
+                OptionType::String,
+                Unit::None,
+                strings(&FILM_TYPES),
+                self.tpu(),
+            ),
+            opt(
+                6,
+                "custom-gamma",
+                OptionType::Bool,
+                Unit::None,
+                Constraint::None,
+                true,
+            ),
+            opt(
+                7,
+                "preview",
+                OptionType::Bool,
+                Unit::None,
+                Constraint::None,
+                true,
+            ),
             opt(8, "tl-x", OptionType::Fixed, Unit::Mm, range(w), true),
             opt(9, "tl-y", OptionType::Fixed, Unit::Mm, range(h), true),
             opt(10, "br-x", OptionType::Fixed, Unit::Mm, range(w), true),
@@ -171,7 +244,10 @@ impl FakeHandle {
 
     fn size(&self) -> (usize, usize) {
         let px = |mm: f64| ((mm / 25.4) * self.resolution as f64).round().max(1.0) as usize;
-        (px(self.area[2] - self.area[0]), px(self.area[3] - self.area[1]))
+        (
+            px(self.area[2] - self.area[0]),
+            px(self.area[3] - self.area[1]),
+        )
     }
 
     /// Transmittance (or reflectance) at a bed position, per channel, 0..1.
@@ -190,7 +266,11 @@ impl FakeHandle {
         }
         // A scene: horizontal light falloff, a bright disc, per-frame exposure.
         let (u, v) = ((x - FRAME_X.0) / (FRAME_X.1 - FRAME_X.0), fy / FRAME_H);
-        let disc = if (u - 0.5).powi(2) + (v - 0.45).powi(2) < 0.06 { 0.6 } else { 0.0 };
+        let disc = if (u - 0.5).powi(2) + (v - 0.45).powi(2) < 0.06 {
+            0.6
+        } else {
+            0.0
+        };
         let d = 0.25 + 0.9 * u + disc + 0.1 * k;
         let dye = [d, d * 0.92, d * 0.85];
         [0, 1, 2].map(|c| BASE[c] * 10f64.powf(-dye[c]))
@@ -279,17 +359,29 @@ impl Handle for FakeHandle {
             "tl-y" => Value::Fixed(self.area[1]),
             "br-x" => Value::Fixed(self.area[2]),
             "br-y" => Value::Fixed(self.area[3]),
-            _ => return Err(Error::Status { call: "sane_control_option", status: Status::Inval }),
+            _ => {
+                return Err(Error::Status {
+                    call: "sane_control_option",
+                    status: Status::Inval,
+                });
+            }
         })
     }
 
     fn set(&mut self, opt: &OptionInfo, value: &Value) -> Result<u32> {
-        let inval = || Error::Status { call: "sane_control_option", status: Status::Inval };
+        let inval = || Error::Status {
+            call: "sane_control_option",
+            status: Status::Inval,
+        };
         let desc = self.descriptor(opt.index).ok_or_else(inval)?;
         if !desc.settable() {
             return Err(inval());
         }
-        self.log.lock().unwrap().sets.push((opt.name.clone(), value.clone()));
+        self.log
+            .lock()
+            .unwrap()
+            .sets
+            .push((opt.name.clone(), value.clone()));
         let in_list = |s: &str| desc.strings().iter().any(|x| x == s);
         let (w, h) = self.bed();
         let mut info = 0;
@@ -322,7 +414,10 @@ impl Handle for FakeHandle {
     }
 
     fn parameters(&mut self) -> Result<Parameters> {
-        self.params.clone().ok_or(Error::Status { call: "sane_get_parameters", status: Status::Inval })
+        self.params.clone().ok_or(Error::Status {
+            call: "sane_get_parameters",
+            status: Status::Inval,
+        })
     }
 
     fn start(&mut self) -> Result<()> {
@@ -347,9 +442,16 @@ impl Handle for FakeHandle {
             } else {
                 self.frame = 0;
             }
-            return Err(Error::Status { call: "sane_read", status: Status::Eof });
+            return Err(Error::Status {
+                call: "sane_read",
+                status: Status::Eof,
+            });
         }
-        let max = if self.config.max_read == 0 { buf.len() } else { self.config.max_read.min(buf.len()) };
+        let max = if self.config.max_read == 0 {
+            buf.len()
+        } else {
+            self.config.max_read.min(buf.len())
+        };
         let n = max.min(self.data.len() - self.pos);
         buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
         self.pos += n;

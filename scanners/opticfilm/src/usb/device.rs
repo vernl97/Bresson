@@ -7,7 +7,9 @@ use std::num::NonZeroU8;
 use std::time::Duration;
 
 use log::{debug, info, warn};
-use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Interrupt, Out, Recipient, TransferError};
+use nusb::transfer::{
+    Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Interrupt, Out, Recipient, TransferError,
+};
 use nusb::{Endpoint, Interface, MaybeFuture};
 
 use super::transport::{ControlData, UsbTransport};
@@ -86,7 +88,8 @@ impl UsbDeviceInfo {
     }
 
     pub fn asic_hint(&self) -> &'static str {
-        crate::device::select::model_for_device(self.product_id, self.bcd_device).map_or("unknown", |m| m.asic)
+        crate::device::select::model_for_device(self.product_id, self.bcd_device)
+            .map_or("unknown", |m| m.asic)
     }
 }
 
@@ -104,16 +107,20 @@ fn map_err(message: String) -> Error {
         "device not opened",
     ];
     if HINTS.iter().any(|h| lowered.contains(h)) {
-        return Error::DriverBinding(format!("{message}. On Windows, bind WinUSB with Zadig — see docs/windows-setup.md."));
+        return Error::DriverBinding(format!(
+            "{message}. On Windows, bind WinUSB with Zadig — see docs/windows-setup.md."
+        ));
     }
     Error::Usb(message)
 }
 
 fn map_nusb(e: nusb::Error) -> Error {
     match e.kind() {
-        nusb::ErrorKind::Busy | nusb::ErrorKind::PermissionDenied | nusb::ErrorKind::Unsupported => {
-            Error::DriverBinding(format!("{e}. On Windows, bind WinUSB with Zadig — see docs/windows-setup.md."))
-        }
+        nusb::ErrorKind::Busy
+        | nusb::ErrorKind::PermissionDenied
+        | nusb::ErrorKind::Unsupported => Error::DriverBinding(format!(
+            "{e}. On Windows, bind WinUSB with Zadig — see docs/windows-setup.md."
+        )),
         _ => map_err(e.to_string()),
     }
 }
@@ -126,7 +133,10 @@ fn map_transfer(e: TransferError) -> Error {
 /// reports it as `Cancelled`) says so, as libusb's "Operation timed out" does.
 fn map_timed(e: TransferError, what: &str, timeout: Duration) -> Error {
     match e {
-        TransferError::Cancelled => Error::Usb(format!("USB {what} timed out after {} ms", timeout.as_millis())),
+        TransferError::Cancelled => Error::Usb(format!(
+            "USB {what} timed out after {} ms",
+            timeout.as_millis()
+        )),
         e => map_transfer(e),
     }
 }
@@ -169,7 +179,14 @@ pub fn list_devices() -> Result<Vec<UsbDeviceInfo>> {
 /// List devices, optionally filtering to supported VID/PID pairs.
 pub fn find_devices(supported_only: bool) -> Result<Vec<UsbDeviceInfo>> {
     let devices = list_devices()?;
-    Ok(if supported_only { devices.into_iter().filter(UsbDeviceInfo::is_supported).collect() } else { devices })
+    Ok(if supported_only {
+        devices
+            .into_iter()
+            .filter(UsbDeviceInfo::is_supported)
+            .collect()
+    } else {
+        devices
+    })
 }
 
 /// Prefer a scan-ready model when several OpticFilms are present.
@@ -177,7 +194,9 @@ fn pick_preferred_device(devices: &[UsbDeviceInfo]) -> UsbDeviceInfo {
     use crate::device::select::{model_for_device, model_is_scan_ready};
     devices
         .iter()
-        .find(|i| model_for_device(i.product_id, i.bcd_device).is_ok_and(|m| model_is_scan_ready(&m)))
+        .find(|i| {
+            model_for_device(i.product_id, i.bcd_device).is_ok_and(|m| model_is_scan_ready(&m))
+        })
         .unwrap_or(&devices[0])
         .clone()
 }
@@ -255,10 +274,15 @@ impl UsbDeviceHandle {
             .filter(|d| d.product_id() == self.info.product_id)
             .collect();
         if matches.is_empty() {
-            return Err(Error::DeviceNotFound(format!("Device {} disappeared before open.", self.info.device_id())));
+            return Err(Error::DeviceNotFound(format!(
+                "Device {} disappeared before open.",
+                self.info.device_id()
+            )));
         }
         if let (Some(bus), Some(addr)) = (self.info.bus, self.info.address)
-            && let Some(d) = matches.iter().find(|d| bus_number(d) == bus && d.device_address() as u32 == addr)
+            && let Some(d) = matches
+                .iter()
+                .find(|d| bus_number(d) == bus && d.device_address() as u32 == addr)
         {
             return Ok(d.clone());
         }
@@ -289,23 +313,35 @@ impl UsbDeviceHandle {
         // Configure only an unconfigured device: setting it again resets the host's bulk
         // data toggles but not the 7600i's GL843, so the next session lost its first packet.
         if device.active_configuration().is_err() {
-            if let Some(v) = device.configurations().next().map(|c| c.configuration_value()) {
+            if let Some(v) = device
+                .configurations()
+                .next()
+                .map(|c| c.configuration_value())
+            {
                 if let Err(e) = device.set_configuration(v).wait() {
                     debug!("set_configuration: {e}");
                 }
             }
         }
         let (iface_num, eps) = {
-            let cfg = device.active_configuration().map_err(|e| Error::Usb(e.to_string()))?;
+            let cfg = device
+                .active_configuration()
+                .map_err(|e| Error::Usb(e.to_string()))?;
             let intf = cfg
                 .interface_alt_settings()
                 .find(|i| i.alternate_setting() == 0)
                 .ok_or_else(|| Error::Usb("device has no interface 0".into()))?;
             // (address, attributes & 3: 2 = bulk, 3 = interrupt)
-            let eps: Vec<(u8, u8)> = intf.endpoints().map(|e| (e.address(), e.attributes() & 0x03)).collect();
+            let eps: Vec<(u8, u8)> = intf
+                .endpoints()
+                .map(|e| (e.address(), e.attributes() & 0x03))
+                .collect();
             (intf.interface_number(), eps)
         };
-        let interface = device.detach_and_claim_interface(iface_num).wait().map_err(map_nusb)?;
+        let interface = device
+            .detach_and_claim_interface(iface_num)
+            .wait()
+            .map_err(map_nusb)?;
         for (addr, tt) in eps {
             let is_in = addr & 0x80 != 0;
             match (tt, is_in) {
@@ -318,7 +354,11 @@ impl UsbDeviceHandle {
                     self.ep_out_addr = addr;
                 }
                 (3, true) if self.ep_intr_in.is_none() => {
-                    self.ep_intr_in = Some(interface.endpoint::<Interrupt, In>(addr).map_err(map_nusb)?);
+                    self.ep_intr_in = Some(
+                        interface
+                            .endpoint::<Interrupt, In>(addr)
+                            .map_err(map_nusb)?,
+                    );
                 }
                 _ => {}
             }
@@ -364,7 +404,9 @@ impl UsbDeviceHandle {
     }
 
     fn interface(&self) -> Result<&Interface> {
-        self.interface.as_ref().ok_or_else(|| Error::Usb("USB device is not open.".into()))
+        self.interface
+            .as_ref()
+            .ok_or_else(|| Error::Usb("USB device is not open.".into()))
     }
 
     fn timeout(&self, t: Option<u32>) -> Duration {
@@ -378,7 +420,11 @@ impl UsbDeviceHandle {
         } else {
             self.ep_in.as_mut().map(|e| e.clear_halt().wait())
         };
-        let ep = if out { self.ep_out_addr } else { self.ep_in_addr };
+        let ep = if out {
+            self.ep_out_addr
+        } else {
+            self.ep_in_addr
+        };
         match r {
             Some(Ok(())) => info!("clear_halt endpoint=0x{ep:02x}"),
             Some(Err(e)) => warn!("clear_halt endpoint=0x{ep:02x} failed: {e}"),
@@ -386,7 +432,11 @@ impl UsbDeviceHandle {
         }
     }
 
-    fn read_ep(ep: &mut Endpoint<Bulk, In>, size: usize, timeout: Duration) -> std::result::Result<Vec<u8>, TransferError> {
+    fn read_ep(
+        ep: &mut Endpoint<Bulk, In>,
+        size: usize,
+        timeout: Duration,
+    ) -> std::result::Result<Vec<u8>, TransferError> {
         let mps = ep.max_packet_size().max(1);
         let want = size.div_ceil(mps).max(1) * mps;
         let mut buf = Buffer::new(want);
@@ -397,7 +447,9 @@ impl UsbDeviceHandle {
 
     /// Cancel queued bulk IN reads and wait until each has returned.
     fn cancel_queued(&mut self) {
-        let Some(ep) = self.ep_in.as_mut() else { return };
+        let Some(ep) = self.ep_in.as_mut() else {
+            return;
+        };
         if ep.pending() == 0 {
             return;
         }
@@ -456,16 +508,44 @@ fn recipient(rt: u8) -> Recipient {
 }
 
 impl UsbTransport for UsbDeviceHandle {
-    fn control_msg(&mut self, rt: u8, req: u8, value: u16, index: u16, data: ControlData<'_>, timeout_ms: Option<u32>) -> Result<Vec<u8>> {
+    fn control_msg(
+        &mut self,
+        rt: u8,
+        req: u8,
+        value: u16,
+        index: u16,
+        data: ControlData<'_>,
+        timeout_ms: Option<u32>,
+    ) -> Result<Vec<u8>> {
         let timeout = self.timeout(timeout_ms);
         let intf = self.interface()?;
         let (control_type, recipient) = (control_type(rt), recipient(rt));
         let r = match data {
             ControlData::In(n) => intf
-                .control_in(ControlIn { control_type, recipient, request: req, value, index, length: n as u16 }, timeout)
+                .control_in(
+                    ControlIn {
+                        control_type,
+                        recipient,
+                        request: req,
+                        value,
+                        index,
+                        length: n as u16,
+                    },
+                    timeout,
+                )
                 .wait(),
             ControlData::Out(d) => intf
-                .control_out(ControlOut { control_type, recipient, request: req, value, index, data: d }, timeout)
+                .control_out(
+                    ControlOut {
+                        control_type,
+                        recipient,
+                        request: req,
+                        value,
+                        index,
+                        data: d,
+                    },
+                    timeout,
+                )
                 .wait()
                 .map(|()| Vec::new()),
         };
@@ -482,12 +562,18 @@ impl UsbTransport for UsbDeviceHandle {
             return Err(Error::Usb("USB device is not open.".into()));
         }
         if self.pending_in.len() < size {
-            let ep = self.ep_in.as_mut().ok_or_else(|| Error::Usb("Device has no bulk IN endpoint.".into()))?;
+            let ep = self
+                .ep_in
+                .as_mut()
+                .ok_or_else(|| Error::Usb("Device has no bulk IN endpoint.".into()))?;
             if ep.pending() > 0 {
-                return Err(Error::Usb("bulk read while queued reads are pending".into()));
+                return Err(Error::Usb(
+                    "bulk read while queued reads are pending".into(),
+                ));
             }
             let need = size - self.pending_in.len();
-            let got = Self::read_ep(ep, need, timeout).map_err(|e| map_timed(e, "bulk read", timeout))?;
+            let got =
+                Self::read_ep(ep, need, timeout).map_err(|e| map_timed(e, "bulk read", timeout))?;
             self.pending_in.extend(got);
         }
         let n = size.min(self.pending_in.len());
@@ -497,9 +583,15 @@ impl UsbTransport for UsbDeviceHandle {
     fn bulk_read_submit(&mut self, size: usize) -> Result<bool> {
         self.interface()?;
         if !self.pending_in.is_empty() {
-            return Err(Error::Usb(format!("{} unread bytes before a queued bulk read", self.pending_in.len())));
+            return Err(Error::Usb(format!(
+                "{} unread bytes before a queued bulk read",
+                self.pending_in.len()
+            )));
         }
-        let ep = self.ep_in.as_mut().ok_or_else(|| Error::Usb("Device has no bulk IN endpoint.".into()))?;
+        let ep = self
+            .ep_in
+            .as_mut()
+            .ok_or_else(|| Error::Usb("Device has no bulk IN endpoint.".into()))?;
         let mps = ep.max_packet_size().max(1);
         let want = size.div_ceil(mps).max(1) * mps;
         let mut buf = Buffer::new(want);
@@ -510,12 +602,18 @@ impl UsbTransport for UsbDeviceHandle {
 
     fn bulk_read_wait(&mut self, timeout_ms: Option<u32>) -> Result<Vec<u8>> {
         let timeout = self.timeout(timeout_ms);
-        let ep = self.ep_in.as_mut().ok_or_else(|| Error::Usb("Device has no bulk IN endpoint.".into()))?;
+        let ep = self
+            .ep_in
+            .as_mut()
+            .ok_or_else(|| Error::Usb("Device has no bulk IN endpoint.".into()))?;
         if ep.pending() == 0 {
             return Err(Error::Usb("no queued bulk read".into()));
         }
         let r = match ep.wait_next_complete(timeout) {
-            Some(c) => c.into_result().map(Buffer::into_vec).map_err(|e| map_timed(e, "bulk read", timeout)),
+            Some(c) => c
+                .into_result()
+                .map(Buffer::into_vec)
+                .map_err(|e| map_timed(e, "bulk read", timeout)),
             None => Err(map_timed(TransferError::Cancelled, "bulk read", timeout)),
         };
         if r.is_err() {
@@ -528,7 +626,10 @@ impl UsbTransport for UsbDeviceHandle {
     fn bulk_write(&mut self, data: &[u8], timeout_ms: Option<u32>) -> Result<usize> {
         let timeout = self.timeout(timeout_ms);
         self.interface()?;
-        let ep = self.ep_out.as_mut().ok_or_else(|| Error::Usb("Device has no bulk OUT endpoint.".into()))?;
+        let ep = self
+            .ep_out
+            .as_mut()
+            .ok_or_else(|| Error::Usb("Device has no bulk OUT endpoint.".into()))?;
         let mut buf = Buffer::new(data.len());
         buf.extend_from_slice(data);
         let c = ep.transfer_blocking(buf, timeout);
@@ -540,7 +641,10 @@ impl UsbTransport for UsbDeviceHandle {
     fn read_intr(&mut self, timeout_ms: Option<u32>) -> Result<Vec<u8>> {
         let timeout = self.timeout(timeout_ms);
         self.interface()?;
-        let ep = self.ep_intr_in.as_mut().ok_or_else(|| Error::Usb("Device has no interrupt IN endpoint.".into()))?;
+        let ep = self
+            .ep_intr_in
+            .as_mut()
+            .ok_or_else(|| Error::Usb("Device has no interrupt IN endpoint.".into()))?;
         let mps = ep.max_packet_size().max(1);
         let mut buf = Buffer::new(mps);
         buf.set_requested_len(mps);
@@ -560,7 +664,11 @@ impl UsbTransport for UsbDeviceHandle {
         let mut drained = self.pending_in.len();
         self.pending_in.clear();
         while drained < max_drain {
-            match Self::read_ep(ep, BULK_MAX_SIZE.min(max_drain - drained), Duration::from_millis(50)) {
+            match Self::read_ep(
+                ep,
+                BULK_MAX_SIZE.min(max_drain - drained),
+                Duration::from_millis(50),
+            ) {
                 Ok(d) if !d.is_empty() => drained += d.len(),
                 Ok(_) => break,
                 Err(e) => {
@@ -588,13 +696,22 @@ mod tests {
     #[test]
     fn timeouts_read_as_timeouts() {
         let t = Duration::from_millis(5000);
-        assert_eq!(map_timed(TransferError::Cancelled, "bulk read", t).to_string(), "USB bulk read timed out after 5000 ms");
-        assert!(matches!(map_timed(TransferError::Stall, "bulk read", t), Error::Usb(m) if !m.contains("timed out")));
+        assert_eq!(
+            map_timed(TransferError::Cancelled, "bulk read", t).to_string(),
+            "USB bulk read timed out after 5000 ms"
+        );
+        assert!(
+            matches!(map_timed(TransferError::Stall, "bulk read", t), Error::Usb(m) if !m.contains("timed out"))
+        );
     }
 
     #[test]
     fn closed_handle_refuses_transfers() {
-        let info = UsbDeviceInfo { vendor_id: VID_PLUSTEK, product_id: PID_OPTICFILM_8200I_SE, ..Default::default() };
+        let info = UsbDeviceInfo {
+            vendor_id: VID_PLUSTEK,
+            product_id: PID_OPTICFILM_8200I_SE,
+            ..Default::default()
+        };
         let mut h = UsbDeviceHandle::new(info).unwrap();
         for r in [
             h.bulk_read(4, None).map(|_| ()),
@@ -609,7 +726,14 @@ mod tests {
 
     #[test]
     fn unsupported_device_is_refused() {
-        let info = UsbDeviceInfo { vendor_id: VID_PLUSTEK, product_id: 0x0001, ..Default::default() };
-        assert!(matches!(UsbDeviceHandle::new(info), Err(Error::UnsupportedDevice(_))));
+        let info = UsbDeviceInfo {
+            vendor_id: VID_PLUSTEK,
+            product_id: 0x0001,
+            ..Default::default()
+        };
+        assert!(matches!(
+            UsbDeviceHandle::new(info),
+            Err(Error::UnsupportedDevice(_))
+        ));
     }
 }

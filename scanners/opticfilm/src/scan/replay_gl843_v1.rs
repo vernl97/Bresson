@@ -35,11 +35,17 @@ fn b64() -> base64::engine::GeneralPurpose {
 }
 
 fn vi(v: &Value) -> i64 {
-    v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)).or_else(|| v.as_bool().map(i64::from)).unwrap_or(0)
+    v.as_i64()
+        .or_else(|| v.as_f64().map(|f| f as i64))
+        .or_else(|| v.as_bool().map(i64::from))
+        .unwrap_or(0)
 }
 
 fn data(op: &Value) -> Vec<i64> {
-    op["data"].as_array().map(|a| a.iter().map(vi).collect()).unwrap_or_default()
+    op["data"]
+        .as_array()
+        .map(|a| a.iter().map(vi).collect())
+        .unwrap_or_default()
 }
 
 fn kind(op: &Value) -> &str {
@@ -51,7 +57,9 @@ fn is_write83(op: &Value) -> bool {
 }
 
 fn decode(s: &Value) -> Result<Vec<u8>> {
-    b64().decode(s.as_str().unwrap_or("")).map_err(|e| Error::Asic(format!("bad base64 in replay profile: {e}")))
+    b64()
+        .decode(s.as_str().unwrap_or(""))
+        .map_err(|e| Error::Asic(format!("bad base64 in replay profile: {e}")))
 }
 
 fn with(op: &Value, key: &str, v: Value) -> Value {
@@ -70,15 +78,23 @@ fn ack_op() -> Value {
 
 fn writes_motor_start(op: &Value) -> bool {
     let d = data(op);
-    vi(&op["rt"]) == 0x40 && vi(&op["value"]) == 0x83 && d.len() > 1 && d.chunks_exact(2).any(|p| p[0] == 0x0F && p[1] == 1)
+    vi(&op["rt"]) == 0x40
+        && vi(&op["value"]) == 0x83
+        && d.len() > 1
+        && d.chunks_exact(2).any(|p| p[0] == 0x0F && p[1] == 1)
 }
 
 fn table(s: &Value) -> Result<Vec<i64>> {
-    Ok(decode(s)?.chunks_exact(2).map(|p| p[0] as i64 | ((p[1] as i64) << 8)).collect())
+    Ok(decode(s)?
+        .chunks_exact(2)
+        .map(|p| p[0] as i64 | ((p[1] as i64) << 8))
+        .collect())
 }
 
 fn table_b64(words: impl Iterator<Item = i64>) -> Value {
-    let b: Vec<u8> = words.flat_map(|v| [(v & 0xFF) as u8, (v >> 8) as u8]).collect();
+    let b: Vec<u8> = words
+        .flat_map(|v| [(v & 0xFF) as u8, (v >> 8) as u8])
+        .collect();
     json!(b64().encode(b))
 }
 
@@ -88,13 +104,26 @@ fn round_to(x: f64, n: i32) -> f64 {
 }
 
 fn as_num(x: f64) -> Value {
-    if x.fract() == 0.0 && x.abs() < 1e15 { json!(x as i64) } else { json!(x) }
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        json!(x as i64)
+    } else {
+        json!(x)
+    }
 }
 
 /// Set the main scan's CCD dummy lines (`recorded` / `fewer` / `none`) or exposure ×k.
-pub fn prepare_profile(profile: &Value, dummy_lines: &str, exposure_multiplier: i64, single_sample: bool) -> Result<Value> {
-    if !matches!(dummy_lines, "recorded" | "fewer" | "none") || !(1..=4).contains(&exposure_multiplier) {
-        return Err(Error::Value("dummy_lines must be recorded/fewer/none and exposure_multiplier 1-4".into()));
+pub fn prepare_profile(
+    profile: &Value,
+    dummy_lines: &str,
+    exposure_multiplier: i64,
+    single_sample: bool,
+) -> Result<Value> {
+    if !matches!(dummy_lines, "recorded" | "fewer" | "none")
+        || !(1..=4).contains(&exposure_multiplier)
+    {
+        return Err(Error::Value(
+            "dummy_lines must be recorded/fewer/none and exposure_multiplier 1-4".into(),
+        ));
     }
     let recorded = vi(&profile["scan"]["lineSel"]);
     let line_sel = if exposure_multiplier > 1 || dummy_lines == "none" {
@@ -116,10 +145,22 @@ pub fn prepare_profile(profile: &Value, dummy_lines: &str, exposure_multiplier: 
         .iter()
         .position(|o| kind(o) == "read" && vi(&o["frame"]) == main)
         .ok_or_else(|| Error::Asic("profile has no recognisable main-scan start".into()))?;
-    let start = (0..first_read).rev().find(|&i| writes_motor_start(&ops[i])).map_or(-1, |i| i as i64);
-    let prev_read = if start > 0 { (0..start as usize).rev().find(|&i| kind(&ops[i]) == "read").map_or(-1, |i| i as i64) } else { -1 };
+    let start = (0..first_read)
+        .rev()
+        .find(|&i| writes_motor_start(&ops[i]))
+        .map_or(-1, |i| i as i64);
+    let prev_read = if start > 0 {
+        (0..start as usize)
+            .rev()
+            .find(|&i| kind(&ops[i]) == "read")
+            .map_or(-1, |i| i as i64)
+    } else {
+        -1
+    };
     if !(start > prev_read && prev_read >= 0) {
-        return Err(Error::Asic("profile has no recognisable main-scan start".into()));
+        return Err(Error::Asic(
+            "profile has no recognisable main-scan start".into(),
+        ));
     }
     let start = start as usize;
     let mut slot: Option<i64> = None;
@@ -128,7 +169,11 @@ pub fn prepare_profile(profile: &Value, dummy_lines: &str, exposure_multiplier: 
         if is_write83(o) {
             for p in data(o).chunks_exact(2) {
                 if p[0] == 0x5B {
-                    slot = if p[1] & 0x40 != 0 { Some((p[1] >> 3) & 7) } else { None };
+                    slot = if p[1] & 0x40 != 0 {
+                        Some((p[1] >> 3) & 7)
+                    } else {
+                        None
+                    };
                 }
             }
         }
@@ -142,7 +187,9 @@ pub fn prepare_profile(profile: &Value, dummy_lines: &str, exposure_multiplier: 
     let cruise = *table(&ops[tables[0]]["data"])?.last().unwrap();
     let nxt_f = cruise as f64 * factor / if single_sample { 2.0 } else { 1.0 };
     if nxt_f != nxt_f.trunc() || !(nxt_f > 0.0 && nxt_f <= 65535.0) {
-        return Err(Error::Asic("dummy line change does not give a whole motor period".into()));
+        return Err(Error::Asic(
+            "dummy line change does not give a whole motor period".into(),
+        ));
     }
     let nxt = nxt_f as i64;
     let line_reg = mframe["regs"].get("30").map(vi);
@@ -155,7 +202,11 @@ pub fn prepare_profile(profile: &Value, dummy_lines: &str, exposure_multiplier: 
         if *t.last().unwrap() != cruise {
             return Err(Error::Asic("main-scan tables disagree".into()));
         }
-        new_ops[i] = with(&ops[i], "data", table_b64(t.into_iter().map(|v| if v == cruise { nxt } else { v })));
+        new_ops[i] = with(
+            &ops[i],
+            "data",
+            table_b64(t.into_iter().map(|v| if v == cruise { nxt } else { v })),
+        );
     }
     let lp = vi(&profile["scan"]["lPeriod"]) * k;
     let mut changed: Vec<(i64, i64)> = vec![(0x1E, (line_reg & 0xF0) | line_sel)];
@@ -163,18 +214,31 @@ pub fn prepare_profile(profile: &Value, dummy_lines: &str, exposure_multiplier: 
         changed.extend([(0x38, lp >> 8), (0x39, lp & 0xFF), (0x20, 0x08)]);
     } else if line_sel != recorded {
         let maxwd = vi(&mframe["pixels"]) * 6 >> 1;
-        changed.extend([(0x35, maxwd >> 16), (0x36, (maxwd >> 8) & 0xFF), (0x37, maxwd & 0xFF), (0x20, 0x10), (0x02, vi(&mframe["regs"]["2"]) | 0x40)]);
+        changed.extend([
+            (0x35, maxwd >> 16),
+            (0x36, (maxwd >> 8) & 0xFF),
+            (0x37, maxwd & 0xFF),
+            (0x20, 0x10),
+            (0x02, vi(&mframe["regs"]["2"]) | 0x40),
+        ]);
     }
     let mut lines = vi(&mframe["lines"]);
     if single_sample {
         lines /= 2;
-        changed.extend([(0x25, (2 * lines) >> 16), (0x26, (2 * lines >> 8) & 0xFF), (0x27, 2 * lines & 0xFF)]);
+        changed.extend([
+            (0x25, (2 * lines) >> 16),
+            (0x26, (2 * lines >> 8) & 0xFF),
+            (0x27, 2 * lines & 0xFF),
+        ]);
         let n = vi(&mframe["pixels"]) * lines * 6;
         if vi(&new_ops[first_read]["length"]) != vi(&mframe["bytes"]) {
             return Err(Error::Asic("main frame is not read in one piece".into()));
         }
         new_ops[first_read] = with(&new_ops[first_read], "length", json!(n));
-        let setup = (0..first_read).rev().find(|&i| vi(&new_ops[i]["value"]) == 0x82).expect("bulk setup");
+        let setup = (0..first_read)
+            .rev()
+            .find(|&i| vi(&new_ops[i]["value"]) == 0x82)
+            .expect("bulk setup");
         new_ops[setup] = with_length(&new_ops[setup], n);
     }
     let d = data(&new_ops[start]);
@@ -202,10 +266,22 @@ pub fn prepare_profile(profile: &Value, dummy_lines: &str, exposure_multiplier: 
     scan["lPeriod"] = json!(lp);
     let c02 = changed.iter().find(|e| e.0 == 0x02).map_or(0, |e| e.1);
     scan["backtracking"] = json!(c02 & 0x40 == 0);
-    scan["lineSeconds"] = as_num(round_to(s0["lineSeconds"].as_f64().unwrap_or(0.0) * factor, 6));
-    scan["seconds"] = as_num(round_to(s0["seconds"].as_f64().unwrap_or(0.0) * factor * lines as f64 / vi(&mframe["lines"]) as f64, 1));
-    scan["bytesPerSecond"] = json!(crate::num::py_round(s0["bytesPerSecond"].as_f64().unwrap_or(0.0) / factor));
-    let yres = if single_sample { vi(&profile["yres"]) / 2 } else { vi(&profile["yres"]) };
+    scan["lineSeconds"] = as_num(round_to(
+        s0["lineSeconds"].as_f64().unwrap_or(0.0) * factor,
+        6,
+    ));
+    scan["seconds"] = as_num(round_to(
+        s0["seconds"].as_f64().unwrap_or(0.0) * factor * lines as f64 / vi(&mframe["lines"]) as f64,
+        1,
+    ));
+    scan["bytesPerSecond"] = json!(crate::num::py_round(
+        s0["bytesPerSecond"].as_f64().unwrap_or(0.0) / factor
+    ));
+    let yres = if single_sample {
+        vi(&profile["yres"]) / 2
+    } else {
+        vi(&profile["yres"])
+    };
     let mut out = profile.clone();
     out["ops"] = json!(new_ops);
     out["frames"] = json!(frames);
@@ -217,7 +293,10 @@ pub fn prepare_profile(profile: &Value, dummy_lines: &str, exposure_multiplier: 
 
 /// Collapse 5+ identical recorded status polls with MOTORENB before the first motor start.
 pub fn collapse_recorded_waits(ops: &[Value]) -> Vec<Value> {
-    let first = ops.iter().position(|o| kind(o) == "control" && writes_motor_start(o)).map_or(-1, |i| i as i64);
+    let first = ops
+        .iter()
+        .position(|o| kind(o) == "control" && writes_motor_start(o))
+        .map_or(-1, |i| i as i64);
     let triplet = |i: usize| -> Option<i64> {
         if i + 2 >= ops.len() {
             return None;
@@ -232,7 +311,10 @@ pub fn collapse_recorded_waits(ops: &[Value]) -> Vec<Value> {
             && vi(&b["index"]) == 0x20
             && vi(&c["value"]) == 0x84
             && c.get("register").map(vi) == Some(STATUS)
-            && c["expected"].get(0).map(vi).is_some_and(|e| e & MOTORENB != 0)
+            && c["expected"]
+                .get(0)
+                .map(vi)
+                .is_some_and(|e| e & MOTORENB != 0)
         {
             return Some(vi(&c["expected"][0]));
         }
@@ -263,7 +345,11 @@ pub fn collapse_recorded_waits(ops: &[Value]) -> Vec<Value> {
         }
         i += 3 * n;
     }
-    if out.len() == ops.len() { ops.to_vec() } else { out }
+    if out.len() == ops.len() {
+        ops.to_vec()
+    } else {
+        out
+    }
 }
 
 /// GL843 shading upload: dark and gain words per pixel, 42 pixels per 512 bytes.
@@ -305,21 +391,32 @@ fn column_means(white: &[u8], pixels: usize) -> Vec<[f64; 3]> {
             }
         }
     }
-    sums.into_iter().map(|s| s.map(|v| v / lines as f64)).collect()
+    sums.into_iter()
+        .map(|s| s.map(|v| v / lines as f64))
+        .collect()
 }
 
 /// Infrared shading from a white frame read at unity gain.
 pub fn white_shading(white: &[u8], pixels: usize) -> Vec<u8> {
     let gains: Vec<[i64; 3]> = column_means(white, pixels)
         .into_iter()
-        .map(|m| m.map(|v| ((IR_SHADING_TARGET * SHADING_UNITY) as f64 / v.max(1.0)).round_ties_even().clamp(0.0, 65535.0) as i64))
+        .map(|m| {
+            m.map(|v| {
+                ((IR_SHADING_TARGET * SHADING_UNITY) as f64 / v.max(1.0))
+                    .round_ties_even()
+                    .clamp(0.0, 65535.0) as i64
+            })
+        })
         .collect();
     shading_table(&gains, [0; 3])
 }
 
 /// A shading table's per-pixel words with `extra` pixels in front.
 fn widen_words(table: &[u8], pixels: usize, extra: usize) -> Vec<[u16; 6]> {
-    let all: Vec<u16> = table.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect();
+    let all: Vec<u16> = table
+        .chunks_exact(2)
+        .map(|p| u16::from_le_bytes([p[0], p[1]]))
+        .collect();
     let mut words: Vec<[u16; 6]> = Vec::new();
     for blk in all.chunks(256) {
         for px in blk[..252.min(blk.len())].chunks_exact(6) {
@@ -346,9 +443,20 @@ fn widen_words(table: &[u8], pixels: usize, extra: usize) -> Vec<[u16; 6]> {
 /// A recorded final shading table with `extra` pixels added in front, every
 /// gain computed from the white frame for the per-channel target the recorded gains give.
 pub fn widened_shading(table: &[u8], extra: usize, white: &[u8], pixels: usize) -> Vec<u8> {
-    let mean: Vec<[f64; 3]> = column_means(white, pixels).into_iter().map(|m| m.map(|v| v.max(1.0))).collect();
+    let mean: Vec<[f64; 3]> = column_means(white, pixels)
+        .into_iter()
+        .map(|m| m.map(|v| v.max(1.0)))
+        .collect();
     let mut words = widen_words(table, pixels - extra, extra);
-    let target = [0, 1, 2].map(|c| median(words.iter().zip(&mean).skip(extra).map(|(w, m)| w[2 * c + 1] as f64 * m[c])));
+    let target = [0, 1, 2].map(|c| {
+        median(
+            words
+                .iter()
+                .zip(&mean)
+                .skip(extra)
+                .map(|(w, m)| w[2 * c + 1] as f64 * m[c]),
+        )
+    });
     for (w, m) in words.iter_mut().zip(&mean) {
         for c in 0..3 {
             w[2 * c + 1] = (target[c] / m[c]).round_ties_even().clamp(0.0, 65535.0) as u16;
@@ -420,7 +528,11 @@ pub fn widen_window(profile: &Value, start: i64) -> Result<Value> {
                 for (k, v) in [(0x30, new >> 8), (0x31, new & 0xFF)] {
                     pairs.iter_mut().find(|e| e.0 == k).unwrap().1 = v;
                 }
-                ops[i] = with(&o, "data", json!(pairs.iter().flat_map(|&(a, b)| [a, b]).collect::<Vec<_>>()));
+                ops[i] = with(
+                    &o,
+                    "data",
+                    json!(pairs.iter().flat_map(|&(a, b)| [a, b]).collect::<Vec<_>>()),
+                );
             }
         } else if kind(&o) == "read" {
             let fr = vi(&o["frame"]) as usize;
@@ -434,7 +546,9 @@ pub fn widen_window(profile: &Value, start: i64) -> Result<Value> {
                 ops[i] = with(&o, "length", json!(n));
                 ops[header as usize] = with_length(&ops[header as usize], n);
             }
-        } else if kind(&o) == "write" && (regs.get(&0x5B), regs.get(&0x5C)) == (Some(&0x10), Some(&0x00)) {
+        } else if kind(&o) == "write"
+            && (regs.get(&0x5B), regs.get(&0x5C)) == (Some(&0x10), Some(&0x00))
+        {
             uploads[white_read as usize].push(i);
             headers.insert(i, header);
         }
@@ -448,15 +562,28 @@ pub fn widen_window(profile: &Value, start: i64) -> Result<Value> {
         }
         let mut lengths: Vec<i64> = idx
             .iter()
-            .map(|&i| ops[i].get("length").map(vi).filter(|&l| l != 0).map_or_else(|| decode(&ops[i]["data"]).map(|d| d.len() as i64), Ok))
+            .map(|&i| {
+                ops[i]
+                    .get("length")
+                    .map(vi)
+                    .filter(|&l| l != 0)
+                    .map_or_else(|| decode(&ops[i]["data"]).map(|d| d.len() as i64), Ok)
+            })
             .collect::<Result<_>>()?;
         let last_h = headers[idx.last().unwrap()];
-        let last: Vec<usize> = idx.iter().copied().filter(|i| headers[i] == last_h).collect();
+        let last: Vec<usize> = idx
+            .iter()
+            .copied()
+            .filter(|i| headers[i] == last_h)
+            .collect();
         let nl = lengths.len();
         lengths[nl - 1] = size - lengths[..nl - 1].iter().sum::<i64>();
-        let tail = used - (lengths.iter().sum::<i64>() - lengths[nl - last.len()..].iter().sum::<i64>());
+        let tail =
+            used - (lengths.iter().sum::<i64>() - lengths[nl - last.len()..].iter().sum::<i64>());
         if lengths[nl - 1] <= 0 || tail <= 0 {
-            return Err(Error::Asic("widened shading does not fit the recorded uploads".into()));
+            return Err(Error::Asic(
+                "widened shading does not fit the recorded uploads".into(),
+            ));
         }
         ops[last_h as usize] = with_length(&ops[last_h as usize], tail);
         let mut recorded = Vec::new();
@@ -465,7 +592,15 @@ pub fn widen_window(profile: &Value, start: i64) -> Result<Value> {
                 recorded.extend(decode(&ops[i]["data"])?);
             }
         }
-        let tbl = if live { Vec::new() } else { shading_blocks_words(&widen_words(&recorded, (pixels - extra) as usize, extra as usize)) };
+        let tbl = if live {
+            Vec::new()
+        } else {
+            shading_blocks_words(&widen_words(
+                &recorded,
+                (pixels - extra) as usize,
+                extra as usize,
+            ))
+        };
         let mut at = 0i64;
         for (&i, &n) in idx.iter().zip(&lengths) {
             if ops[i].get("shading").is_some() {
@@ -482,7 +617,9 @@ pub fn widen_window(profile: &Value, start: i64) -> Result<Value> {
     }
     let mut scan = profile["scan"].clone();
     scan["bytesPerSecond"] = json!(crate::num::py_round(
-        profile["scan"]["bytesPerSecond"].as_f64().unwrap_or(0.0) * vi(&frames[main]["pixels"]) as f64 / vi(&pf[main]["pixels"]) as f64
+        profile["scan"]["bytesPerSecond"].as_f64().unwrap_or(0.0)
+            * vi(&frames[main]["pixels"]) as f64
+            / vi(&pf[main]["pixels"]) as f64
     ));
     let mut out = profile.clone();
     out["ops"] = json!(ops);
@@ -502,17 +639,38 @@ fn canon(v: Option<&Value>) -> String {
             None => n.to_string(),
         },
         Some(Value::String(s)) => format!("{s:?}"),
-        Some(Value::Array(a)) => format!("({})", a.iter().map(|x| canon(Some(x))).collect::<Vec<_>>().join(",")),
+        Some(Value::Array(a)) => format!(
+            "({})",
+            a.iter()
+                .map(|x| canon(Some(x)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         Some(o) => o.to_string(),
     }
 }
 
 fn full(op: &Value) -> String {
     if kind(op) == "control" {
-        let tail = if vi(&op["rt"]) == 0x40 { canon(op.get("data")) } else { canon(op.get("register")) };
-        return format!("C|{}|{}|{}|{tail}", canon(op.get("rt")), canon(op.get("value")), canon(op.get("index")));
+        let tail = if vi(&op["rt"]) == 0x40 {
+            canon(op.get("data"))
+        } else {
+            canon(op.get("register"))
+        };
+        return format!(
+            "C|{}|{}|{}|{tail}",
+            canon(op.get("rt")),
+            canon(op.get("value")),
+            canon(op.get("index"))
+        );
     }
-    format!("K|{}|{}|{}|{}", canon(op.get("kind")), canon(op.get("frame")), canon(op.get("ms")), canon(op.get("timedStop")))
+    format!(
+        "K|{}|{}|{}|{}",
+        canon(op.get("kind")),
+        canon(op.get("frame")),
+        canon(op.get("ms")),
+        canon(op.get("timedStop"))
+    )
 }
 
 fn shape(op: &Value) -> String {
@@ -524,7 +682,12 @@ fn shape(op: &Value) -> String {
     if kind(op) == "control" {
         return full(op);
     }
-    format!("K|{}|{}|{}", canon(op.get("kind")), canon(op.get("frame")), canon(op.get("timedStop")))
+    format!(
+        "K|{}|{}|{}",
+        canon(op.get("kind")),
+        canon(op.get("frame")),
+        canon(op.get("timedStop"))
+    )
 }
 
 fn is_poll(op: &Value) -> bool {
@@ -538,7 +701,10 @@ pub fn derive_infrared(color: &Value, color_ref: &Value, ir_ref: &Value) -> Resu
     let refo = color_ref["ops"].as_array().cloned().unwrap_or_default();
     let ir = ir_ref["ops"].as_array().cloned().unwrap_or_default();
     let mut at: HashMap<usize, usize> = HashMap::new();
-    let (sa, sb): (Vec<String>, Vec<String>) = (refo.iter().map(shape).collect(), ops.iter().map(shape).collect());
+    let (sa, sb): (Vec<String>, Vec<String>) = (
+        refo.iter().map(shape).collect(),
+        ops.iter().map(shape).collect(),
+    );
     for (tag, a1, a2, b1, b2) in SequenceMatcher::new(&sa, &sb).get_opcodes() {
         if tag == Tag::Equal || (tag == Tag::Replace && a2 - a1 == b2 - b1) {
             for i in 0..a2 - a1 {
@@ -546,11 +712,17 @@ pub fn derive_infrared(color: &Value, color_ref: &Value, ir_ref: &Value) -> Resu
             }
         }
     }
-    let (fa, fb): (Vec<String>, Vec<String>) = (refo.iter().map(full).collect(), ir.iter().map(full).collect());
+    let (fa, fb): (Vec<String>, Vec<String>) = (
+        refo.iter().map(full).collect(),
+        ir.iter().map(full).collect(),
+    );
     let mut edits: Vec<(usize, usize, Vec<Value>)> = Vec::new();
     for (tag, a1, a2, b1, b2) in SequenceMatcher::new(&fa, &fb).get_opcodes() {
         let changed: Vec<&Value> = refo[a1..a2].iter().chain(&ir[b1..b2]).collect();
-        if tag == Tag::Equal || changed.iter().all(|o| is_poll(o)) || changed.iter().all(|o| kind(o) == "delay") {
+        if tag == Tag::Equal
+            || changed.iter().all(|o| is_poll(o))
+            || changed.iter().all(|o| kind(o) == "delay")
+        {
             continue;
         }
         let mut idx: Vec<Option<usize>> = (a1..a2).map(|i| at.get(&i).copied()).collect();
@@ -560,10 +732,18 @@ pub fn derive_infrared(color: &Value, color_ref: &Value, ir_ref: &Value) -> Resu
                 continue;
             }
         }
-        let start = if let Some(first) = idx.first() { *first } else { at.get(&a1).copied() };
-        let contiguous = start.is_some_and(|s| idx.iter().enumerate().all(|(k, v)| *v == Some(s + k)));
+        let start = if let Some(first) = idx.first() {
+            *first
+        } else {
+            at.get(&a1).copied()
+        };
+        let contiguous =
+            start.is_some_and(|s| idx.iter().enumerate().all(|(k, v)| *v == Some(s + k)));
         let Some(start) = start.filter(|_| contiguous) else {
-            return Err(Error::Asic(format!("infrared change at vendor op {a1} has no place in the {} dpi job", vi(&color["dpi"]))));
+            return Err(Error::Asic(format!(
+                "infrared change at vendor op {a1} has no place in the {} dpi job",
+                vi(&color["dpi"])
+            )));
         };
         edits.push((start, start + idx.len(), ir[b1..b2].to_vec()));
     }
@@ -588,7 +768,9 @@ pub fn derive_infrared(color: &Value, color_ref: &Value, ir_ref: &Value) -> Resu
             }
         } else if kind(&o) == "read" {
             frames_read.insert(vi(&o["frame"]));
-        } else if kind(&o) == "write" && (regs.get(&0x5B), regs.get(&0x5C)) == (Some(&0x10), Some(&0x00)) {
+        } else if kind(&o) == "write"
+            && (regs.get(&0x5B), regs.get(&0x5C)) == (Some(&0x10), Some(&0x00))
+        {
             let n = decode(&o["data"])?.len();
             let live = frames_read.contains(&white);
             let o0 = *offset.get(&live).unwrap_or(&0);
@@ -621,8 +803,15 @@ pub fn derive_infrared(color: &Value, color_ref: &Value, ir_ref: &Value) -> Resu
     res["ops"] = json!(out);
     res["frames"] = json!(frames);
     res["lamp"] = lamp;
-    res["name"] = json!(format!("Derived full frame {}, infrared", vi(&color["dpi"])));
-    res["source"] = json!(format!("{} with the infrared changes of {}", color["source"].as_str().unwrap_or(""), ir_ref["source"].as_str().unwrap_or("")));
+    res["name"] = json!(format!(
+        "Derived full frame {}, infrared",
+        vi(&color["dpi"])
+    ));
+    res["source"] = json!(format!(
+        "{} with the infrared changes of {}",
+        color["source"].as_str().unwrap_or(""),
+        ir_ref["source"].as_str().unwrap_or("")
+    ));
     Ok(res)
 }
 
@@ -643,13 +832,17 @@ pub fn validate_profile(profile: &Value) -> Result<()> {
             let pm = planned.get(&main).copied().unwrap_or(0);
             if 0 < pm && pm < vi(&frames[main as usize]["bytes"]) {
                 let d = data(op);
-                let done = vi(&op["rt"]) == 0xC0 && vi(&op["value"]) == 0x8E && vi(&op["index"]) == 0x18;
+                let done =
+                    vi(&op["rt"]) == 0xC0 && vi(&op["value"]) == 0x8E && vi(&op["index"]) == 0x18;
                 let shutdown = vi(&op["rt"]) == 0x40
                     && vi(&op["value"]) == 0x83
                     && d.len() > 1
-                    && d.chunks_exact(2).any(|p| (p[0] == 1 && p[1] & 1 == 0) || (p[0] == 3 && p[1] & 0x10 == 0));
+                    && d.chunks_exact(2)
+                        .any(|p| (p[0] == 1 && p[1] & 1 == 0) || (p[0] == 3 && p[1] & 0x10 == 0));
                 if done || shutdown {
-                    return Err(Error::Asic("main frame incomplete before transfer completion or shutdown".into()));
+                    return Err(Error::Asic(
+                        "main frame incomplete before transfer completion or shutdown".into(),
+                    ));
                 }
             }
         }
@@ -675,7 +868,13 @@ pub struct ReplayHooks<'a> {
 
 impl<'a> ReplayHooks<'a> {
     pub fn new(check: CheckFn<'a>) -> Self {
-        Self { check, progress: None, frame_done: None, timeout_s: 60.0, read_chunk: CHUNK }
+        Self {
+            check,
+            progress: None,
+            frame_done: None,
+            timeout_s: 60.0,
+            read_chunk: CHUNK,
+        }
     }
 }
 
@@ -697,11 +896,22 @@ struct Replay<'u, 'h> {
 
 impl Replay<'_, '_> {
     fn raw(&mut self, op: &Value) -> Result<Vec<u8>> {
-        let (req, value, index) = (vi(&op["request"]) as u8, vi(&op["value"]) as u16, vi(&op["index"]) as u16);
+        let (req, value, index) = (
+            vi(&op["request"]) as u8,
+            vi(&op["value"]) as u16,
+            vi(&op["index"]) as u16,
+        );
         if vi(&op["rt"]) == 0x40 {
             let d = data(op);
             let bytes: Vec<u8> = d.iter().map(|&b| b as u8).collect();
-            self.usb.transport.control_msg(0x40, req, value, index, ControlData::Out(&bytes), None)?;
+            self.usb.transport.control_msg(
+                0x40,
+                req,
+                value,
+                index,
+                ControlData::Out(&bytes),
+                None,
+            )?;
             if value == 0x83 {
                 if d.len() == 1 {
                     self.address = d[0];
@@ -714,7 +924,10 @@ impl Replay<'_, '_> {
             return Ok(Vec::new());
         }
         let n = vi(&op["length"]) as usize;
-        let r = self.usb.transport.control_msg(0xC0, req, value, index, ControlData::In(n), None)?;
+        let r =
+            self.usb
+                .transport
+                .control_msg(0xC0, req, value, index, ControlData::In(n), None)?;
         if r.len() != n {
             return Err(Error::Scan("short control read".into()));
         }
@@ -728,12 +941,22 @@ impl Replay<'_, '_> {
         Ok(r)
     }
 
-    fn wait(&mut self, mut r: Vec<u8>, again: &mut dyn FnMut(&mut Self) -> Result<Vec<u8>>, ready: &dyn Fn(i64) -> bool, why: &str, pause: f64) -> Result<()> {
+    fn wait(
+        &mut self,
+        mut r: Vec<u8>,
+        again: &mut dyn FnMut(&mut Self) -> Result<Vec<u8>>,
+        ready: &dyn Fn(i64) -> bool,
+        why: &str,
+        pause: f64,
+    ) -> Result<()> {
         let deadline = monotonic() + self.h.timeout_s;
         while !ready(r[0] as i64) {
             (self.h.check)()?;
             if monotonic() > deadline {
-                return Err(Error::Scan(format!("timeout {why} (status 0x{:02x})", r[0])));
+                return Err(Error::Scan(format!(
+                    "timeout {why} (status 0x{:02x})",
+                    r[0]
+                )));
             }
             sleep(pause);
             r = again(self)?;
@@ -746,7 +969,13 @@ impl Replay<'_, '_> {
         let mut status = move |me: &mut Self| -> Result<Vec<u8>> {
             me.raw(&addr_op())?;
             let a = me.raw(&ack_op())?;
-            me.wait(a, &mut |m: &mut Self| m.raw(&ack_op()), &|s| s & 1 != 0, "waiting for write acknowledge", 0.005)?;
+            me.wait(
+                a,
+                &mut |m: &mut Self| m.raw(&ack_op()),
+                &|s| s & 1 != 0,
+                "waiting for write acknowledge",
+                0.005,
+            )?;
             me.raw(&op)
         };
         self.wait(r, &mut status, &|s| s & mask == target, why, 0.015)
@@ -772,9 +1001,21 @@ impl Replay<'_, '_> {
         let (value, index) = (vi(&op["value"]), vi(&op["index"]));
         let opc = op.clone();
         if value == 0x8E && index == 0x20 {
-            self.wait(r, &mut |m: &mut Self| m.raw(&opc), &|s| s & 1 != 0, "waiting for write acknowledge", 0.005)?;
+            self.wait(
+                r,
+                &mut |m: &mut Self| m.raw(&opc),
+                &|s| s & 1 != 0,
+                "waiting for write acknowledge",
+                0.005,
+            )?;
         } else if value == 0x8E && index == 0x18 {
-            self.wait(r, &mut |m: &mut Self| m.raw(&opc), &|s| s & 0x0C == 0, "waiting for bulk completion", 0.02)?;
+            self.wait(
+                r,
+                &mut |m: &mut Self| m.raw(&opc),
+                &|s| s & 0x0C == 0,
+                "waiting for bulk completion",
+                0.02,
+            )?;
         } else if op.get("waitMotorIdle").is_some_and(|v| vi(v) != 0) {
             self.poll(op, r, MOTORENB, 0, "waiting for the previous move")?;
         } else if value == 0x84 && op.get("register").map(vi) == Some(STATUS) {
@@ -785,7 +1026,13 @@ impl Replay<'_, '_> {
                 if self.moved.is_none() {
                     self.poll(op, r, MOTORENB, 0, "waiting for the previous move")?;
                 } else {
-                    self.poll(op, r, FEEDFSH | MOTORENB, FEEDFSH, "waiting for the positioning move")?;
+                    self.poll(
+                        op,
+                        r,
+                        FEEDFSH | MOTORENB,
+                        FEEDFSH,
+                        "waiting for the positioning move",
+                    )?;
                 }
             } else if scanning && expected & BUFEMPTY == 0 {
                 self.poll(op, r, BUFEMPTY, 0, "waiting for scan data")?;
@@ -796,24 +1043,54 @@ impl Replay<'_, '_> {
 }
 
 /// Replay a job; `calibrate` replaces recorded AFE/shading with live measurements.
-pub fn run_profile(profile: &Value, usb: &mut Gl843V1Usb, hooks: ReplayHooks<'_>, calibrate: bool) -> Result<ReplayResult> {
+pub fn run_profile(
+    profile: &Value,
+    usb: &mut Gl843V1Usb,
+    hooks: ReplayHooks<'_>,
+    calibrate: bool,
+) -> Result<ReplayResult> {
     validate_profile(profile)?;
     let frames = profile["frames"].as_array().cloned().unwrap_or_default();
     let main = vi(&profile["mainFrame"]);
-    let mut calibration = if calibrate { Some(Calibration::new(profile)?) } else { None };
+    let mut calibration = if calibrate {
+        Some(Calibration::new(profile)?)
+    } else {
+        None
+    };
     let lamp = profile.get("lamp").cloned().unwrap_or(json!({}));
-    let lamp_frames: HashSet<i64> = ["line", "shading", "dark"].iter().filter_map(|k| lamp.get(*k).map(|l| vi(&l["frame"]))).collect();
+    let lamp_frames: HashSet<i64> = ["line", "shading", "dark"]
+        .iter()
+        .filter_map(|k| lamp.get(*k).map(|l| vi(&l["frame"])))
+        .collect();
     let mut calib_frames = lamp_frames.clone();
     if let Some(c) = &calibration {
         calib_frames.extend(c.first..=c.white);
     }
     // Without backtracking a slow host only pauses the carriage.
-    let need = if profile["scan"].get("backtracking").is_none_or(|b| b.as_bool().unwrap_or(true)) { profile["scan"]["bytesPerSecond"].as_f64().unwrap_or(0.0) } else { 0.0 };
-    let mut buffers: HashMap<i64, Vec<u8>> = calib_frames.iter().chain(std::iter::once(&main)).map(|&i| (i, vec![0u8; vi(&frames[i as usize]["bytes"]) as usize])).collect();
+    let need = if profile["scan"]
+        .get("backtracking")
+        .is_none_or(|b| b.as_bool().unwrap_or(true))
+    {
+        profile["scan"]["bytesPerSecond"].as_f64().unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let mut buffers: HashMap<i64, Vec<u8>> = calib_frames
+        .iter()
+        .chain(std::iter::once(&main))
+        .map(|&i| (i, vec![0u8; vi(&frames[i as usize]["bytes"]) as usize]))
+        .collect();
     let mut got: Vec<usize> = vec![0; frames.len()];
     let mut result = ReplayResult::default();
     let mut shading: HashMap<i64, Vec<u8>> = HashMap::new();
-    let mut rp = Replay { usb, h: hooks, regs: HashMap::new(), address: 0, status: None, moved: None };
+    let mut rp = Replay {
+        usb,
+        h: hooks,
+        regs: HashMap::new(),
+        address: 0,
+        status: None,
+        moved: None,
+    };
     let ops = collapse_recorded_waits(profile["ops"].as_array().map_or(&[][..], |v| v.as_slice()));
     for op in &ops {
         (rp.h.check)()?;
@@ -825,7 +1102,9 @@ pub fn run_profile(profile: &Value, usb: &mut Gl843V1Usb, hooks: ReplayHooks<'_>
                 }
                 // The vendor stops the first positioning move on the position-sensor event.
                 let Some(moved) = rp.moved else {
-                    return Err(Error::Asic("timed stop without a preceding motor start".into()));
+                    return Err(Error::Asic(
+                        "timed stop without a preceding motor start".into(),
+                    ));
                 };
                 let target = moved + op["ms"].as_f64().unwrap_or(0.0) / 1000.0;
                 while monotonic() < target {
@@ -843,7 +1122,9 @@ pub fn run_profile(profile: &Value, usb: &mut Gl843V1Usb, hooks: ReplayHooks<'_>
                 rp.control(&op2)?;
             }
             "write" => {
-                let payload = if calibration.is_some() && (rp.regs.get(&0x5B), rp.regs.get(&0x5C)) == (Some(&0x10), Some(&0)) {
+                let payload = if calibration.is_some()
+                    && (rp.regs.get(&0x5B), rp.regs.get(&0x5C)) == (Some(&0x10), Some(&0))
+                {
                     let size = match op.get("length").map(vi).filter(|&l| l != 0) {
                         Some(l) => l as usize,
                         None => decode(&op["data"])?.len(),
@@ -852,10 +1133,18 @@ pub fn run_profile(profile: &Value, usb: &mut Gl843V1Usb, hooks: ReplayHooks<'_>
                 } else if let Some(sh) = op.get("shading") {
                     let (f, start) = (vi(&sh["frame"]), vi(&sh["offset"]) as usize);
                     if !shading.contains_key(&f) {
-                        let fdata = result.frames.get(&f).ok_or_else(|| Error::Scan(format!("shading frame {f} not read")))?;
+                        let fdata = result
+                            .frames
+                            .get(&f)
+                            .ok_or_else(|| Error::Scan(format!("shading frame {f} not read")))?;
                         let px = vi(&frames[f as usize]["pixels"]) as usize;
                         let t = match sh.get("widen") {
-                            Some(w) => widened_shading(&decode(&w["table"])?, vi(&w["extra"]) as usize, fdata, px),
+                            Some(w) => widened_shading(
+                                &decode(&w["table"])?,
+                                vi(&w["extra"]) as usize,
+                                fdata,
+                                px,
+                            ),
                             None => white_shading(fdata, px),
                         };
                         shading.insert(f, t);
@@ -890,7 +1179,11 @@ pub fn run_profile(profile: &Value, usb: &mut Gl843V1Usb, hooks: ReplayHooks<'_>
                 let mut n = request(&mut asked, rp.h.read_chunk);
                 let queued = rp.usb.transport.bulk_read_submit(n)?;
                 let mut outstanding = queued;
-                let mut part = if queued { Vec::new() } else { rp.usb.transport.bulk_read(n, None)? };
+                let mut part = if queued {
+                    Vec::new()
+                } else {
+                    rp.usb.transport.bulk_read(n, None)?
+                };
                 let mut t0: Option<f64> = None;
                 let mut since = 0usize;
                 let r = (|| -> Result<()> {
@@ -901,7 +1194,10 @@ pub fn run_profile(profile: &Value, usb: &mut Gl843V1Usb, hooks: ReplayHooks<'_>
                             part = rp.usb.transport.bulk_read_wait(None)?;
                         }
                         if part.is_empty() || part.len() > n || got[fi] + part.len() > size {
-                            return Err(Error::Scan(format!("frame {i}: bulk read returned {} of {n} bytes", part.len())));
+                            return Err(Error::Scan(format!(
+                                "frame {i}: bulk read returned {} of {n} bytes",
+                                part.len()
+                            )));
                         }
                         left -= part.len();
                         asked += n - part.len(); // a short read is asked for again
@@ -924,7 +1220,9 @@ pub fn run_profile(profile: &Value, usb: &mut Gl843V1Usb, hooks: ReplayHooks<'_>
                             Some(t) if i == main => {
                                 since += this.len();
                                 let secs = monotonic() - t;
-                                if secs > THROUGHPUT_GRACE_S && (since as f64 / secs) < need * THROUGHPUT_MIN {
+                                if secs > THROUGHPUT_GRACE_S
+                                    && (since as f64 / secs) < need * THROUGHPUT_MIN
+                                {
                                     return Err(Error::Scan(format!(
                                         "scan data at {:.2} MB/s, the scan needs {:.2} MB/s",
                                         since as f64 / secs / 1e6,
@@ -945,7 +1243,10 @@ pub fn run_profile(profile: &Value, usb: &mut Gl843V1Usb, hooks: ReplayHooks<'_>
                     let _ = rp.usb.transport.bulk_read_wait(None);
                 }
                 r?;
-                if i != main && got[fi] == size && let Some(b) = buffers.get(&i) {
+                if i != main
+                    && got[fi] == size
+                    && let Some(b) = buffers.get(&i)
+                {
                     result.frames.insert(i, b.clone());
                     if let Some(c) = calibration.as_mut() {
                         c.frame_done(i, b)?;

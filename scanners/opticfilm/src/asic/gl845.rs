@@ -75,7 +75,9 @@ impl Gl845 {
     // --- status ---
 
     pub fn read_status(&mut self) -> Result<ScannerStatus> {
-        Ok(ScannerStatus::from_reg41(self.protocol.read_register(r::REG_0X41)?))
+        Ok(ScannerStatus::from_reg41(
+            self.protocol.read_register(r::REG_0X41)?,
+        ))
     }
 
     pub fn read_status_reliable(&mut self) -> Result<ScannerStatus> {
@@ -163,7 +165,8 @@ impl Gl845 {
             Ok(speed) if speed & 0x08 != 0 => 1,
             _ => 2,
         };
-        self.protocol.write_0x8c(0x0F, if usb_mode == 1 { 0x14 } else { 0x11 })?;
+        self.protocol
+            .write_0x8c(0x0F, if usb_mode == 1 { 0x14 } else { 0x11 })?;
         // Pre-bulk 0x6B poke then restore from model tables
         self.protocol.write_register(0x6B, 0x02)?;
         let mut regs = self.model.boot_register_map();
@@ -265,10 +268,16 @@ impl Gl845 {
     }
 
     /// Write AFE regs from model tables (+ optional dpi overlay / last search).
-    pub fn apply_frontend_for_scan(&mut self, resolution: Option<i64>, method: Option<ScanMethod>) -> Result<()> {
+    pub fn apply_frontend_for_scan(
+        &mut self,
+        resolution: Option<i64>,
+        method: Option<ScanMethod>,
+    ) -> Result<()> {
         let feset = self.frontend_feset()?;
         if feset != r::FESET_ADI {
-            return Err(Error::Asic(format!("Unsupported frontend type FESET={feset:#x} (need ADI=0x2)")));
+            return Err(Error::Asic(format!(
+                "Unsupported frontend type FESET={feset:#x} (need ADI=0x2)"
+            )));
         }
         let scan_method = method.unwrap_or(self.scan_method);
         let mut fe = match resolution {
@@ -286,13 +295,17 @@ impl Gl845 {
             }
         }
         self.wait_frontend_ready(FE_BUSY_TIMEOUT_S)?;
-        self.protocol.write_fe_register(0x00, fe.get_or(0x00, 0xF8) & 0xFF)?;
-        self.protocol.write_fe_register(0x01, fe.get_or(0x01, 0x80) & 0xFF)?;
+        self.protocol
+            .write_fe_register(0x00, fe.get_or(0x00, 0xF8) & 0xFF)?;
+        self.protocol
+            .write_fe_register(0x01, fe.get_or(0x01, 0x80) & 0xFF)?;
         for i in 0..3u8 {
-            self.protocol.write_fe_register(0x02 + i, fe.get_or(0x02 + i as u16, 0) & 0xFF)?;
+            self.protocol
+                .write_fe_register(0x02 + i, fe.get_or(0x02 + i as u16, 0) & 0xFF)?;
         }
         for i in 0..3u8 {
-            self.protocol.write_fe_register(0x05 + i, fe.get_or(0x05 + i as u16, 0) & 0xFF)?;
+            self.protocol
+                .write_fe_register(0x05 + i, fe.get_or(0x05 + i as u16, 0) & 0xFF)?;
         }
         self.last_afe_gains = Some([0x02, 0x03, 0x04].map(|a| fe.get_or(a, 0) as i64));
         self.last_afe_offsets = Some([0x05, 0x06, 0x07].map(|a| fe.get_or(a, 0) as i64));
@@ -306,7 +319,12 @@ impl Gl845 {
     }
 
     /// Program FE gain/offset codes and remember them for later configure.
-    pub fn apply_afe_frontend(&mut self, fe: AfeFrontend, method: Option<ScanMethod>, resolution: Option<i64>) -> Result<()> {
+    pub fn apply_afe_frontend(
+        &mut self,
+        fe: AfeFrontend,
+        method: Option<ScanMethod>,
+        resolution: Option<i64>,
+    ) -> Result<()> {
         self.last_afe_gains = Some(fe.gains.map(|v| v & 0xFF));
         self.last_afe_offsets = Some(fe.offsets.map(|v| v & 0xFF));
         self.apply_frontend_for_scan(resolution, method)
@@ -324,7 +342,10 @@ impl Gl845 {
         self.last_afe_gains = None;
         self.last_afe_offsets = None;
         self.apply_frontend_for_scan(resolution, Some(method))?;
-        let seed = AfeFrontend { offsets: self.last_afe_offsets.unwrap(), gains: self.last_afe_gains.unwrap() };
+        let seed = AfeFrontend {
+            offsets: self.last_afe_offsets.unwrap(),
+            gains: self.last_afe_gains.unwrap(),
+        };
         let run_search = force_dichotomy || self.afe_dichotomy_applicable()?;
         let Some(measure) = measure.filter(|_| run_search) else {
             info!(
@@ -360,7 +381,10 @@ impl Gl845 {
             return Ok(());
         }
         match self.protocol.read_usb_speed_byte() {
-            Ok(speed) => info!("USB mode probe=0x{speed:02x} → USB {}.0", if speed & 0x08 != 0 { 1 } else { 2 }),
+            Ok(speed) => info!(
+                "USB mode probe=0x{speed:02x} → USB {}.0",
+                if speed & 0x08 != 0 { 1 } else { 2 }
+            ),
             Err(e) => debug!("USB speed probe failed (continuing): {e}"),
         }
         let mut cold = self.is_cold_boot()?;
@@ -382,8 +406,12 @@ impl Gl845 {
         if reg01 & r::SCAN == 0 && status.is_buffer_empty && !status.is_motor_enabled {
             return Ok(false);
         }
-        warn!("Stopping a scan left running by an earlier session (reg01=0x{reg01:02x} status=0x{:02x})", status.raw);
-        self.protocol.write_register(r::REG_0X01, reg01 & !r::SCAN)?;
+        warn!(
+            "Stopping a scan left running by an earlier session (reg01=0x{reg01:02x} status=0x{:02x})",
+            status.raw
+        );
+        self.protocol
+            .write_register(r::REG_0X01, reg01 & !r::SCAN)?;
         self.protocol.write_register(r::REG_0X0F, 0x00)?;
         let drained = self.protocol.abort_bulk_stream();
         info!("abandoned scan: drained {drained} bytes; soft-resetting");
@@ -400,7 +428,10 @@ impl Gl845 {
     pub fn lamp_on(&mut self) -> Result<()> {
         let ir = self.scan_method == ScanMethod::Infrared;
         if ir && !self.model.supports_infrared {
-            return Err(Error::Asic(format!("{} does not support infrared", self.model.model)));
+            return Err(Error::Asic(format!(
+                "{} does not support infrared",
+                self.model.model
+            )));
         }
         let mut reg = self.protocol.read_register(r::REG_0X03)?;
         if ir {
@@ -414,7 +445,10 @@ impl Gl845 {
             self.protocol.write_register(r::REG_0X03, reg)?;
         }
         self.cache(0x03, reg);
-        info!("lamp_on method={} reg03=0x{reg:02x}", self.scan_method.as_str());
+        info!(
+            "lamp_on method={} reg03=0x{reg:02x}",
+            self.scan_method.as_str()
+        );
         Ok(())
     }
 
@@ -476,7 +510,9 @@ impl Gl845 {
             }
             sleep(HOME_POLL_S.min(remaining));
         }
-        Err(Error::MotorTimeout(format!("Could not stop GL845 motor within {timeout_s:.1}s")))
+        Err(Error::MotorTimeout(format!(
+            "Could not stop GL845 motor within {timeout_s:.1}s"
+        )))
     }
 
     /// Unverified stop kept for GL843/GL842 until their home path is re-validated.
@@ -501,7 +537,9 @@ impl Gl845 {
             }
             sleep(HOME_POLL_S);
         }
-        Err(Error::MotorTimeout(format!("Head did not reach home within {timeout_s:.0}s")))
+        Err(Error::MotorTimeout(format!(
+            "Head did not reach home within {timeout_s:.0}s"
+        )))
     }
 
     /// Move carriage to home with a hard timeout. Always stops the motor.
@@ -517,13 +555,17 @@ impl Gl845 {
         if !wait {
             return self.start_home_seek();
         }
-        let r = self.start_home_seek().and_then(|()| self.wait_until_home(timeout_s));
+        let r = self
+            .start_home_seek()
+            .and_then(|()| self.wait_until_home(timeout_s));
         // Python `finally`: a failing stop replaces the original error.
         self.stop_motor(MOTOR_STOP_TIMEOUT_S)?;
         r?;
         info!("reached home");
         if !self.is_at_home()? {
-            return Err(Error::MotorTimeout(format!("Head did not reach home within {timeout_s:.0}s — motor stopped for safety.")));
+            return Err(Error::MotorTimeout(format!(
+                "Head did not reach home within {timeout_s:.0}s — motor stopped for safety."
+            )));
         }
         Ok(())
     }

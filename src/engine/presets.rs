@@ -229,7 +229,12 @@ pub fn crosstalk_id_for_stock(stock: &str) -> Option<&'static str> {
     let stock = stock.trim();
     crosstalk_profiles()
         .iter()
-        .find(|p| p.name.trim_end_matches("(approx)").trim().eq_ignore_ascii_case(stock))
+        .find(|p| {
+            p.name
+                .trim_end_matches("(approx)")
+                .trim()
+                .eq_ignore_ascii_case(stock)
+        })
         .map(|p| p.id)
 }
 
@@ -280,9 +285,16 @@ mod tests {
     fn film_stock_names_drop_the_approx_note() {
         let names = film_stock_names();
         assert_eq!(names.len(), CROSSTALK_FILES.len());
-        assert!(names.iter().all(|n| !n.is_empty() && !n.contains("(approx)")));
+        assert!(
+            names
+                .iter()
+                .all(|n| !n.is_empty() && !n.contains("(approx)"))
+        );
         assert!(names.iter().any(|n| n == "Kodak Gold 200"));
-        assert_eq!(crosstalk_id_for_stock("kodak gold 200"), Some("kodak_gold_200"));
+        assert_eq!(
+            crosstalk_id_for_stock("kodak gold 200"),
+            Some("kodak_gold_200")
+        );
         assert_eq!(crosstalk_id_for_stock("Cinestill 800T"), None);
     }
 

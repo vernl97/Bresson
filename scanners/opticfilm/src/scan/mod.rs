@@ -14,5 +14,5 @@ pub mod pipeline;
 pub mod replay_gl843_v1;
 pub mod request;
 pub mod session;
-pub mod session_gl128;
 pub mod session_7600i_v1;
+pub mod session_gl128;

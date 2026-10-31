@@ -216,7 +216,10 @@ fn is_network_path(p: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
         // smb2, cifs, nfs, ncpfs
-        matches!(st.f_type as u64, 0xFE53_4D42 | 0xFF53_4D42 | 0x6969 | 0x564C)
+        matches!(
+            st.f_type as u64,
+            0xFE53_4D42 | 0xFF53_4D42 | 0x6969 | 0x564C
+        )
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -307,7 +310,7 @@ fn trim_editor_cache(dir: Option<&Path>) {
 }
 
 fn thumb_cache_path(image: &Path) -> Option<PathBuf> {
-    sidecar::proxy_cache_path(image).map(|c| c.with_extension("thumb"))
+    sidecar::thumb_path(image)
 }
 
 /// The cached grid thumbnail source, if any: about 1 MB against the proxy's 8 MB.
@@ -322,7 +325,9 @@ pub fn load_proxy_and_thumb(path: &Path) -> anyhow::Result<(SourceImage, SourceI
     let thumb = make_thumb(&proxy);
     if let Some(c) = thumb_cache_path(path) {
         if !c.exists() {
+            let _ = std::fs::create_dir_all(sidecar::project_dir(path));
             write_cache(&c, &thumb);
+            sidecar::remove_stale_thumbs(path, &c);
         }
     }
     Ok((proxy, thumb))

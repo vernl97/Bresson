@@ -71,9 +71,16 @@ fn rgb8_tiff_in_centimetres_loads_as_rgb16() {
 fn one_line(name: &str) -> (ImagePipeline, ScanGeometry, Vec<u8>) {
     let model = model_by_name(name).unwrap();
     let g = compute_geometry(900, &model, Some([0.0, 0.0, 0.1, 0.05])).unwrap();
-    let g = ScanGeometry { lines: 1, optical_line_count: 1, ..g };
+    let g = ScanGeometry {
+        lines: 1,
+        optical_line_count: 1,
+        ..g
+    };
     // One pixel RGB LE words 0x1234 / 0x5678 / 0x9ABC, repeated.
-    let pixel: Vec<u8> = [0x1234u16, 0x5678, 0x9ABC].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let pixel: Vec<u8> = [0x1234u16, 0x5678, 0x9ABC]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let mut raw = pixel.repeat(g.pixels as usize);
     raw.resize(g.total_bytes() as usize, 0);
     (ImagePipeline::new(model), g, raw)
@@ -81,15 +88,28 @@ fn one_line(name: &str) -> (ImagePipeline, ScanGeometry, Vec<u8>) {
 
 #[test]
 fn gl843_7200i_decodes_with_16bit_byteswap() {
-    assert_eq!(model_by_name("plustek-opticfilm-7200i").unwrap().swap_16bit_data, Some(true));
+    assert_eq!(
+        model_by_name("plustek-opticfilm-7200i")
+            .unwrap()
+            .swap_16bit_data,
+        Some(true)
+    );
     let (pipe, g, raw) = one_line("plustek-opticfilm-7200i");
     let out = pipe.decode_rgb(&raw, &g, Some(false)).unwrap();
-    assert_eq!([out[[0, 0, 0]], out[[0, 0, 1]], out[[0, 0, 2]]], [0x3412, 0x7856, 0xBC9A]);
+    assert_eq!(
+        [out[[0, 0, 0]], out[[0, 0, 1]], out[[0, 0, 2]]],
+        [0x3412, 0x7856, 0xBC9A]
+    );
 }
 
 #[test]
 fn gl845_8200i_does_not_byteswap() {
-    assert_ne!(model_by_name("plustek-opticfilm-8200i").unwrap().swap_16bit_data, Some(true));
+    assert_ne!(
+        model_by_name("plustek-opticfilm-8200i")
+            .unwrap()
+            .swap_16bit_data,
+        Some(true)
+    );
     let (pipe, g, raw) = one_line("plustek-opticfilm-8200i");
     let out = pipe.decode_rgb(&raw, &g, Some(false)).unwrap();
     assert_eq!(out[[0, 0, 0]], 0x1234);
@@ -99,7 +119,8 @@ fn gl845_8200i_does_not_byteswap() {
 fn tiffs_carry_the_software_tag() {
     let dir = common::tmp_path("tiff-software");
     let path = save_rgb16_tiff(&Array3::zeros((2, 2, 3)), dir.join("s.tif"), 900).unwrap();
-    let mut dec = tiff::decoder::Decoder::new(std::io::BufReader::new(File::open(path).unwrap())).unwrap();
+    let mut dec =
+        tiff::decoder::Decoder::new(std::io::BufReader::new(File::open(path).unwrap())).unwrap();
     let sw = dec.get_tag_ascii_string(tiff::tags::Tag::Software).unwrap();
     assert_eq!(sw, opticfilm::image::SOFTWARE);
     assert!(sw.starts_with("opticfilm "));

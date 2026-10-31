@@ -11,7 +11,9 @@ pub const UNITY: i64 = 8192;
 pub const WHITE_RGB: [i64; 3] = [79380, 79119, 82739];
 
 fn u16s(data: &[u8]) -> Vec<i64> {
-    data.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]]) as i64).collect()
+    data.chunks_exact(2)
+        .map(|p| u16::from_le_bytes([p[0], p[1]]) as i64)
+        .collect()
 }
 
 /// 128 lines: discard eight samples at each end, then truncate the mean → `(pixels, 3)`.
@@ -42,7 +44,13 @@ pub fn dark_reference(data: &[u8], pixels: usize, stride: usize) -> Array2<i64> 
         }
     }
     // Inclusive 64 fits every capture.
-    Array2::from_shape_fn(raw.dim(), |p| if (raw[p] - smooth[p]).abs() > 64 { raw[p] } else { smooth[p] })
+    Array2::from_shape_fn(raw.dim(), |p| {
+        if (raw[p] - smooth[p]).abs() > 64 {
+            raw[p]
+        } else {
+            smooth[p]
+        }
+    })
 }
 
 /// Dark and gain words for R, G, B per pixel, 42 pixels per 512-byte block.
@@ -79,13 +87,17 @@ pub fn initial_gain(data: &[u8]) -> Result<[i64; 3]> {
         }
     }
     if peak.contains(&0) {
-        return Err(Error::Scan("zero lamp response during AFE calibration".into()));
+        return Err(Error::Scan(
+            "zero lamp response during AFE calibration".into(),
+        ));
     }
     Ok(peak.map(|p| floor_div(378 * (65535 - p), 5 * 65535).clamp(0, 63)))
 }
 
 fn vi(v: &Value) -> i64 {
-    v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)).unwrap_or(0)
+    v.as_i64()
+        .or_else(|| v.as_f64().map(|f| f as i64))
+        .unwrap_or(0)
 }
 
 /// Replace values in the existing probe/AFE/shading sequence, without extra USB commands.
@@ -163,7 +175,8 @@ impl Calibration {
                 let dk = if self.infrared { 0 } else { 1280 };
                 let wk = if self.infrared { 2048 } else { 256 };
                 self.dark_offset = [0, 1, 2].map(|c| zero[c] + floor_div(dk * 127, span[c]));
-                self.white_offset = [0, 1, 2].map(|c| self.dark_offset[c] + floor_div(wk * 127, span[c]));
+                self.white_offset =
+                    [0, 1, 2].map(|c| self.dark_offset[c] + floor_div(wk * 127, span[c]));
             }
         } else if ph == 2 {
             self.gain = initial_gain(data)?;
@@ -174,7 +187,9 @@ impl Calibration {
         } else if i == self.white {
             let white = reference(data, self.pixels); // already dark-corrected by the chip
             if white.iter().any(|&v| v == 0) {
-                return Err(Error::Scan("zero white reference during shading calibration".into()));
+                return Err(Error::Scan(
+                    "zero white reference during shading calibration".into(),
+                ));
             }
             let dark = self.dark.as_ref().expect("dark before white");
             let gain = Array2::from_shape_fn(white.dim(), |(x, c)| {
@@ -188,8 +203,14 @@ impl Calibration {
     }
 
     pub fn control(&mut self, op: &Value) -> Result<Value> {
-        let data: Vec<i64> = op["data"].as_array().map(|a| a.iter().map(vi).collect()).unwrap_or_default();
-        if op["rt"].as_i64() != Some(0x40) || op["value"].as_i64() != Some(0x83) || data.first() != Some(&0x51) {
+        let data: Vec<i64> = op["data"]
+            .as_array()
+            .map(|a| a.iter().map(vi).collect())
+            .unwrap_or_default();
+        if op["rt"].as_i64() != Some(0x40)
+            || op["value"].as_i64() != Some(0x83)
+            || data.first() != Some(&0x51)
+        {
             return Ok(op.clone());
         }
         let mut d: Vec<(i64, i64)> = Vec::new();
@@ -204,14 +225,22 @@ impl Calibration {
         let mut value: Option<i64> = None;
         if (2..=4).contains(&addr) && self.phase >= 2 {
             let c = (addr - 2) as usize;
-            let bump = if self.phase >= 6 && !self.infrared { c as i64 } else { 0 };
+            let bump = if self.phase >= 6 && !self.infrared {
+                c as i64
+            } else {
+                0
+            };
             value = Some(63.min(self.gain[c] + bump));
         } else if (5..=7).contains(&addr) {
             let c = (addr - 5) as usize;
             let offset = if self.phase == 1 {
                 Some(self.zero_low[c])
             } else if self.phase == 4 {
-                let o = if self.offset_writes[c] == 0 { self.zero_high[c] } else { self.dark_offset[c] };
+                let o = if self.offset_writes[c] == 0 {
+                    self.zero_high[c]
+                } else {
+                    self.dark_offset[c]
+                };
                 self.offset_writes[c] += 1;
                 Some(o)
             } else if self.phase >= 5 {
@@ -221,12 +250,16 @@ impl Calibration {
             };
             if let Some(o) = offset {
                 if o.abs() > 255 {
-                    return Err(Error::Scan("AFE offset outside nine-bit sign-magnitude range".into()));
+                    return Err(Error::Scan(
+                        "AFE offset outside nine-bit sign-magnitude range".into(),
+                    ));
                 }
                 value = Some(if o < 0 { 256 | -o } else { o });
             }
         }
-        let Some(v) = value else { return Ok(op.clone()) };
+        let Some(v) = value else {
+            return Ok(op.clone());
+        };
         for (k, nv) in [(0x3A, v >> 8), (0x3B, v & 255)] {
             match d.iter_mut().find(|e| e.0 == k) {
                 Some(e) => e.1 = nv,

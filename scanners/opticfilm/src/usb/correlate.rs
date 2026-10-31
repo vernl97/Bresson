@@ -61,5 +61,8 @@ pub fn correlate(fields: Correlation) -> CorrelationGuard {
 
 /// Same run/scan, new operation_id.
 pub fn replace_operation(corr: &Correlation, operation_id: &str) -> Correlation {
-    Correlation { operation_id: Some(operation_id.to_string()), ..corr.clone() }
+    Correlation {
+        operation_id: Some(operation_id.to_string()),
+        ..corr.clone()
+    }
 }

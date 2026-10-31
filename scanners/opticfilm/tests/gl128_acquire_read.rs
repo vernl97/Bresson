@@ -7,17 +7,17 @@ mod common;
 
 use std::collections::VecDeque;
 
-use opticfilm::asic::registers::{gl128 as se, gl845 as r};
 use opticfilm::asic::Asic;
+use opticfilm::asic::registers::{gl128 as se, gl845 as r};
 use opticfilm::clock::{self, monotonic};
 use opticfilm::device::{FilmModel, model_by_name};
 use opticfilm::scan::geometry::{ScanGeometry, compute_geometry};
 use opticfilm::scan::request::NoProgress;
 use opticfilm::scan::session_gl128::Gl128ScanSession;
 use opticfilm::usb::fake::{FakeCore, FakeDevice, FakeUsbTransport, NoDevice};
-use opticfilm::usb::transport::find_transport;
 use opticfilm::usb::protocol::GenesysUsbProtocol;
 use opticfilm::usb::trace::UsbOp;
+use opticfilm::usb::transport::find_transport;
 
 /// Data always ready; bulk IN returns the scripted chunks (any length), then zeros.
 struct Bulk {
@@ -27,7 +27,8 @@ struct Bulk {
 impl FakeDevice for Bulk {
     fn before_register_read(&mut self, core: &mut FakeCore, addr: u16) {
         if addr == se::REG_STATUS {
-            core.registers.insert(se::REG_STATUS, r::STATUS_PWRBIT | r::STATUS_HOMESNR);
+            core.registers
+                .insert(se::REG_STATUS, r::STATUS_PWRBIT | r::STATUS_HOMESNR);
         }
     }
     fn bulk_in_bytes(&mut self, _core: &mut FakeCore, size: usize) -> Vec<u8> {
@@ -44,16 +45,36 @@ fn se_model() -> FilmModel {
 fn geometry(model: &FilmModel, total: i64, line: i64) -> ScanGeometry {
     let g = compute_geometry(7200, model, None).unwrap();
     assert_eq!(total % line, 0);
-    ScanGeometry { line_bytes: line, optical_line_count: total / line, disable_buffer_full_move: false, ..g }
+    ScanGeometry {
+        line_bytes: line,
+        optical_line_count: total / line,
+        disable_buffer_full_move: false,
+        ..g
+    }
 }
 
 /// Run one `_acquire` (Python patches `_wait_data`; here data is always ready).
-fn acquire(model: FilmModel, reads: Vec<Vec<u8>>, g: &ScanGeometry) -> (opticfilm::Result<Vec<u8>>, FakeCore) {
+fn acquire(
+    model: FilmModel,
+    reads: Vec<Vec<u8>>,
+    g: &ScanGeometry,
+) -> (opticfilm::Result<Vec<u8>>, FakeCore) {
     clock::use_virtual(1000.0);
-    let usb = FakeUsbTransport::with_device(FakeCore::new(), Bulk { reads: reads.into() });
-    let Asic::Gl128(mut a) = Asic::create(Box::new(usb), model.clone()).unwrap() else { panic!() };
+    let usb = FakeUsbTransport::with_device(
+        FakeCore::new(),
+        Bulk {
+            reads: reads.into(),
+        },
+    );
+    let Asic::Gl128(mut a) = Asic::create(Box::new(usb), model.clone()).unwrap() else {
+        panic!()
+    };
     let raw = Gl128ScanSession::new(model).acquire(&mut a, g, &mut NoProgress);
-    let core = std::mem::take(&mut find_transport::<BulkTransport>(a.protocol.transport()).unwrap().core);
+    let core = std::mem::take(
+        &mut find_transport::<BulkTransport>(a.protocol.transport())
+            .unwrap()
+            .core,
+    );
     (raw, core)
 }
 
@@ -104,9 +125,18 @@ fn acquire_never_sleeps() {
     let g = geometry(&se_model(), 3 * 4096, 4096);
     clock::use_virtual(1000.0);
     let t0 = monotonic();
-    let usb = FakeUsbTransport::with_device(FakeCore::new(), Bulk { reads: VecDeque::new() });
-    let Asic::Gl128(mut a) = Asic::create(Box::new(usb), se_model()).unwrap() else { panic!() };
-    Gl128ScanSession::new(se_model()).acquire(&mut a, &g, &mut NoProgress).unwrap();
+    let usb = FakeUsbTransport::with_device(
+        FakeCore::new(),
+        Bulk {
+            reads: VecDeque::new(),
+        },
+    );
+    let Asic::Gl128(mut a) = Asic::create(Box::new(usb), se_model()).unwrap() else {
+        panic!()
+    };
+    Gl128ScanSession::new(se_model())
+        .acquire(&mut a, &g, &mut NoProgress)
+        .unwrap();
     assert_eq!(monotonic(), t0);
 }
 
@@ -145,7 +175,11 @@ fn bulk_read_exact_max_transfer_sets_request_size() {
         let mut p = GenesysUsbProtocol::new(Box::new(FakeUsbTransport::<NoDevice>::new()));
         p.bulk_read_exact(n, max).unwrap();
         let t = find_transport::<FakeUsbTransport>(p.transport()).unwrap();
-        t.core.transactions.iter().map(|x| x.length.unwrap()).collect::<Vec<_>>()
+        t.core
+            .transactions
+            .iter()
+            .map(|x| x.length.unwrap())
+            .collect::<Vec<_>>()
     };
     assert_eq!(sizes(500_000, 0x80000), [500_000]);
     assert_eq!(sizes(62208, 0xF000), [0xF000, 62208 - 0xF000]);

@@ -104,9 +104,15 @@ pub struct AfeStripTiming {
 /// SF's AFE strip timing for a scan at `scan_dpi` (ASIC dpi).
 pub fn afe_strip_timing(scan_dpi: i64, _wide: bool, pre_offset: bool) -> AfeStripTiming {
     if pre_offset {
-        return AfeStripTiming { lperiod: lperiod_for_line(AFE_STRIP_PIXELS as f64, scan_dpi), dummy: AFE_STRIP_DUMMY_PRE };
+        return AfeStripTiming {
+            lperiod: lperiod_for_line(AFE_STRIP_PIXELS as f64, scan_dpi),
+            dummy: AFE_STRIP_DUMMY_PRE,
+        };
     }
-    AfeStripTiming { lperiod: lperiod_for_line(AFE_WIDE_PIXELS as f64, scan_dpi), dummy: AFE_STRIP_DUMMY_WIDE }
+    AfeStripTiming {
+        lperiod: lperiod_for_line(AFE_WIDE_PIXELS as f64, scan_dpi),
+        dummy: AFE_STRIP_DUMMY_WIDE,
+    }
 }
 
 /// Whether AFE codes searched at `searched_dpi` match `scan_dpi`'s strip timing.
@@ -124,7 +130,10 @@ fn u16le(b: &[u8], off: usize) -> i64 {
 fn u16_plane(strip: &[u8], pixels: usize) -> Result<Vec<i64>> {
     let need = pixels * 2;
     if strip.len() < need {
-        return Err(Error::Value(format!("strip too short for plane: {} < {need}", strip.len())));
+        return Err(Error::Value(format!(
+            "strip too short for plane: {} < {need}",
+            strip.len()
+        )));
     }
     Ok((0..need).step_by(2).map(|i| u16le(strip, i)).collect())
 }
@@ -133,7 +142,10 @@ fn lag_corr(samples: &[i64], lag: usize) -> f64 {
     if lag == 0 || samples.len() <= lag {
         return 0.0;
     }
-    let a: Vec<f64> = samples[..samples.len() - lag].iter().map(|&v| v as f64).collect();
+    let a: Vec<f64> = samples[..samples.len() - lag]
+        .iter()
+        .map(|&v| v as f64)
+        .collect();
     let b: Vec<f64> = samples[lag..].iter().map(|&v| v as f64).collect();
     let n = a.len() as f64;
     let ma = a.iter().sum::<f64>() / n;
@@ -165,7 +177,11 @@ pub fn encode_afe_offset(value: i64) -> i64 {
 /// 9-bit sign-magnitude FE code to a signed offset (`0x100` is -0 → 0).
 pub fn decode_afe_offset(code: i64) -> i64 {
     let magnitude = code & AFE_OFFSET_MAX;
-    if code & AFE_OFFSET_SIGN != 0 { -magnitude } else { magnitude }
+    if code & AFE_OFFSET_SIGN != 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
 }
 
 /// AD9826 PGA codes that bring wide-strip `means` (taken at gain 0) to `targets`.
@@ -183,7 +199,10 @@ pub fn optical_black_means(strip: &[u8]) -> Result<[f64; 3]> {
     let cols = AFE_OPTICAL_BLACK_COLUMNS;
     let need = cols.end * 6;
     if strip.len() < need {
-        return Err(Error::Value(format!("strip too short for optical black: {} < {need}", strip.len())));
+        return Err(Error::Value(format!(
+            "strip too short for optical black: {} < {need}",
+            strip.len()
+        )));
     }
     let mut sums = [0i64; 3];
     for x in cols.clone() {
@@ -197,7 +216,13 @@ pub fn optical_black_means(strip: &[u8]) -> Result<[f64; 3]> {
 
 /// Signed offsets that put optical black at `target`, from a two-point probe.
 /// A channel whose probe is unusable is `None`.
-pub fn offsets_for_black_level(low: [f64; 3], high: [f64; 3], target: f64, low_code: i64, high_code: i64) -> [Option<i64>; 3] {
+pub fn offsets_for_black_level(
+    low: [f64; 3],
+    high: [f64; 3],
+    target: f64,
+    low_code: i64,
+    high_code: i64,
+) -> [Option<i64>; 3] {
     let steps = (high_code - low_code) as f64;
     let mut out = [None; 3];
     for c in 0..3 {
@@ -217,7 +242,10 @@ pub fn rgb_layout_score(rgb: &Array3<u16>) -> f64 {
     if h < 1 || w < 2 {
         return 0.0;
     }
-    let luma: Array2<f32> = rgb.map(|&v| v as f32).mean_axis(Axis(2)).expect("3 channels");
+    let luma: Array2<f32> = rgb
+        .map(|&v| v as f32)
+        .mean_axis(Axis(2))
+        .expect("3 channels");
     let a: Vec<f64> = luma.slice(s![.., ..-1]).iter().map(|&v| v as f64).collect();
     let b: Vec<f64> = luma.slice(s![.., 1..]).iter().map(|&v| v as f64).collect();
     let ma = mean(a.iter().copied());
@@ -292,25 +320,97 @@ pub struct AfeSearchPhase {
     pub note: &'static str,
 }
 
-const fn phase(name: &'static str, offsets: Option<[i64; 3]>, gains: Option<[i64; 3]>, strip_bytes: Option<usize>, note: &'static str) -> AfeSearchPhase {
-    AfeSearchPhase { name, offsets, gains, strip_bytes, note }
+const fn phase(
+    name: &'static str,
+    offsets: Option<[i64; 3]>,
+    gains: Option<[i64; 3]>,
+    strip_bytes: Option<usize>,
+    note: &'static str,
+) -> AfeSearchPhase {
+    AfeSearchPhase {
+        name,
+        offsets,
+        gains,
+        strip_bytes,
+        note,
+    }
 }
 
 /// Capture-derived phase list (session 03). Offset codes `>= 0x100` are negative.
 pub const AFE_SEARCH_PHASES_CAPTURE: [AfeSearchPhase; 14] = [
     phase("init_zeros", Some([0, 0, 0]), Some([0, 0, 0]), None, ""),
-    phase("offset_probe_0x80", Some([0x80, 0x80, 0x80]), Some([0, 0, 0]), Some(AFE_STRIP_BYTES), "first 3072-byte strip"),
-    phase("offset_probe_0xff", Some([0xFF, 0xFF, 0xFF]), None, Some(AFE_STRIP_BYTES), ""),
-    phase("offset_negative_estimate", Some([0x016A, 0x0142, 0x015B]), None, None, "session-03 example (-106, -66, -91); values are unit-specific"),
-    phase("wide_gain_strip", None, Some([0, 0, 0]), Some(AFE_WIDE_BYTES), "62268-byte read before coarse gains"),
-    phase("gain_coarse", None, Some([0x24, 0x1A, 0x21]), None, "session-03 example coarse gains"),
-    phase("offset_reprobe_0x80", Some([0x80, 0x80, 0x80]), None, Some(AFE_STRIP_BYTES), ""),
-    phase("offset_reprobe_0xff", Some([0xFF, 0xFF, 0xFF]), None, Some(AFE_STRIP_BYTES), ""),
-    phase("offset_negative_small", Some([0x115, 0x113, 0x113]), None, None, ""),
+    phase(
+        "offset_probe_0x80",
+        Some([0x80, 0x80, 0x80]),
+        Some([0, 0, 0]),
+        Some(AFE_STRIP_BYTES),
+        "first 3072-byte strip",
+    ),
+    phase(
+        "offset_probe_0xff",
+        Some([0xFF, 0xFF, 0xFF]),
+        None,
+        Some(AFE_STRIP_BYTES),
+        "",
+    ),
+    phase(
+        "offset_negative_estimate",
+        Some([0x016A, 0x0142, 0x015B]),
+        None,
+        None,
+        "session-03 example (-106, -66, -91); values are unit-specific",
+    ),
+    phase(
+        "wide_gain_strip",
+        None,
+        Some([0, 0, 0]),
+        Some(AFE_WIDE_BYTES),
+        "62268-byte read before coarse gains",
+    ),
+    phase(
+        "gain_coarse",
+        None,
+        Some([0x24, 0x1A, 0x21]),
+        None,
+        "session-03 example coarse gains",
+    ),
+    phase(
+        "offset_reprobe_0x80",
+        Some([0x80, 0x80, 0x80]),
+        None,
+        Some(AFE_STRIP_BYTES),
+        "",
+    ),
+    phase(
+        "offset_reprobe_0xff",
+        Some([0xFF, 0xFF, 0xFF]),
+        None,
+        Some(AFE_STRIP_BYTES),
+        "",
+    ),
+    phase(
+        "offset_negative_small",
+        Some([0x115, 0x113, 0x113]),
+        None,
+        None,
+        "",
+    ),
     phase("offset_low", Some([0x0C, 0x16, 0x10]), None, None, ""),
-    phase("shading_upload_unity_white", None, None, None, "AHB 0x10014000 with white=0x2000; dark from dark strip"),
+    phase(
+        "shading_upload_unity_white",
+        None,
+        None,
+        None,
+        "AHB 0x10014000 with white=0x2000; dark from dark strip",
+    ),
     phase("offset_settle", Some([0x12, 0x1E, 0x17]), None, None, ""),
-    phase("shading_upload_measured_white", None, None, None, "AHB 0x10014000 with per-pixel white terms"),
+    phase(
+        "shading_upload_measured_white",
+        None,
+        None,
+        None,
+        "AHB 0x10014000 with per-pixel white terms",
+    ),
     phase("gain_fine", None, Some([0x26, 0x1E, 0x25]), None, ""),
 ];
 
@@ -328,15 +428,20 @@ pub fn declared_shading_size(entries: usize) -> usize {
 /// Pixels covered by a declared AHB shading upload size (inverse of above).
 pub fn shading_entry_count(declared_size: usize) -> Result<usize> {
     if declared_size % SHADING_PAIR_BYTES != 0 {
-        return Err(Error::Value(format!("Shading declared_size={declared_size} is not a whole number of 4-byte pairs")));
+        return Err(Error::Value(format!(
+            "Shading declared_size={declared_size} is not a whole number of 4-byte pairs"
+        )));
     }
-    let estimate = declared_size * SHADING_BLOCK_DATA_PAIRS / (SHADING_PAIR_BYTES * 3 * SHADING_BLOCK_PAIRS);
+    let estimate =
+        declared_size * SHADING_BLOCK_DATA_PAIRS / (SHADING_PAIR_BYTES * 3 * SHADING_BLOCK_PAIRS);
     for c in estimate.saturating_sub(2)..estimate + 3 {
         if declared_shading_size(c) == declared_size {
             return Ok(c);
         }
     }
-    Err(Error::Value(format!("Shading declared_size={declared_size} does not match any pixel count")))
+    Err(Error::Value(format!(
+        "Shading declared_size={declared_size} does not match any pixel count"
+    )))
 }
 
 /// Declared AHB shading table width for `resolution` dpi.
@@ -351,10 +456,17 @@ pub fn shading_width_for_resolution(resolution: i64) -> i64 {
 }
 
 /// USB pixels per shading line for an image window.
-pub fn shading_acquire_width(strpixel: i64, endpixel: i64, dpiset: i64, optical_resolution: i64) -> Result<i64> {
+pub fn shading_acquire_width(
+    strpixel: i64,
+    endpixel: i64,
+    dpiset: i64,
+    optical_resolution: i64,
+) -> Result<i64> {
     let span = endpixel - strpixel;
     if span <= 0 {
-        return Err(Error::Value(format!("shading window empty: {strpixel}..{endpixel}")));
+        return Err(Error::Value(format!(
+            "shading window empty: {strpixel}..{endpixel}"
+        )));
     }
     let dpi = (dpiset * 6).max(1);
     let factor = (optical_resolution / dpi).max(1);
@@ -397,12 +509,23 @@ pub fn shading_columns_mean(cols: &[Rgb]) -> f64 {
 }
 
 /// Choose dark-column USB layout for shading averages.
-pub fn pick_shading_dark_layout(primary: &[Rgb], alternate: &[Rgb], primary_is_planar: bool, dark_mean_max: f64, mean_improve_min: f64) -> (Vec<Rgb>, bool) {
+pub fn pick_shading_dark_layout(
+    primary: &[Rgb],
+    alternate: &[Rgb],
+    primary_is_planar: bool,
+    dark_mean_max: f64,
+    mean_improve_min: f64,
+) -> (Vec<Rgb>, bool) {
     let mean_a = shading_columns_mean(primary);
     let mean_b = shading_columns_mean(alternate);
-    let use_alt = mean_b < mean_a && (mean_b <= dark_mean_max || (mean_a - mean_b) >= mean_improve_min);
+    let use_alt =
+        mean_b < mean_a && (mean_b <= dark_mean_max || (mean_a - mean_b) >= mean_improve_min);
     let chosen = if use_alt { alternate } else { primary };
-    let planar = if use_alt { !primary_is_planar } else { primary_is_planar };
+    let planar = if use_alt {
+        !primary_is_planar
+    } else {
+        primary_is_planar
+    };
     (chosen.to_vec(), planar)
 }
 
@@ -415,7 +538,11 @@ pub fn color_shading_looks_like_film(white: &[Rgb]) -> bool {
     if white.is_empty() {
         return false;
     }
-    let (wr, wg, wb) = (channel_mean(white, 0), channel_mean(white, 1), channel_mean(white, 2));
+    let (wr, wg, wb) = (
+        channel_mean(white, 0),
+        channel_mean(white, 1),
+        channel_mean(white, 2),
+    );
     let gb = wg.min(wb);
     gb >= COLOR_SHADING_FILM_GB_MIN && wr < gb * COLOR_SHADING_FILM_R_FRAC
 }
@@ -426,12 +553,19 @@ fn f0(x: f64) -> String {
 }
 
 /// `(ok, reason)` for the raw strips a colour shading table is built from.
-pub fn validate_color_shading_strip(dark: &[Rgb], white: &[Rgb], acquire_width: Option<i64>) -> (bool, String) {
+pub fn validate_color_shading_strip(
+    dark: &[Rgb],
+    white: &[Rgb],
+    acquire_width: Option<i64>,
+) -> (bool, String) {
     if dark.is_empty() || white.is_empty() {
         return (false, "empty dark/white".into());
     }
     if dark.len() != white.len() {
-        return (false, format!("dark/white length mismatch {}!={}", dark.len(), white.len()));
+        return (
+            false,
+            format!("dark/white length mismatch {}!={}", dark.len(), white.len()),
+        );
     }
     let (mut dark, mut white) = (dark, white);
     if let Some(aw) = acquire_width.filter(|&a| a > 0) {
@@ -445,20 +579,46 @@ pub fn validate_color_shading_strip(dark: &[Rgb], white: &[Rgb], acquire_width: 
     let dark_mean = shading_columns_mean(dark);
     let white_mean = shading_columns_mean(white);
     if white_mean < COLOR_SHADING_WHITE_MEAN_MIN {
-        return (false, format!("white mean {} < {}", f0(white_mean), COLOR_SHADING_WHITE_MEAN_MIN as i64));
+        return (
+            false,
+            format!(
+                "white mean {} < {}",
+                f0(white_mean),
+                COLOR_SHADING_WHITE_MEAN_MIN as i64
+            ),
+        );
     }
     let n_samples = white.len() * 3;
-    let clipped = white.iter().flatten().filter(|&&v| v >= COLOR_SHADING_WHITE_CLIP_LEVEL).count();
+    let clipped = white
+        .iter()
+        .flatten()
+        .filter(|&&v| v >= COLOR_SHADING_WHITE_CLIP_LEVEL)
+        .count();
     if clipped as f64 > n_samples as f64 * COLOR_SHADING_WHITE_CLIP_FRAC {
-        return (false, format!("white clipped at the rail ({clipped}/{n_samples} ≥ {COLOR_SHADING_WHITE_CLIP_LEVEL})"));
+        return (
+            false,
+            format!(
+                "white clipped at the rail ({clipped}/{n_samples} ≥ {COLOR_SHADING_WHITE_CLIP_LEVEL})"
+            ),
+        );
     }
     if color_shading_looks_like_film(white) {
-        return (false, "white strip looks like film (not clear home field)".into());
+        return (
+            false,
+            "white strip looks like film (not clear home field)".into(),
+        );
     }
     for ch in 0..3 {
         let w = channel_mean(white, ch);
         if w < COLOR_SHADING_CHANNEL_WHITE_MIN {
-            return (false, format!("ch{ch} white {} < {}", f0(w), COLOR_SHADING_CHANNEL_WHITE_MIN as i64));
+            return (
+                false,
+                format!(
+                    "ch{ch} white {} < {}",
+                    f0(w),
+                    COLOR_SHADING_CHANNEL_WHITE_MIN as i64
+                ),
+            );
         }
     }
     let floor = (COLOR_SHADING_WHITE_MEAN_MIN as i64 / 4) as i64;
@@ -468,11 +628,26 @@ pub fn validate_color_shading_strip(dark: &[Rgb], white: &[Rgb], acquire_width: 
         .filter(|(_, r)| *r.iter().min().unwrap() < floor)
         .map(|(i, _)| i as i64)
         .collect();
-    if zero_cols.len() >= IR_SHADING_DROPOUT_MIN_RUNS && has_periodic_dropouts(&zero_cols, IR_SHADING_DROPOUT_PERIOD) {
-        return (false, format!("periodic white dropouts (n={}, period≈{IR_SHADING_DROPOUT_PERIOD})", zero_cols.len()));
+    if zero_cols.len() >= IR_SHADING_DROPOUT_MIN_RUNS
+        && has_periodic_dropouts(&zero_cols, IR_SHADING_DROPOUT_PERIOD)
+    {
+        return (
+            false,
+            format!(
+                "periodic white dropouts (n={}, period≈{IR_SHADING_DROPOUT_PERIOD})",
+                zero_cols.len()
+            ),
+        );
     }
     if dark_mean > COLOR_SHADING_DARK_MEAN_MAX {
-        return (true, format!("ok (soft dark mean {}, white {})", f0(dark_mean), f0(white_mean)));
+        return (
+            true,
+            format!(
+                "ok (soft dark mean {}, white {})",
+                f0(dark_mean),
+                f0(white_mean)
+            ),
+        );
     }
     (true, "ok".into())
 }
@@ -486,14 +661,33 @@ pub fn validate_color_shading_gains(gains: &[Rgb]) -> (bool, String) {
     flat.sort_unstable();
     let median = flat[flat.len() / 2] as f64 / SHADING_GAIN_UNITY as f64;
     if median < COLOR_SHADING_GAIN_MEDIAN_MIN {
-        return (false, format!("median gain {median:.3}x < {COLOR_SHADING_GAIN_MEDIAN_MIN}x (white already at target)"));
+        return (
+            false,
+            format!(
+                "median gain {median:.3}x < {COLOR_SHADING_GAIN_MEDIAN_MIN}x (white already at target)"
+            ),
+        );
     }
     if median > COLOR_SHADING_GAIN_MEDIAN_MAX {
-        return (false, format!("median gain {median:.3}x > {COLOR_SHADING_GAIN_MEDIAN_MAX:.1}x (white too dim to flatten)"));
+        return (
+            false,
+            format!(
+                "median gain {median:.3}x > {COLOR_SHADING_GAIN_MEDIAN_MAX:.1}x (white too dim to flatten)"
+            ),
+        );
     }
-    let clamped = flat.iter().filter(|&&v| v <= SHADING_GAIN_MIN || v >= SHADING_GAIN_MAX).count();
+    let clamped = flat
+        .iter()
+        .filter(|&&v| v <= SHADING_GAIN_MIN || v >= SHADING_GAIN_MAX)
+        .count();
     if clamped as f64 > flat.len() as f64 * COLOR_SHADING_GAIN_CLAMP_FRAC {
-        return (false, format!("{clamped}/{} gains hit a clamp ({SHADING_GAIN_MIN}..{SHADING_GAIN_MAX})", flat.len()));
+        return (
+            false,
+            format!(
+                "{clamped}/{} gains hit a clamp ({SHADING_GAIN_MIN}..{SHADING_GAIN_MAX})",
+                flat.len()
+            ),
+        );
     }
     (true, format!("ok (median gain {median:.3}x)"))
 }
@@ -502,12 +696,20 @@ pub fn validate_color_shading_gains(gains: &[Rgb]) -> (bool, String) {
 ///
 /// Pass `raw_white` (pre-equalize strip) so bar/period checks still see
 /// channel dropouts that [`equalize_ir_white_columns`] would hide.
-pub fn validate_ir_shading_table(dark: &[Rgb], white: &[Rgb], acquire_width: Option<i64>, raw_white: Option<&[Rgb]>) -> (bool, String) {
+pub fn validate_ir_shading_table(
+    dark: &[Rgb],
+    white: &[Rgb],
+    acquire_width: Option<i64>,
+    raw_white: Option<&[Rgb]>,
+) -> (bool, String) {
     if dark.is_empty() || white.is_empty() {
         return (false, "empty dark/white".into());
     }
     if dark.len() != white.len() {
-        return (false, format!("dark/white length mismatch {}!={}", dark.len(), white.len()));
+        return (
+            false,
+            format!("dark/white length mismatch {}!={}", dark.len(), white.len()),
+        );
     }
     let (mut dark, mut white, mut raw_white) = (dark, white, raw_white);
     if let Some(aw) = acquire_width.filter(|&a| a > 0) {
@@ -521,21 +723,43 @@ pub fn validate_ir_shading_table(dark: &[Rgb], white: &[Rgb], acquire_width: Opt
     }
     let dark_peak = dark.iter().flatten().copied().max().unwrap();
     if dark_peak > IR_SHADING_DARK_MAX {
-        return (false, format!("dark peak {dark_peak} > {IR_SHADING_DARK_MAX}"));
+        return (
+            false,
+            format!("dark peak {dark_peak} > {IR_SHADING_DARK_MAX}"),
+        );
     }
     let w0 = white[0];
     let head_spread = w0.iter().max().unwrap() - w0.iter().min().unwrap();
     if head_spread > IR_SHADING_WHITE_SPREAD_MAX {
-        return (false, format!("white head spread {head_spread} > {IR_SHADING_WHITE_SPREAD_MAX}"));
+        return (
+            false,
+            format!("white head spread {head_spread} > {IR_SHADING_WHITE_SPREAD_MAX}"),
+        );
     }
     let whites: Vec<i64> = white.iter().flatten().copied().collect();
     let mean_white = whites.iter().sum::<i64>() as f64 / whites.len() as f64;
     if mean_white < IR_SHADING_WHITE_MEAN_MIN {
-        return (false, format!("white mean {} < {}", f0(mean_white), IR_SHADING_WHITE_MEAN_MIN as i64));
+        return (
+            false,
+            format!(
+                "white mean {} < {}",
+                f0(mean_white),
+                IR_SHADING_WHITE_MEAN_MIN as i64
+            ),
+        );
     }
-    let clipped = whites.iter().filter(|&&v| v > IR_SHADING_WHITE_CLIP_LEVEL).count();
+    let clipped = whites
+        .iter()
+        .filter(|&&v| v > IR_SHADING_WHITE_CLIP_LEVEL)
+        .count();
     if clipped as f64 >= whites.len() as f64 * IR_SHADING_WHITE_CLIP_FRAC {
-        return (false, format!("white clipped ({clipped}/{} > {IR_SHADING_WHITE_CLIP_LEVEL})", whites.len()));
+        return (
+            false,
+            format!(
+                "white clipped ({clipped}/{} > {IR_SHADING_WHITE_CLIP_LEVEL})",
+                whites.len()
+            ),
+        );
     }
     let bar_white = raw_white.unwrap_or(white);
     let bar_min = bar_white.iter().flatten().copied().min();
@@ -546,18 +770,32 @@ pub fn validate_ir_shading_table(dark: &[Rgb], white: &[Rgb], acquire_width: Opt
             .filter(|(_, r)| r.iter().any(|&c| c <= 0))
             .map(|(i, _)| i as i64)
             .collect();
-        if zero_cols.len() >= IR_SHADING_DROPOUT_MIN_RUNS && has_periodic_dropouts(&zero_cols, IR_SHADING_DROPOUT_PERIOD) {
-            return (false, format!("periodic zero whites (n={}, period≈{IR_SHADING_DROPOUT_PERIOD})", zero_cols.len()));
+        if zero_cols.len() >= IR_SHADING_DROPOUT_MIN_RUNS
+            && has_periodic_dropouts(&zero_cols, IR_SHADING_DROPOUT_PERIOD)
+        {
+            return (
+                false,
+                format!(
+                    "periodic zero whites (n={}, period≈{IR_SHADING_DROPOUT_PERIOD})",
+                    zero_cols.len()
+                ),
+            );
         }
         if zero_cols.len() > 8.max(bar_white.len() / 20) {
-            return (false, format!("too many zero white columns ({})", zero_cols.len()));
+            return (
+                false,
+                format!("too many zero white columns ({})", zero_cols.len()),
+            );
         }
     }
     let wmax = *whites.iter().max().unwrap();
     let wmin = *whites.iter().min().unwrap();
     let global_spread = wmax - wmin;
     if global_spread > 40000 && wmin < 256 {
-        return (false, format!("pathological white range spread={global_spread}"));
+        return (
+            false,
+            format!("pathological white range spread={global_spread}"),
+        );
     }
     (true, "ok".into())
 }
@@ -578,7 +816,10 @@ fn has_periodic_dropouts(zero_cols: &[i64], period: i64) -> bool {
         return false;
     }
     let diffs: Vec<i64> = starts.windows(2).map(|w| w[1] - w[0]).collect();
-    let near = diffs.iter().filter(|&&d| (d - period).abs() <= 2 || (d - period / 2).abs() <= 2).count();
+    let near = diffs
+        .iter()
+        .filter(|&&d| (d - period).abs() <= 2 || (d - period / 2).abs() <= 2)
+        .count();
     near >= 3.max(diffs.len() / 2)
 }
 
@@ -609,27 +850,46 @@ pub fn box_smooth_profile(profile: &[f32], half_window: i64) -> Vec<f32> {
         acc += ext(i);
         c.push(acc);
     }
-    (0..n).map(|i| ((c[i + k] - c[i]) / k as f64) as f32).collect()
+    (0..n)
+        .map(|i| ((c[i + k] - c[i]) / k as f64) as f32)
+        .collect()
 }
 
 /// Host IR flatten: `out[x] = ir[x] * target / white[x]` (per column).
 ///
 /// By default the white profile is low-pass filtered so only slow
 /// illumination falloff is corrected. `smooth_half = Some(0)` uses the raw profile.
-pub fn flatten_ir_columns(ir: ArrayView2<u16>, white: &[i64], target: Option<f64>, smooth_half: Option<i64>) -> Result<Array2<u16>> {
+pub fn flatten_ir_columns(
+    ir: ArrayView2<u16>,
+    white: &[i64],
+    target: Option<f64>,
+    smooth_half: Option<i64>,
+) -> Result<Array2<u16>> {
     let width = ir.ncols();
     if white.len() < width {
-        return Err(Error::Value(format!("white profile length {} < image width {width}", white.len())));
+        return Err(Error::Value(format!(
+            "white profile length {} < image width {width}",
+            white.len()
+        )));
     }
     let w_raw: Vec<f32> = white[..width].iter().map(|&v| v.max(1) as f32).collect();
-    let half = smooth_half.unwrap_or(if width < 64 { 0 } else { 8.max(width as i64 / 40) });
-    let w: Vec<f32> = box_smooth_profile(&w_raw, half).into_iter().map(|v| v.max(1.0)).collect();
+    let half = smooth_half.unwrap_or(if width < 64 {
+        0
+    } else {
+        8.max(width as i64 / 40)
+    });
+    let w: Vec<f32> = box_smooth_profile(&w_raw, half)
+        .into_iter()
+        .map(|v| v.max(1.0))
+        .collect();
     let mut tgt = target.unwrap_or_else(|| mean(w.iter().map(|&v| v as f64)) as f32 as f64);
     if tgt <= 0.0 {
         tgt = 1.0;
     }
     let gain: Vec<f32> = w.iter().map(|&wv| tgt as f32 / wv).collect();
-    Ok(Array2::from_shape_fn(ir.dim(), |(y, x)| to_u16((ir[[y, x]] as f32 * gain[x]) as f64)))
+    Ok(Array2::from_shape_fn(ir.dim(), |(y, x)| {
+        to_u16((ir[[y, x]] as f32 * gain[x]) as f64)
+    }))
 }
 
 pub const IR_SIDECAR_TARGET_LEVEL: f64 = 56000.0;
@@ -638,19 +898,34 @@ pub const IR_FLATTEN_MAX_GAIN: f64 = 4.0;
 
 /// Per-column percentile of a 2-D float32 plane (`np.percentile(axis=0)`).
 pub fn column_percentile(arr: &Array2<f32>, q: f64) -> Vec<f32> {
-    arr.axis_iter(Axis(1)).map(|col| crate::num::percentile_sorted_f32(&crate::num::sort_f32(col.to_vec()), q)).collect()
+    arr.axis_iter(Axis(1))
+        .map(|col| crate::num::percentile_sorted_f32(&crate::num::sort_f32(col.to_vec()), q))
+        .collect()
 }
 
 /// Per-image IR flatten for a SilverFast-like iSRD sidecar.
-pub fn flatten_ir_image_columns(ir: ArrayView2<u16>, percentile: f64, target: Option<f64>, smooth_half: Option<i64>, border_inset: f64, max_gain: f64) -> Result<Array2<u16>> {
+pub fn flatten_ir_image_columns(
+    ir: ArrayView2<u16>,
+    percentile: f64,
+    target: Option<f64>,
+    smooth_half: Option<i64>,
+    border_inset: f64,
+    max_gain: f64,
+) -> Result<Array2<u16>> {
     let (height, width) = ir.dim();
     if height < 1 || width < 1 {
-        return Err(Error::Value(format!("empty infrared plane: ({height}, {width})")));
+        return Err(Error::Value(format!(
+            "empty infrared plane: ({height}, {width})"
+        )));
     }
     let arr = ir.map(|&v| v as f32);
     let mut levels = column_percentile(&arr, percentile);
     let inset = border_inset.clamp(0.0, 0.2);
-    let cut = if width >= 16 { py_round(width as f64 * inset).max(0) as usize } else { 0 };
+    let cut = if width >= 16 {
+        py_round(width as f64 * inset).max(0) as usize
+    } else {
+        0
+    };
     if cut * 2 < width {
         let lo = levels[cut];
         let hi = levels[width - cut - 1];
@@ -661,8 +936,15 @@ pub fn flatten_ir_image_columns(ir: ArrayView2<u16>, percentile: f64, target: Op
             *v = hi;
         }
     }
-    let half = smooth_half.unwrap_or(if width < 64 { 0 } else { 8.max(width as i64 / 40) });
-    let levels: Vec<f32> = box_smooth_profile(&levels, half).into_iter().map(|v| v.max(1.0)).collect();
+    let half = smooth_half.unwrap_or(if width < 64 {
+        0
+    } else {
+        8.max(width as i64 / 40)
+    });
+    let levels: Vec<f32> = box_smooth_profile(&levels, half)
+        .into_iter()
+        .map(|v| v.max(1.0))
+        .collect();
     let mean_of = |s: &[f32]| mean(s.iter().map(|&v| v as f64)) as f32 as f64;
     let mut tgt_base = match target {
         Some(t) => t,
@@ -676,10 +958,16 @@ pub fn flatten_ir_image_columns(ir: ArrayView2<u16>, percentile: f64, target: Op
         .iter()
         .map(|&l| {
             let g = tgt_base as f32 / l;
-            if max_gain > 0.0 { g.min(max_gain as f32) } else { g }
+            if max_gain > 0.0 {
+                g.min(max_gain as f32)
+            } else {
+                g
+            }
         })
         .collect();
-    Ok(Array2::from_shape_fn((height, width), |(y, x)| to_u16((arr[[y, x]] * gain[x]) as f64)))
+    Ok(Array2::from_shape_fn((height, width), |(y, x)| {
+        to_u16((arr[[y, x]] * gain[x]) as f64)
+    }))
 }
 
 /// Edge-padded box mean via integral image (float64 in, float32 out).
@@ -714,7 +1002,8 @@ pub fn box_mean_2d(a: &Array2<f64>, half_y: usize, half_x: usize) -> Array2<f32>
     let (ky, kx) = (2 * half_y + 1, 2 * half_x + 1);
     let area = (ky * kx) as f64;
     Array2::from_shape_fn((h, w), |(y, x)| {
-        let t = integral[[y + ky, x + kx]] - integral[[y, x + kx]] - integral[[y + ky, x]] + integral[[y, x]];
+        let t = integral[[y + ky, x + kx]] - integral[[y, x + kx]] - integral[[y + ky, x]]
+            + integral[[y, x]];
         (t / area) as f32
     })
 }
@@ -754,10 +1043,15 @@ const IR_DET0_HI: f64 = 99.85;
 /// Map SilverFast-like Detection `0..20` → `(dip_lo, dip_hi)` enhance percentiles.
 pub fn detection_to_enhance_params(detection: i64) -> Result<(f64, f64)> {
     if !(IR_DETECTION_MIN..=IR_DETECTION_MAX).contains(&detection) {
-        return Err(Error::Value(format!("detection must be {IR_DETECTION_MIN}..{IR_DETECTION_MAX}, got {detection}")));
+        return Err(Error::Value(format!(
+            "detection must be {IR_DETECTION_MIN}..{IR_DETECTION_MAX}, got {detection}"
+        )));
     }
     let t = detection as f64 / IR_DETECTION_MAX as f64;
-    Ok((IR_DET0_LO + t * (IR_DET20_LO - IR_DET0_LO), IR_DET0_HI + t * (IR_DET20_HI - IR_DET0_HI)))
+    Ok((
+        IR_DET0_LO + t * (IR_DET20_LO - IR_DET0_LO),
+        IR_DET0_HI + t * (IR_DET20_HI - IR_DET0_HI),
+    ))
 }
 
 struct DipMaps {
@@ -777,14 +1071,31 @@ fn ir_dip_maps(arr: &Array2<f32>) -> DipMaps {
     let film = box_mean_2d(&a64, film_hy, film_hx);
     let local = box_mean_2d(&a64, local_hy, local_hx);
     let dip = Array2::from_shape_fn((height, width), |p| (local[p] - arr[p]).max(0.0));
-    let (y0, y1) = ((height as f64 * 0.08) as usize, (height as f64 * 0.92) as usize);
-    let (x0, x1) = ((width as f64 * 0.08) as usize, (width as f64 * 0.92) as usize);
-    let center = Array2::from_shape_fn((height, width), |(y, x)| y >= y0 && y < y1 && x >= x0 && x < x1 && arr[[y, x]] > 10000.0);
-    DipMaps { film, local, dip, center }
+    let (y0, y1) = (
+        (height as f64 * 0.08) as usize,
+        (height as f64 * 0.92) as usize,
+    );
+    let (x0, x1) = (
+        (width as f64 * 0.08) as usize,
+        (width as f64 * 0.92) as usize,
+    );
+    let center = Array2::from_shape_fn((height, width), |(y, x)| {
+        y >= y0 && y < y1 && x >= x0 && x < x1 && arr[[y, x]] > 10000.0
+    });
+    DipMaps {
+        film,
+        local,
+        dip,
+        center,
+    }
 }
 
 fn punch_strength(dip: &Array2<f32>, sample: &[f64], lo_p: f64, hi_p: f64) -> Array2<f32> {
-    let s = if sample.len() < 64 { sorted_f64(dip.iter().map(|&v| v as f64)) } else { sorted_f64(sample.iter().copied()) };
+    let s = if sample.len() < 64 {
+        sorted_f64(dip.iter().map(|&v| v as f64))
+    } else {
+        sorted_f64(sample.iter().copied())
+    };
     let lo = percentile_sorted(&s, lo_p);
     let hi = percentile_sorted(&s, hi_p).max(lo + 1.0);
     dip.map(|&d| {
@@ -800,14 +1111,26 @@ pub fn estimate_ir_detection(ir_flat: ArrayView2<u16>) -> i64 {
         return 15;
     }
     let m = ir_dip_maps(&arr);
-    let mut sample: Vec<f64> = m.dip.iter().zip(m.center.iter()).filter(|(_, c)| **c).map(|(&d, _)| d as f64).collect();
+    let mut sample: Vec<f64> = m
+        .dip
+        .iter()
+        .zip(m.center.iter())
+        .filter(|(_, c)| **c)
+        .map(|(&d, _)| d as f64)
+        .collect();
     if sample.len() < 64 {
         sample = m.dip.iter().map(|&v| v as f64).collect();
     }
     let ss = sorted_f64(sample.iter().copied());
-    let (p80, p96, p995) = (percentile_sorted(&ss, 80.0), percentile_sorted(&ss, 96.0), percentile_sorted(&ss, 99.5));
+    let (p80, p96, p995) = (
+        percentile_sorted(&ss, 80.0),
+        percentile_sorted(&ss, 96.0),
+        percentile_sorted(&ss, 99.5),
+    );
     let true_pool = Array2::from_shape_fn(m.dip.dim(), |p| m.center[p] && m.dip[p] as f64 >= p995);
-    let ghost_pool = Array2::from_shape_fn(m.dip.dim(), |p| m.center[p] && m.dip[p] as f64 >= p80 && m.dip[p] as f64 <= p96);
+    let ghost_pool = Array2::from_shape_fn(m.dip.dim(), |p| {
+        m.center[p] && m.dip[p] as f64 >= p80 && m.dip[p] as f64 <= p96
+    });
     let n_true = true_pool.iter().filter(|&&b| b).count();
     let n_ghost = ghost_pool.iter().filter(|&&b| b).count();
     if n_true < 1 {
@@ -817,13 +1140,19 @@ pub fn estimate_ir_detection(ir_flat: ArrayView2<u16>) -> i64 {
         if n == 0 {
             return 0.0;
         }
-        strength.iter().zip(pool.iter()).filter(|(s, p)| **p && **s >= 0.5).count() as f64 / n as f64
+        strength
+            .iter()
+            .zip(pool.iter())
+            .filter(|(s, p)| **p && **s >= 0.5)
+            .count() as f64
+            / n as f64
     };
     let (mut best_d, mut best_score) = (0, -1e9);
     for d in IR_DETECTION_MIN..=IR_DETECTION_MAX {
         let (lo, hi) = detection_to_enhance_params(d).expect("in range");
         let strength = punch_strength(&m.dip, &sample, lo, hi);
-        let score = frac(&strength, &true_pool, n_true) - 2.0 * frac(&strength, &ghost_pool, n_ghost);
+        let score =
+            frac(&strength, &true_pool, n_true) - 2.0 * frac(&strength, &ghost_pool, n_ghost);
         if score > best_score + 1e-9 || ((score - best_score).abs() <= 1e-9 && d < best_d) {
             best_score = score;
             best_d = d;
@@ -834,10 +1163,21 @@ pub fn estimate_ir_detection(ir_flat: ArrayView2<u16>) -> i64 {
 
 /// Wash film ghost and punch local dark defects toward SilverFast IR levels.
 #[allow(clippy::too_many_arguments)]
-pub fn enhance_ir_defect_contrast(ir: ArrayView2<u16>, detection: Option<i64>, target: f64, film_retain: f64, dip_lo_percentile: Option<f64>, dip_hi_percentile: Option<f64>, defect_floor: f64) -> Result<Array2<u16>> {
+pub fn enhance_ir_defect_contrast(
+    ir: ArrayView2<u16>,
+    detection: Option<i64>,
+    target: f64,
+    film_retain: f64,
+    dip_lo_percentile: Option<f64>,
+    dip_hi_percentile: Option<f64>,
+    defect_floor: f64,
+) -> Result<Array2<u16>> {
     let (lo_p, hi_p) = match detection {
         Some(d) => detection_to_enhance_params(d)?,
-        None => (dip_lo_percentile.unwrap_or(IR_DET20_LO), dip_hi_percentile.unwrap_or(IR_DET20_HI)),
+        None => (
+            dip_lo_percentile.unwrap_or(IR_DET20_LO),
+            dip_hi_percentile.unwrap_or(IR_DET20_HI),
+        ),
     };
     let arr = ir.map(|&v| v as f32);
     let (height, width) = arr.dim();
@@ -846,22 +1186,38 @@ pub fn enhance_ir_defect_contrast(ir: ArrayView2<u16>, detection: Option<i64>, t
     }
     let m = ir_dip_maps(&arr);
     let film_mean = mean(m.film.iter().map(|&v| v as f64)) as f32 as f64;
-    let sample: Vec<f64> = m.dip.iter().zip(m.center.iter()).filter(|(_, c)| **c).map(|(&d, _)| d as f64).collect();
+    let sample: Vec<f64> = m
+        .dip
+        .iter()
+        .zip(m.center.iter())
+        .filter(|(_, c)| **c)
+        .map(|(&d, _)| d as f64)
+        .collect();
     let strength = punch_strength(&m.dip, &sample, lo_p, hi_p);
     Ok(Array2::from_shape_fn((height, width), |p| {
         let film = m.film[p] as f64;
-        let base = target + (film - film_mean) * film_retain + (m.local[p] as f64 - film) * (film_retain * 0.35);
+        let base = target
+            + (film - film_mean) * film_retain
+            + (m.local[p] as f64 - film) * (film_retain * 0.35);
         let st = (strength[p] as f64).max(((8000.0 - arr[p] as f64) / 8000.0).clamp(0.0, 1.0));
         to_u16(base * (1.0 - st) + defect_floor * st)
     }))
 }
 
 /// Per-column mean R/G/B from `lines` of RGB16 (planar `RRR…GGG…BBB…` or chunky).
-pub fn average_rgb16_columns(raw: &[u8], pixels: usize, lines: usize, planar: bool) -> Result<Vec<Rgb>> {
+pub fn average_rgb16_columns(
+    raw: &[u8],
+    pixels: usize,
+    lines: usize,
+    planar: bool,
+) -> Result<Vec<Rgb>> {
     let row_bytes = pixels * 6;
     let need = row_bytes * lines;
     if raw.len() < need {
-        return Err(Error::Value(format!("shading raw too short: {} < {need}", raw.len())));
+        return Err(Error::Value(format!(
+            "shading raw too short: {} < {need}",
+            raw.len()
+        )));
     }
     let mut sums = vec![[0i64; 3]; pixels];
     let plane = pixels * 2;
@@ -869,25 +1225,45 @@ pub fn average_rgb16_columns(raw: &[u8], pixels: usize, lines: usize, planar: bo
         let base = line * row_bytes;
         for (x, s) in sums.iter_mut().enumerate() {
             for (c, sc) in s.iter_mut().enumerate() {
-                let off = if planar { base + c * plane + x * 2 } else { base + x * 6 + 2 * c };
+                let off = if planar {
+                    base + c * plane + x * 2
+                } else {
+                    base + x * 6 + 2 * c
+                };
                 *sc += u16le(raw, off);
             }
         }
     }
     let inv = 1.0 / lines as f64;
-    Ok(sums.iter().map(|s| [py_round(s[0] as f64 * inv), py_round(s[1] as f64 * inv), py_round(s[2] as f64 * inv)]).collect())
+    Ok(sums
+        .iter()
+        .map(|s| {
+            [
+                py_round(s[0] as f64 * inv),
+                py_round(s[1] as f64 * inv),
+                py_round(s[2] as f64 * inv),
+            ]
+        })
+        .collect())
 }
 
 /// Mean R/G/B from a 16-bit LE strip (AFE probe line).
 pub fn channel_means_u16(strip: &[u8], pixels: usize, planar: bool) -> Result<[f64; 3]> {
     let expected = pixels * 6;
     if strip.len() < expected {
-        return Err(Error::Value(format!("strip too short: {} < {expected}", strip.len())));
+        return Err(Error::Value(format!(
+            "strip too short: {} < {expected}",
+            strip.len()
+        )));
     }
     let mut sums = [0i64; 3];
     for (c, s) in sums.iter_mut().enumerate() {
         for i in 0..pixels {
-            *s += if planar { u16le(strip, c * pixels * 2 + i * 2) } else { u16le(strip, i * 6 + 2 * c) };
+            *s += if planar {
+                u16le(strip, c * pixels * 2 + i * 2)
+            } else {
+                u16le(strip, i * 6 + 2 * c)
+            };
         }
     }
     let p = pixels as f64;
@@ -907,23 +1283,45 @@ pub fn constant_dark_from_columns(dark: &[Rgb]) -> Result<Vec<Rgb>> {
 /// Fixed-point gain that lifts `white_unity` to `target`.
 pub fn shading_gain_for_white(white_unity: f64, target: i64) -> i64 {
     let denom = white_unity.max(1.0);
-    py_round(target as f64 * SHADING_GAIN_UNITY as f64 / denom).clamp(SHADING_GAIN_MIN, SHADING_GAIN_MAX)
+    py_round(target as f64 * SHADING_GAIN_UNITY as f64 / denom)
+        .clamp(SHADING_GAIN_MIN, SHADING_GAIN_MAX)
 }
 
 /// Per-pixel RGB gains for a post-unity DVDSET white strip.
 pub fn shading_gains_from_white(white: &[Rgb], target: i64) -> Vec<Rgb> {
-    white.iter().map(|r| r.map(|v| shading_gain_for_white(v as f64, target))).collect()
+    white
+        .iter()
+        .map(|r| r.map(|v| shading_gain_for_white(v as f64, target)))
+        .collect()
 }
 
 /// Pack the second shading upload: measured dark plus computed gains.
-pub fn build_measured_shading_table(dark: &[Rgb], white: &[Rgb], flatten_dark: bool, declared_size: Option<usize>, target: i64) -> Result<Vec<u8>> {
-    let dark_rows = if flatten_dark { constant_dark_from_columns(dark)? } else { dark.to_vec() };
+pub fn build_measured_shading_table(
+    dark: &[Rgb],
+    white: &[Rgb],
+    flatten_dark: bool,
+    declared_size: Option<usize>,
+    target: i64,
+) -> Result<Vec<u8>> {
+    let dark_rows = if flatten_dark {
+        constant_dark_from_columns(dark)?
+    } else {
+        dark.to_vec()
+    };
     let declared = declared_size.unwrap_or_else(|| declared_shading_size(white.len()));
-    pack_shading_table(&dark_rows, &shading_gains_from_white(white, target), Some(declared))
+    pack_shading_table(
+        &dark_rows,
+        &shading_gains_from_white(white, target),
+        Some(declared),
+    )
 }
 
 /// Pack per-pixel RGB dark/gain u16 terms into the ASIC shading blob.
-pub fn pack_shading_table(dark: &[Rgb], gain: &[Rgb], declared_size: Option<usize>) -> Result<Vec<u8>> {
+pub fn pack_shading_table(
+    dark: &[Rgb],
+    gain: &[Rgb],
+    declared_size: Option<usize>,
+) -> Result<Vec<u8>> {
     if dark.len() != gain.len() {
         return Err(Error::Value("dark/gain length mismatch".into()));
     }
@@ -946,7 +1344,10 @@ pub fn pack_shading_table(dark: &[Rgb], gain: &[Rgb], declared_size: Option<usiz
     }
     if let Some(ds) = declared_size {
         if out.len() > ds {
-            return Err(Error::Value(format!("payload {} exceeds declared_size {ds}", out.len())));
+            return Err(Error::Value(format!(
+                "payload {} exceeds declared_size {ds}",
+                out.len()
+            )));
         }
         out.resize(ds, 0);
     }
@@ -974,28 +1375,50 @@ pub fn unpack_shading_table(payload: &[u8]) -> Vec<ShadingEntry> {
     let mut i = 0;
     while i + 2 < pairs.len() {
         let trio = &pairs[i..i + 3];
-        entries.push(ShadingEntry { dark: trio.iter().map(|p| p.0).collect(), gain: trio.iter().map(|p| p.1).collect() });
+        entries.push(ShadingEntry {
+            dark: trio.iter().map(|p| p.0).collect(),
+            gain: trio.iter().map(|p| p.1).collect(),
+        });
         i += 3;
     }
     entries
 }
 
 /// First shading upload shape: measured dark, gain fixed at unity (`0x2000`).
-pub fn make_unity_white_table(dark: &[Rgb], declared_size: Option<usize>, flatten_dark: bool) -> Result<Vec<u8>> {
-    let dark_rows = if flatten_dark { constant_dark_from_columns(dark)? } else { dark.to_vec() };
+pub fn make_unity_white_table(
+    dark: &[Rgb],
+    declared_size: Option<usize>,
+    flatten_dark: bool,
+) -> Result<Vec<u8>> {
+    let dark_rows = if flatten_dark {
+        constant_dark_from_columns(dark)?
+    } else {
+        dark.to_vec()
+    };
     let gain = vec![[SHADING_GAIN_UNITY; 3]; dark_rows.len()];
     let declared = declared_size.unwrap_or_else(|| declared_shading_size(dark_rows.len()));
     pack_shading_table(&dark_rows, &gain, Some(declared))
 }
 
 /// One binary-search step. Returns `(new_low, new_high, next_code)`.
-pub fn dichotomy_bracket_update(low: i64, high: i64, current: i64, mean: f64, target: f64, code_increases_mean: bool) -> (i64, i64, i64) {
+pub fn dichotomy_bracket_update(
+    low: i64,
+    high: i64,
+    current: i64,
+    mean: f64,
+    target: f64,
+    code_increases_mean: bool,
+) -> (i64, i64, i64) {
     let (mut low, mut high) = (low, high);
     if high <= low {
         return (low, high, low);
     }
     if code_increases_mean {
-        if mean > target { high = current } else { low = current }
+        if mean > target {
+            high = current
+        } else {
+            low = current
+        }
     } else if mean > target {
         low = current;
     } else {
@@ -1006,7 +1429,11 @@ pub fn dichotomy_bracket_update(low: i64, high: i64, current: i64, mean: f64, ta
     }
     let mut next = (low + high).div_euclid(2);
     if next == current {
-        next = if high > current { current + 1 } else { low.max(current - 1) };
+        next = if high > current {
+            current + 1
+        } else {
+            low.max(current - 1)
+        };
     }
     (low, high, next)
 }
@@ -1036,7 +1463,14 @@ pub fn search_afe_codes(
                 continue;
             }
             done = false;
-            let (l, h, n) = dichotomy_bracket_update(lows[c], highs[c], codes[c], means[c], target, code_increases_mean);
+            let (l, h, n) = dichotomy_bracket_update(
+                lows[c],
+                highs[c],
+                codes[c],
+                means[c],
+                target,
+                code_increases_mean,
+            );
             lows[c] = l;
             highs[c] = h;
             codes[c] = n.clamp(lo0, hi0);
@@ -1049,9 +1483,16 @@ pub fn search_afe_codes(
 }
 
 /// Search offsets then gains so strip channel means approach the targets.
-pub fn run_afe_dichotomy(measure: &mut dyn FnMut(AfeFrontend) -> Result<[f64; 3]>, config: Option<AfeSearchConfig>, start: Option<AfeFrontend>) -> Result<AfeFrontend> {
+pub fn run_afe_dichotomy(
+    measure: &mut dyn FnMut(AfeFrontend) -> Result<[f64; 3]>,
+    config: Option<AfeSearchConfig>,
+    start: Option<AfeFrontend>,
+) -> Result<AfeFrontend> {
     let cfg = config.unwrap_or_default();
-    let fe0 = start.unwrap_or(AfeFrontend { offsets: [0; 3], gains: [0; 3] });
+    let fe0 = start.unwrap_or(AfeFrontend {
+        offsets: [0; 3],
+        gains: [0; 3],
+    });
     let offsets = search_afe_codes(
         fe0.offsets,
         cfg.offset_max,
@@ -1059,11 +1500,20 @@ pub fn run_afe_dichotomy(measure: &mut dyn FnMut(AfeFrontend) -> Result<[f64; 3]
         cfg.iterations,
         cfg.tolerance,
         cfg.offset_increases_mean,
-        &mut |o| measure(AfeFrontend { offsets: o, gains: fe0.gains }),
+        &mut |o| {
+            measure(AfeFrontend {
+                offsets: o,
+                gains: fe0.gains,
+            })
+        },
         0,
     )?;
     // Start gain search near the capture mid probe (0x80), not zero.
-    let gain0 = if fe0.gains.iter().any(|&g| g != 0) { fe0.gains } else { [0x80; 3] };
+    let gain0 = if fe0.gains.iter().any(|&g| g != 0) {
+        fe0.gains
+    } else {
+        [0x80; 3]
+    };
     let gains = search_afe_codes(
         gain0,
         cfg.gain_max,

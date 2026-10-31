@@ -50,10 +50,23 @@ pub enum Status {
 impl Status {
     pub fn from_code(c: i32) -> Self {
         use Status::*;
-        [Good, Unsupported, Cancelled, DeviceBusy, Inval, Eof, Jammed, NoDocs, CoverOpen, IoError, NoMem, AccessDenied]
-            .get(c as usize)
-            .copied()
-            .unwrap_or(Other(c))
+        [
+            Good,
+            Unsupported,
+            Cancelled,
+            DeviceBusy,
+            Inval,
+            Eof,
+            Jammed,
+            NoDocs,
+            CoverOpen,
+            IoError,
+            NoMem,
+            AccessDenied,
+        ]
+        .get(c as usize)
+        .copied()
+        .unwrap_or(Other(c))
     }
 }
 
@@ -114,10 +127,18 @@ pub enum Unit {
 
 impl Unit {
     pub fn from_code(c: i32) -> Self {
-        [Self::None, Self::Pixel, Self::Bit, Self::Mm, Self::Dpi, Self::Percent, Self::Microsecond]
-            .get(c as usize)
-            .copied()
-            .unwrap_or(Self::None)
+        [
+            Self::None,
+            Self::Pixel,
+            Self::Bit,
+            Self::Mm,
+            Self::Dpi,
+            Self::Percent,
+            Self::Microsecond,
+        ]
+        .get(c as usize)
+        .copied()
+        .unwrap_or(Self::None)
     }
 }
 
@@ -157,15 +178,24 @@ impl OptionInfo {
         self.active() && self.cap & CAP_SOFT_SELECT != 0
     }
     fn word_to_f64(&self, w: i32) -> f64 {
-        if self.value_type == OptionType::Fixed { fixed_to_f64(w) } else { w as f64 }
+        if self.value_type == OptionType::Fixed {
+            fixed_to_f64(w)
+        } else {
+            w as f64
+        }
     }
     /// Range bounds in the option's unit.
     pub fn range(&self) -> Option<(f64, f64)> {
         match &self.constraint {
-            Constraint::Range { min, max, .. } => Some((self.word_to_f64(*min), self.word_to_f64(*max))),
+            Constraint::Range { min, max, .. } => {
+                Some((self.word_to_f64(*min), self.word_to_f64(*max)))
+            }
             Constraint::WordList(w) if !w.is_empty() => {
                 let v: Vec<f64> = w.iter().map(|&x| self.word_to_f64(x)).collect();
-                Some((v.iter().cloned().fold(f64::MAX, f64::min), v.iter().cloned().fold(f64::MIN, f64::max)))
+                Some((
+                    v.iter().cloned().fold(f64::MAX, f64::min),
+                    v.iter().cloned().fold(f64::MIN, f64::max),
+                ))
             }
             _ => None,
         }
@@ -198,7 +228,10 @@ pub enum Frame {
 
 impl Frame {
     pub fn from_code(c: i32) -> Self {
-        [Self::Gray, Self::Rgb, Self::Red, Self::Green, Self::Blue].get(c as usize).copied().unwrap_or(Self::Gray)
+        [Self::Gray, Self::Rgb, Self::Red, Self::Green, Self::Blue]
+            .get(c as usize)
+            .copied()
+            .unwrap_or(Self::Gray)
     }
 }
 
@@ -257,7 +290,9 @@ pub struct Sane {
 impl Sane {
     /// Load libsane and `sane_init` it.
     pub fn load() -> Result<Self> {
-        Ok(Self { backend: Box::new(ffi::LibSane::load()?) })
+        Ok(Self {
+            backend: Box::new(ffi::LibSane::load()?),
+        })
     }
 
     /// The simulated flatbed alone.
@@ -297,7 +332,9 @@ pub struct SaneImage {
 }
 
 /// Resolutions offered for a range constraint.
-const COMMON_DPI: [u32; 15] = [75, 100, 150, 200, 300, 400, 600, 800, 1200, 1600, 2400, 3200, 4800, 6400, 9600];
+const COMMON_DPI: [u32; 15] = [
+    75, 100, 150, 200, 300, 400, 600, 800, 1200, 1600, 2400, 3200, 4800, 6400, 9600,
+];
 
 /// Words in a source name that mean film (transparency unit, slide, negative).
 const FILM_SOURCE_WORDS: [&str; 5] = ["transparen", "tpu", "film", "slide", "negative"];
@@ -310,7 +347,10 @@ pub struct Device {
 
 impl Device {
     fn new(handle: Box<dyn Handle>) -> Result<Self> {
-        let mut d = Self { handle, options: Vec::new() };
+        let mut d = Self {
+            handle,
+            options: Vec::new(),
+        };
         d.reload()?;
         Ok(d)
     }
@@ -330,13 +370,19 @@ impl Device {
     }
 
     pub fn get(&mut self, name: &str) -> Result<Value> {
-        let opt = self.option(name).cloned().ok_or_else(|| Error::Invalid(format!("no option {name}")))?;
+        let opt = self
+            .option(name)
+            .cloned()
+            .ok_or_else(|| Error::Invalid(format!("no option {name}")))?;
         self.handle.get(&opt)
     }
 
     /// Set an option by name, re-reading the descriptors when SANE asks.
     pub fn set(&mut self, name: &str, value: Value) -> Result<()> {
-        let opt = self.option(name).cloned().ok_or_else(|| Error::Invalid(format!("no option {name}")))?;
+        let opt = self
+            .option(name)
+            .cloned()
+            .ok_or_else(|| Error::Invalid(format!("no option {name}")))?;
         let value = match (&opt.value_type, value) {
             (OptionType::Fixed, Value::Int(v)) => Value::Fixed(v as f64),
             (OptionType::Int, Value::Fixed(v)) => Value::Int(v.round() as i32),
@@ -360,7 +406,9 @@ impl Device {
 
     /// Scan sources (flatbed, transparency unit, …), as the device names them.
     pub fn sources(&self) -> Vec<String> {
-        self.option("source").map(|o| o.strings().to_vec()).unwrap_or_default()
+        self.option("source")
+            .map(|o| o.strings().to_vec())
+            .unwrap_or_default()
     }
 
     /// The first source that reads film, if any.
@@ -373,12 +421,18 @@ impl Device {
 
     /// Resolutions offered (for a range, the usual steps inside it).
     pub fn resolutions(&self) -> Vec<u32> {
-        let Some(o) = self.option("resolution") else { return Vec::new() };
+        let Some(o) = self.option("resolution") else {
+            return Vec::new();
+        };
         let mut v: Vec<u32> = match &o.constraint {
             Constraint::WordList(w) => w.iter().map(|&x| o.word_to_f64(x).round() as u32).collect(),
             Constraint::Range { .. } => {
                 let (lo, hi) = o.range().unwrap();
-                COMMON_DPI.iter().copied().filter(|&d| d as f64 >= lo && d as f64 <= hi).collect()
+                COMMON_DPI
+                    .iter()
+                    .copied()
+                    .filter(|&d| d as f64 >= lo && d as f64 <= hi)
+                    .collect()
             }
             _ => Vec::new(),
         };
@@ -404,13 +458,27 @@ impl Device {
         if let Some(s) = source {
             self.set_if("source", Value::Str(s))?;
         }
-        if let Some(mode) = self.option("mode").and_then(|o| o.strings().iter().find(|m| m.eq_ignore_ascii_case("color")).cloned()) {
+        if let Some(mode) = self.option("mode").and_then(|o| {
+            o.strings()
+                .iter()
+                .find(|m| m.eq_ignore_ascii_case("color"))
+                .cloned()
+        }) {
             self.set_if("mode", Value::Str(mode))?;
         }
-        if let Some(depth) = self.option("depth").and_then(|o| o.range()).map(|(_, hi)| hi.min(16.0)) {
+        if let Some(depth) = self
+            .option("depth")
+            .and_then(|o| o.range())
+            .map(|(_, hi)| hi.min(16.0))
+        {
             self.set_if("depth", Value::Int(depth as i32))?;
         }
-        if let Some(pos) = self.option("film-type").and_then(|o| o.strings().iter().find(|s| s.to_ascii_lowercase().contains("positive")).cloned()) {
+        if let Some(pos) = self.option("film-type").and_then(|o| {
+            o.strings()
+                .iter()
+                .find(|s| s.to_ascii_lowercase().contains("positive"))
+                .cloned()
+        }) {
             self.set_if("film-type", Value::Str(pos))?;
         }
         self.set_if("negative", Value::Bool(false))?;
@@ -423,7 +491,9 @@ impl Device {
     /// Set resolution and area for a film scan (after [`Device::prepare_film`]).
     pub fn set_window(&mut self, dpi: u32, area: [f64; 4]) -> Result<()> {
         self.set_if("resolution", Value::Int(dpi as i32))?;
-        let Some([x0, y0, x1, y1]) = self.area_mm() else { return Ok(()) };
+        let Some([x0, y0, x1, y1]) = self.area_mm() else {
+            return Ok(());
+        };
         let n = |v: f64| v.clamp(0.0, 1.0);
         let (ax0, ax1) = (n(area[0].min(area[2])), n(area[0].max(area[2])));
         let (ay0, ay1) = (n(area[1].min(area[3])), n(area[1].max(area[3])));
@@ -439,14 +509,23 @@ impl Device {
     }
 
     /// Prepare, set the window and scan.
-    pub fn scan_film(&mut self, job: &FilmScan, cancel: &AtomicBool, progress: &mut dyn FnMut(f64)) -> Result<SaneImage> {
+    pub fn scan_film(
+        &mut self,
+        job: &FilmScan,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(f64),
+    ) -> Result<SaneImage> {
         self.prepare_film(job.source.as_deref())?;
         self.set_window(job.dpi, job.area)?;
         self.scan(cancel, progress)
     }
 
     /// Read one image with the current settings (all frames of a three-pass scan).
-    pub fn scan(&mut self, cancel: &AtomicBool, progress: &mut dyn FnMut(f64)) -> Result<SaneImage> {
+    pub fn scan(
+        &mut self,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(f64),
+    ) -> Result<SaneImage> {
         let dpi = match self.get("resolution") {
             Ok(Value::Int(v)) => v.max(0) as u32,
             Ok(Value::Fixed(v)) => v.round().max(0.0) as u32,
@@ -457,10 +536,19 @@ impl Device {
         self.handle.cancel();
         let (width, height, rgb) = r?;
         progress(1.0);
-        Ok(SaneImage { width, height, rgb, dpi })
+        Ok(SaneImage {
+            width,
+            height,
+            rgb,
+            dpi,
+        })
     }
 
-    fn read_frames(&mut self, cancel: &AtomicBool, progress: &mut dyn FnMut(f64)) -> Result<(usize, usize, Vec<u16>)> {
+    fn read_frames(
+        &mut self,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(f64),
+    ) -> Result<(usize, usize, Vec<u16>)> {
         let mut planes: [Option<Vec<u16>>; 3] = [None, None, None];
         let mut rgb: Option<Vec<u16>> = None;
         let mut size: Option<(usize, usize)> = None;
@@ -470,11 +558,18 @@ impl Device {
             }
             self.handle.start()?;
             let p = self.handle.parameters()?;
-            let total = if matches!(p.format, Frame::Red | Frame::Green | Frame::Blue) { 3.0 } else { 1.0 };
-            let (samples, w, h) = self.read_frame(&p, cancel, &mut |f| progress(((frame as f64) + f) / total))?;
+            let total = if matches!(p.format, Frame::Red | Frame::Green | Frame::Blue) {
+                3.0
+            } else {
+                1.0
+            };
+            let (samples, w, h) =
+                self.read_frame(&p, cancel, &mut |f| progress(((frame as f64) + f) / total))?;
             if size.is_some_and(|s| s != (w, h)) {
                 let (sw, sh) = size.unwrap();
-                return Err(Error::Invalid(format!("frame size changed from {sw}×{sh} to {w}×{h}")));
+                return Err(Error::Invalid(format!(
+                    "frame size changed from {sw}×{sh} to {w}×{h}"
+                )));
             }
             size = Some((w, h));
             match p.format {
@@ -491,23 +586,41 @@ impl Device {
         let (width, height) = size.unwrap_or((0, 0));
         let rgb = match (rgb, planes) {
             (Some(rgb), _) => rgb,
-            (None, [Some(r), Some(g), Some(b)]) => (0..width * height).flat_map(|i| [r[i], g[i], b[i]]).collect(),
-            _ => return Err(Error::Invalid("scan ended without all three colour frames".into())),
+            (None, [Some(r), Some(g), Some(b)]) => (0..width * height)
+                .flat_map(|i| [r[i], g[i], b[i]])
+                .collect(),
+            _ => {
+                return Err(Error::Invalid(
+                    "scan ended without all three colour frames".into(),
+                ));
+            }
         };
         Ok((width, height, rgb))
     }
 
     /// One started frame as 16-bit samples (one per pixel, or three for RGB).
-    fn read_frame(&mut self, p: &Parameters, cancel: &AtomicBool, progress: &mut dyn FnMut(f64)) -> Result<(Vec<u16>, usize, usize)> {
+    fn read_frame(
+        &mut self,
+        p: &Parameters,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(f64),
+    ) -> Result<(Vec<u16>, usize, usize)> {
         let channels = if p.format == Frame::Rgb { 3 } else { 1 };
         let bytes = match p.depth {
             8 => 1,
             16 => 2,
-            d => return Err(Error::Invalid(format!("{d}-bit scans are not supported (choose colour, 8 or 16 bit)"))),
+            d => {
+                return Err(Error::Invalid(format!(
+                    "{d}-bit scans are not supported (choose colour, 8 or 16 bit)"
+                )));
+            }
         };
         let row = p.pixels_per_line * channels * bytes;
         if p.bytes_per_line < row || row == 0 {
-            return Err(Error::Invalid(format!("line of {} bytes for {} pixels", p.bytes_per_line, p.pixels_per_line)));
+            return Err(Error::Invalid(format!(
+                "line of {} bytes for {} pixels",
+                p.bytes_per_line, p.pixels_per_line
+            )));
         }
         let expected = p.lines.map(|l| l * p.bytes_per_line);
         let mut data = Vec::with_capacity(expected.unwrap_or(1 << 20));
@@ -518,8 +631,14 @@ impl Device {
             }
             match self.handle.read(&mut chunk) {
                 Ok(n) => data.extend_from_slice(&chunk[..n]),
-                Err(Error::Status { status: Status::Eof, .. }) => break,
-                Err(Error::Status { status: Status::Cancelled, .. }) => return Err(Error::Cancelled),
+                Err(Error::Status {
+                    status: Status::Eof,
+                    ..
+                }) => break,
+                Err(Error::Status {
+                    status: Status::Cancelled,
+                    ..
+                }) => return Err(Error::Cancelled),
                 Err(e) => return Err(e),
             }
             if let Some(e) = expected {
@@ -531,7 +650,10 @@ impl Device {
         for l in 0..lines {
             let line = &data[l * p.bytes_per_line..l * p.bytes_per_line + row];
             if bytes == 2 {
-                out.extend(line.chunks_exact(2).map(|b| u16::from_ne_bytes([b[0], b[1]])));
+                out.extend(
+                    line.chunks_exact(2)
+                        .map(|b| u16::from_ne_bytes([b[0], b[1]])),
+                );
             } else {
                 out.extend(line.iter().map(|&b| ((b as u16) << 8) | b as u16));
             }

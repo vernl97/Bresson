@@ -10,14 +10,18 @@ use base64::Engine;
 use serde_json::Value;
 
 pub fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
 }
 
 pub fn read_json(path: &Path) -> Value {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let text = if path.extension().is_some_and(|e| e == "gz") {
         let mut s = String::new();
-        flate2::read::GzDecoder::new(&bytes[..]).read_to_string(&mut s).unwrap();
+        flate2::read::GzDecoder::new(&bytes[..])
+            .read_to_string(&mut s)
+            .unwrap();
         s
     } else {
         String::from_utf8(bytes).unwrap()
@@ -28,12 +32,16 @@ pub fn read_json(path: &Path) -> Value {
 pub fn unzlib_b64(s: &str) -> Vec<u8> {
     let z = base64::engine::general_purpose::STANDARD.decode(s).unwrap();
     let mut out = Vec::new();
-    flate2::read::ZlibDecoder::new(&z[..]).read_to_end(&mut out).unwrap();
+    flate2::read::ZlibDecoder::new(&z[..])
+        .read_to_end(&mut out)
+        .unwrap();
     out
 }
 
 pub fn u16s(b: &[u8]) -> Vec<u16> {
-    b.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect()
+    b.chunks_exact(2)
+        .map(|p| u16::from_le_bytes([p[0], p[1]]))
+        .collect()
 }
 
 pub fn sha256_u16(v: impl IntoIterator<Item = u16>) -> String {
@@ -55,7 +63,9 @@ pub fn noise(n: usize, seed: u64) -> Vec<f64> {
     (0..n as u64)
         .map(|i| {
             let i = i.wrapping_add(seed.wrapping_mul(0x9E3779B97F4A7C15));
-            let mut x = i.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let mut x = i
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             x ^= x >> 33;
             x = x.wrapping_mul(0xFF51AFD7ED558CCD);
             x ^= x >> 33;
@@ -80,7 +90,10 @@ pub mod caplog {
             true
         }
         fn log(&self, record: &log::Record) {
-            RECORDS.with(|r| r.borrow_mut().push((record.level(), record.args().to_string())));
+            RECORDS.with(|r| {
+                r.borrow_mut()
+                    .push((record.level(), record.args().to_string()))
+            });
         }
         fn flush(&self) {}
     }
@@ -98,7 +111,11 @@ pub mod caplog {
 
     /// True when a record at `level` or more severe contains `needle`.
     pub fn contains(level: log::Level, needle: &str) -> bool {
-        RECORDS.with(|r| r.borrow().iter().any(|(l, m)| *l <= level && m.contains(needle)))
+        RECORDS.with(|r| {
+            r.borrow()
+                .iter()
+                .any(|(l, m)| *l <= level && m.contains(needle))
+        })
     }
 }
 

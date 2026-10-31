@@ -14,7 +14,9 @@ use std::path::Path;
 use common::{caplog, tmp_path};
 use ndarray::Array2;
 use opticfilm::device::{FilmModel, ScanMethod, model_by_name};
-use opticfilm::scan::calibrate::{CACHE_IDENT, CACHE_VERSION, CalibCache, CalibEntry, Calibrator, calib_fingerprint};
+use opticfilm::scan::calibrate::{
+    CACHE_IDENT, CACHE_VERSION, CalibCache, CalibEntry, Calibrator, calib_fingerprint,
+};
 use opticfilm::{Scanner, clock};
 use serde_json::{Value, json};
 
@@ -76,7 +78,9 @@ fn calibrator_construction_survives_corrupt_cache() {
 #[test]
 fn save_is_atomic_no_leftover_tmp_file() {
     let path = tmp_path("cache-atomic").join("calib.json");
-    CalibCache::new(Some(path.clone()), None, false).save().unwrap();
+    CalibCache::new(Some(path.clone()), None, false)
+        .save()
+        .unwrap();
     assert!(path.exists());
     assert!(!path.with_extension("tmp").exists());
 }
@@ -85,7 +89,9 @@ fn save_is_atomic_no_leftover_tmp_file() {
 #[test]
 fn save_survives_crash_mid_write_leaving_old_file_intact() {
     let path = tmp_path("cache-crash").join("calib.json");
-    CalibCache::new(Some(path.clone()), None, false).save().unwrap();
+    CalibCache::new(Some(path.clone()), None, false)
+        .save()
+        .unwrap();
     let good_contents = std::fs::read_to_string(&path).unwrap();
     std::fs::write(path.with_extension("tmp"), "{truncat").unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), good_contents);
@@ -98,10 +104,10 @@ fn damaged() -> Vec<Value> {
     let mut missing = good(1800);
     missing.as_object_mut().unwrap().remove("pixels");
     vec![
-        with(good(1800), "dark", json!(vec![0; 11])),                      // wrong length: reshape fails
-        missing,                                                       // missing key
+        with(good(1800), "dark", json!(vec![0; 11])), // wrong length: reshape fails
+        missing,                                      // missing key
         with(good(1800), "shading_blob_b64", json!("not base64!")), // bad base64
-        with(good(1800), "pixels", json!("four")),                     // wrong type
+        with(good(1800), "pixels", json!("four")),    // wrong type
         json!(["not", "an", "entry"]),
         Value::Null,
     ]
@@ -112,7 +118,10 @@ fn damaged_entries_are_skipped_and_good_ones_kept() {
     let path = tmp_path("cache-damaged").join("calib.json");
     let bad = damaged();
     let n_bad = bad.len();
-    write(&path, &file([vec![good(1800)], bad, vec![good(3600)]].concat()));
+    write(
+        &path,
+        &file([vec![good(1800)], bad, vec![good(3600)]].concat()),
+    );
     let mut cache = CalibCache::new(Some(path.clone()), None, false);
     caplog::start();
     assert!(cache.load());
@@ -120,7 +129,13 @@ fn damaged_entries_are_skipped_and_good_ones_kept() {
     res.sort();
     assert_eq!(res, [1800, 3600]);
     for i in 1..=n_bad {
-        assert!(caplog::contains(log::Level::Warn, &format!("Skipping damaged calib cache entry {i} ")), "entry {i}");
+        assert!(
+            caplog::contains(
+                log::Level::Warn,
+                &format!("Skipping damaged calib cache entry {i} ")
+            ),
+            "entry {i}"
+        );
     }
 
     cache.save().unwrap(); // the damaged entries are not written back
@@ -150,7 +165,14 @@ fn malformed_file_is_ignored() {
 fn scanner_opens_with_a_damaged_cache() {
     clock::use_virtual(1000.0);
     let path = tmp_path("cache-scanner").join("calib.json");
-    write(&path, &file(vec![with(with(good(1800), "dark", json!(vec![0; 29])), "pixels", json!(10))]));
+    write(
+        &path,
+        &file(vec![with(
+            with(good(1800), "dark", json!(vec![0; 29])),
+            "pixels",
+            json!(10),
+        )]),
+    );
     let mut scanner = Scanner::open_fake(m(SE), None, Some(path)).unwrap();
     assert!(scanner.calibrator().unwrap().cache.entries.is_empty());
     scanner.close();
@@ -168,7 +190,9 @@ fn entry(blob: &[u8]) -> CalibEntry {
 }
 
 fn find(cache: &CalibCache) -> Option<&[u8]> {
-    cache.find(ScanMethod::Transparency, 1800, 0, 8).map(|e| e.shading_blob.as_deref().unwrap())
+    cache
+        .find(ScanMethod::Transparency, 1800, 0, 8)
+        .map(|e| e.shading_blob.as_deref().unwrap())
 }
 
 /// The 8300i SE with the 8200i SE's sensor timing.
@@ -180,9 +204,15 @@ fn old_timing() -> FilmModel {
 
 #[test]
 fn fingerprint_tracks_model_exposure_and_sensor_regs() {
-    let prints: std::collections::HashSet<String> = [SE, V2, S83].iter().map(|n| calib_fingerprint(&m(n))).collect();
+    let prints: std::collections::HashSet<String> = [SE, V2, S83]
+        .iter()
+        .map(|n| calib_fingerprint(&m(n)))
+        .collect();
     assert_eq!(prints.len(), 3);
-    assert_eq!(calib_fingerprint(&m(S83)), calib_fingerprint(&m(S83).clone()));
+    assert_eq!(
+        calib_fingerprint(&m(S83)),
+        calib_fingerprint(&m(S83).clone())
+    );
     let mut exposure = m(S83);
     exposure.gl128.as_mut().unwrap().exposure_short = 14000;
     assert_ne!(calib_fingerprint(&m(S83)), calib_fingerprint(&exposure));
@@ -203,10 +233,18 @@ fn entries_from_other_timing_are_ignored_but_kept() {
     current.cache.save().unwrap();
     let reloaded = Calibrator::new(m(S83), Some(path.clone()), true);
     assert_eq!(find(&reloaded.cache), Some(&b"NEW"[..]));
-    let mut blobs: Vec<&[u8]> = reloaded.cache.entries.iter().map(|e| e.shading_blob.as_deref().unwrap()).collect();
+    let mut blobs: Vec<&[u8]> = reloaded
+        .cache
+        .entries
+        .iter()
+        .map(|e| e.shading_blob.as_deref().unwrap())
+        .collect();
     blobs.sort();
     assert_eq!(blobs, [&b"NEW"[..], &b"OLD"[..]]);
-    assert_eq!(find(&Calibrator::new(old_timing(), Some(path), true).cache), Some(&b"OLD"[..]));
+    assert_eq!(
+        find(&Calibrator::new(old_timing(), Some(path), true).cache),
+        Some(&b"OLD"[..])
+    );
 }
 
 #[test]
@@ -214,7 +252,10 @@ fn pre_fingerprint_cache_file_is_ignored() {
     let path = tmp_path("fp-legacy").join("calib.json");
     let mut legacy = entry(b"LEGACY").to_json();
     legacy.as_object_mut().unwrap().remove("fingerprint");
-    write(&path, &json!({"ident": CACHE_IDENT, "version": 10, "entries": [legacy]}));
+    write(
+        &path,
+        &json!({"ident": CACHE_IDENT, "version": 10, "entries": [legacy]}),
+    );
     let cal = Calibrator::new(m(SE), Some(path), false);
     assert!(cal.cache.entries.is_empty());
 }
@@ -235,6 +276,11 @@ fn saved_entries_are_not_reused_by_a_new_session() {
     assert_eq!(find(&second.cache), Some(&b"SESSION2"[..]));
     // Replaced, not appended: the file keeps one entry per window.
     let reloaded = Calibrator::new(m(SE), Some(path), true);
-    let blobs: Vec<&[u8]> = reloaded.cache.entries.iter().map(|e| e.shading_blob.as_deref().unwrap()).collect();
+    let blobs: Vec<&[u8]> = reloaded
+        .cache
+        .entries
+        .iter()
+        .map(|e| e.shading_blob.as_deref().unwrap())
+        .collect();
     assert_eq!(blobs, [&b"SESSION2"[..]]);
 }

@@ -25,7 +25,9 @@ fn fake(name: &str, tag: &str) -> Scanner {
 }
 
 fn motor_armed(s: &mut Scanner) -> bool {
-    let Asic::Gl128(a) = s.asic().unwrap() else { panic!("not GL128") };
+    let Asic::Gl128(a) = s.asic().unwrap() else {
+        panic!("not GL128")
+    };
     a.motor_moves_enabled
 }
 
@@ -45,7 +47,11 @@ fn scanner_is_send() {
 fn failed_stationary_calibration_rearms_the_motor() {
     let mut scanner = fake(SE, "stationary");
     assert!(motor_armed(&mut scanner));
-    let req = ScanRequest { resolution: 1800, area: Some([0.2, 0.3, 0.45, 0.5]), ..Default::default() };
+    let req = ScanRequest {
+        resolution: 1800,
+        area: Some([0.2, 0.3, 0.45, 0.5]),
+        ..Default::default()
+    };
     let err = scanner.scan(&req, &mut ScanControl::default()).unwrap_err();
     assert!(!matches!(err, Error::ScanCancelled(_)), "{err:?}");
     assert!(motor_armed(&mut scanner), "motor left disarmed after {err}");
@@ -68,13 +74,28 @@ fn gl128_cancel_mid_read_aborts_the_stream_and_stops_the_scan() {
         })),
         ..Default::default()
     };
-    let req = ScanRequest { resolution: 1200, area: Some([0.0, 0.0, 1.0, 0.3]), apply_calib: false, ..Default::default() };
+    let req = ScanRequest {
+        resolution: 1200,
+        area: Some([0.0, 0.0, 1.0, 0.3]),
+        apply_calib: false,
+        ..Default::default()
+    };
     let err = scanner.scan(&req, &mut ctl).unwrap_err();
     assert!(matches!(err, Error::ScanCancelled(_)), "{err:?}");
-    let core = &find_transport::<MockScannerTransport>(scanner.transport()).unwrap().core;
+    let core = &find_transport::<MockScannerTransport>(scanner.transport())
+        .unwrap()
+        .core;
     assert_eq!(core.aborted, 0);
     assert_eq!(core.reg(0x01) & r::SCAN, 0, "SCAN left set");
-    scanner.scan(&ScanRequest { area: Some([0.0, 0.0, 0.08, 0.08]), ..req }, &mut ScanControl::default()).unwrap();
+    scanner
+        .scan(
+            &ScanRequest {
+                area: Some([0.0, 0.0, 0.08, 0.08]),
+                ..req
+            },
+            &mut ScanControl::default(),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -82,9 +103,17 @@ fn close_is_idempotent_and_closed_scanner_refuses_work() {
     let mut scanner = fake(SE, "close");
     scanner.close();
     scanner.close();
-    let req = ScanRequest { resolution: 150, area: Some([0.0, 0.0, 0.08, 0.08]), apply_calib: false, ..Default::default() };
+    let req = ScanRequest {
+        resolution: 150,
+        area: Some([0.0, 0.0, 0.08, 0.08]),
+        apply_calib: false,
+        ..Default::default()
+    };
     let err = scanner.scan(&req, &mut ScanControl::default()).unwrap_err();
-    assert!(matches!(err, Error::Usb(_)) && err.to_string().contains("closed"), "{err}");
+    assert!(
+        matches!(err, Error::Usb(_)) && err.to_string().contains("closed"),
+        "{err}"
+    );
     assert!(scanner.status().is_err());
 }
 
@@ -93,14 +122,20 @@ fn close_is_idempotent_and_closed_scanner_refuses_work() {
 fn drop_turns_the_lamp_off() {
     let mut scanner = fake("plustek-opticfilm-8200i", "drop");
     scanner.asic().unwrap().init(false).unwrap();
-    scanner.lamp_on(opticfilm::ScanMethod::Transparency).unwrap();
+    scanner
+        .lamp_on(opticfilm::ScanMethod::Transparency)
+        .unwrap();
     assert!(scanner.status().unwrap().is_lamp_on);
     let lamp_reg = {
-        let core = &find_transport::<MockScannerTransport>(scanner.transport()).unwrap().core;
+        let core = &find_transport::<MockScannerTransport>(scanner.transport())
+            .unwrap()
+            .core;
         core.reg(0x03)
     };
     assert_ne!(lamp_reg & r::LAMPPWR, 0);
     scanner.close();
-    let core = &find_transport::<MockScannerTransport>(scanner.transport()).unwrap().core;
+    let core = &find_transport::<MockScannerTransport>(scanner.transport())
+        .unwrap()
+        .core;
     assert_eq!(core.reg(0x03) & r::LAMPPWR, 0, "lamp left on after close");
 }

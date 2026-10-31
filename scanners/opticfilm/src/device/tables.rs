@@ -27,7 +27,9 @@ pub fn exposure_table(line_period: i64) -> Result<Vec<i64>> {
 /// the ramp reaches it.
 pub fn scan_motor_table_8300i(period: i64) -> Result<Vec<i64>> {
     if !(0..=0xFFFF).contains(&period) {
-        return Err(Error::Value(format!("scan motor period {period} does not fit the AHB table's 16-bit words (0-65535)")));
+        return Err(Error::Value(format!(
+            "scan motor period {period} does not fit the AHB table's 16-bit words (0-65535)"
+        )));
     }
     Ok(t83::SCAN_RAMP.iter().map(|&v| v.max(period)).collect())
 }

@@ -6,7 +6,10 @@
 
 use serde_json::{Map, Value, json};
 
-use super::protocol::{REQUEST_BUFFER, REQUEST_REGISTER, REQUEST_TYPE_IN, REQUEST_TYPE_OUT, VALUE_BUFFER, VALUE_GET_REGISTER, VALUE_SET_REGISTER};
+use super::protocol::{
+    REQUEST_BUFFER, REQUEST_REGISTER, REQUEST_TYPE_IN, REQUEST_TYPE_OUT, VALUE_BUFFER,
+    VALUE_GET_REGISTER, VALUE_SET_REGISTER,
+};
 use super::trace::{UsbOp, UsbTransaction};
 
 pub const DECODER_NAME: &str = "gl128_control_decoder";
@@ -80,18 +83,29 @@ impl DecodedEvent<'_> {
 
 /// Decode one transaction. Bulk payloads are not decoded byte by byte.
 pub fn decode_transaction(txn: &UsbTransaction) -> Option<DecodedEvent<'_>> {
-    let ev = |kind, fields: Map<String, Value>, confidence| DecodedEvent { kind, fields, confidence, raw: txn };
+    let ev = |kind, fields: Map<String, Value>, confidence| DecodedEvent {
+        kind,
+        fields,
+        confidence,
+        raw: txn,
+    };
     match txn.operation {
         UsbOp::ControlWrite => Some(decode_control_write(txn)),
         UsbOp::ControlRead => Some(decode_control_read(txn)),
         UsbOp::BulkRead => {
             let mut f = Map::new();
-            f.insert("length".into(), json!(txn.length.or(txn.data.as_ref().map(Vec::len))));
+            f.insert(
+                "length".into(),
+                json!(txn.length.or(txn.data.as_ref().map(Vec::len))),
+            );
             Some(ev("bulk_in", f, Confidence::Proven))
         }
         UsbOp::BulkWrite => {
             let mut f = Map::new();
-            f.insert("length".into(), json!(txn.data.as_ref().map_or(0, Vec::len)));
+            f.insert(
+                "length".into(),
+                json!(txn.data.as_ref().map_or(0, Vec::len)),
+            );
             Some(ev("bulk_out", f, Confidence::Proven))
         }
     }
@@ -103,7 +117,12 @@ fn unclassified<'a>(txn: &'a UsbTransaction, kind: &'static str) -> DecodedEvent
     f.insert("request".into(), json!(txn.request));
     f.insert("value".into(), json!(txn.value));
     f.insert("index".into(), json!(txn.index));
-    DecodedEvent { kind, fields: f, confidence: Confidence::Unknown, raw: txn }
+    DecodedEvent {
+        kind,
+        fields: f,
+        confidence: Confidence::Unknown,
+        raw: txn,
+    }
 }
 
 fn decode_control_write(txn: &UsbTransaction) -> DecodedEvent<'_> {
@@ -122,16 +141,30 @@ fn decode_control_write(txn: &UsbTransaction) -> DecodedEvent<'_> {
             .collect();
         let mut f = Map::new();
         f.insert("pairs".into(), Value::Array(pairs));
-        return DecodedEvent { kind: "reg_write", fields: f, confidence: Confidence::Proven, raw: txn };
+        return DecodedEvent {
+            kind: "reg_write",
+            fields: f,
+            confidence: Confidence::Proven,
+            raw: txn,
+        };
     }
-    if rt == Some(REQUEST_TYPE_OUT) && req == Some(REQUEST_BUFFER) && cmd == VALUE_BUFFER && data.len() >= 8 {
+    if rt == Some(REQUEST_TYPE_OUT)
+        && req == Some(REQUEST_BUFFER)
+        && cmd == VALUE_BUFFER
+        && data.len() >= 8
+    {
         let bulk_addr = u32::from_le_bytes(data[0..4].try_into().unwrap());
         let bulk_size = u32::from_le_bytes(data[4..8].try_into().unwrap());
         let mut f = Map::new();
         f.insert("w_index".into(), json!(hexs(txn.index.unwrap_or(0) as u32)));
         f.insert("bulk_addr".into(), json!(hexs(bulk_addr)));
         f.insert("bulk_size".into(), json!(bulk_size));
-        return DecodedEvent { kind: "buffer_preamble", fields: f, confidence: Confidence::Proven, raw: txn };
+        return DecodedEvent {
+            kind: "buffer_preamble",
+            fields: f,
+            confidence: Confidence::Proven,
+            raw: txn,
+        };
     }
     unclassified(txn, "unclassified_control_write")
 }
@@ -154,7 +187,12 @@ fn decode_control_read(txn: &UsbTransaction) -> DecodedEvent<'_> {
             f.insert("value".into(), json!(response[0]));
             f.insert("link_status".into(), json!(response[1]));
         }
-        return DecodedEvent { kind: "reg_read", fields: f, confidence: Confidence::Proven, raw: txn };
+        return DecodedEvent {
+            kind: "reg_read",
+            fields: f,
+            confidence: Confidence::Proven,
+            raw: txn,
+        };
     }
     if rt == Some(REQUEST_TYPE_IN) && req == Some(REQUEST_REGISTER) && cmd == VALUE_GET_REGISTER {
         let mut f = Map::new();
@@ -162,7 +200,12 @@ fn decode_control_read(txn: &UsbTransaction) -> DecodedEvent<'_> {
         if let Some(&v) = response.first() {
             f.insert("value".into(), json!(v));
         }
-        return DecodedEvent { kind: "probe_read", fields: f, confidence: Confidence::Proven, raw: txn };
+        return DecodedEvent {
+            kind: "probe_read",
+            fields: f,
+            confidence: Confidence::Proven,
+            raw: txn,
+        };
     }
     unclassified(txn, "unclassified_control_read")
 }
@@ -170,8 +213,16 @@ fn decode_control_read(txn: &UsbTransaction) -> DecodedEvent<'_> {
 /// One-line human-readable rendering, raw bytes not included.
 pub fn format_decoded_line(ev: &DecodedEvent<'_>) -> String {
     let f = &ev.fields;
-    let byte = |k: &str| f.get(k).and_then(Value::as_u64).map_or("?".to_string(), |v| format!("{v:#04x}"));
-    let s = |k: &str| f.get(k).map_or("?".to_string(), |v| v.as_str().map_or(v.to_string(), str::to_string));
+    let byte = |k: &str| {
+        f.get(k)
+            .and_then(Value::as_u64)
+            .map_or("?".to_string(), |v| format!("{v:#04x}"))
+    };
+    let s = |k: &str| {
+        f.get(k).map_or("?".to_string(), |v| {
+            v.as_str().map_or(v.to_string(), str::to_string)
+        })
+    };
     match ev.kind {
         "reg_write" => {
             let pairs: Vec<String> = f
@@ -179,28 +230,50 @@ pub fn format_decoded_line(ev: &DecodedEvent<'_>) -> String {
                 .and_then(Value::as_array)
                 .map(|a| {
                     a.iter()
-                        .map(|p| format!("{}={:#04x}", p["addr"].as_str().unwrap_or("?"), p["value"].as_u64().unwrap_or(0)))
+                        .map(|p| {
+                            format!(
+                                "{}={:#04x}",
+                                p["addr"].as_str().unwrap_or("?"),
+                                p["value"].as_u64().unwrap_or(0)
+                            )
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
             format!("REG_WRITE  {}", pairs.join(", "))
         }
         "reg_read" => {
-            let link = f.get("link_status").and_then(Value::as_u64).map_or(String::new(), |l| format!(" link={l:#04x}"));
+            let link = f
+                .get("link_status")
+                .and_then(Value::as_u64)
+                .map_or(String::new(), |l| format!(" link={l:#04x}"));
             format!("REG_READ   {}={}{link}", s("addr"), byte("value"))
         }
         "probe_read" => format!("PROBE_READ {}={}", s("w_index"), byte("value")),
-        "buffer_preamble" => format!("BULK_PREAMBLE addr={} size={}", s("bulk_addr"), s("bulk_size")),
+        "buffer_preamble" => format!(
+            "BULK_PREAMBLE addr={} size={}",
+            s("bulk_addr"),
+            s("bulk_size")
+        ),
         "bulk_in" => format!("BULK_IN    {}b", s("length")),
         "bulk_out" => format!("BULK_OUT   {}b", s("length")),
-        _ => format!("UNCLASSIFIED {} {} [confidence={}]", ev.kind, py_fields_repr(f), ev.confidence.as_str()),
+        _ => format!(
+            "UNCLASSIFIED {} {} [confidence={}]",
+            ev.kind,
+            py_fields_repr(f),
+            ev.confidence.as_str()
+        ),
     }
 }
 
 /// Python `repr` of an unclassified event's fields dict, in its insertion order.
 fn py_fields_repr(f: &Map<String, Value>) -> String {
     const ORDER: [&str; 4] = ["request_type", "request", "value", "index"];
-    let keys = ORDER.iter().copied().filter(|k| f.contains_key(*k)).chain(f.keys().map(String::as_str).filter(|k| !ORDER.contains(k)));
+    let keys = ORDER
+        .iter()
+        .copied()
+        .filter(|k| f.contains_key(*k))
+        .chain(f.keys().map(String::as_str).filter(|k| !ORDER.contains(k)));
     let repr = |v: &Value| match v {
         Value::Null => "None".to_string(),
         Value::String(s) => format!("'{s}'"),

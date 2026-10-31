@@ -6,9 +6,14 @@ mod common;
 
 use ndarray::{Array2, Array3, Axis, s};
 use opticfilm::device::replay_data::replay_profile;
-use opticfilm::pass_align::{align_pass_to_reference, align_pass_to_reference_banded, estimate_pass_shift};
+use opticfilm::pass_align::{
+    align_pass_to_reference, align_pass_to_reference_banded, estimate_pass_shift,
+};
 use opticfilm::registration::{warp_cubic, warp_linear};
-use opticfilm::scan::calib_gl128::{IR_FLATTEN_BORDER_INSET, IR_FLATTEN_MAX_GAIN, IR_SIDECAR_TARGET_LEVEL, flatten_ir_columns, flatten_ir_image_columns};
+use opticfilm::scan::calib_gl128::{
+    IR_FLATTEN_BORDER_INSET, IR_FLATTEN_MAX_GAIN, IR_SIDECAR_TARGET_LEVEL, flatten_ir_columns,
+    flatten_ir_image_columns,
+};
 use opticfilm::scan::exposure_merge::{MergeStats, merge_exposures_result, merge_n_passes};
 use opticfilm::scan::me_exposure::{LongExposureParams, select_long_exposure};
 use serde_json::Value;
@@ -27,17 +32,37 @@ fn scene(h: usize, w: usize) -> Vec<[f64; 3]> {
 }
 
 fn u16img(h: usize, w: usize, f: impl Fn(usize, usize) -> f64) -> Array3<u16> {
-    Array3::from_shape_fn((h, w, 3), |(y, x, c)| f(y * w + x, c).round_ties_even().clamp(0.0, 65535.0) as u16)
+    Array3::from_shape_fn((h, w, 3), |(y, x, c)| {
+        f(y * w + x, c).round_ties_even().clamp(0.0, 65535.0) as u16
+    })
 }
 
 fn roll(a: &Array3<u16>, dy: isize, dx: isize) -> Array3<u16> {
     let (h, w, _) = a.dim();
-    Array3::from_shape_fn(a.dim(), |(y, x, c)| a[[(y as isize - dy).rem_euclid(h as isize) as usize, (x as isize - dx).rem_euclid(w as isize) as usize, c]])
+    Array3::from_shape_fn(a.dim(), |(y, x, c)| {
+        a[[
+            (y as isize - dy).rem_euclid(h as isize) as usize,
+            (x as isize - dx).rem_euclid(w as isize) as usize,
+            c,
+        ]]
+    })
 }
 
 /// Exact sha match, or report the strided-sample difference.
-fn check(name: &str, want: &Value, got_shape: &[usize], got: &[u16], tol: i32, fails: &mut Vec<String>) {
-    let ws: Vec<usize> = want["shape"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+fn check(
+    name: &str,
+    want: &Value,
+    got_shape: &[usize],
+    got: &[u16],
+    tol: i32,
+    fails: &mut Vec<String>,
+) {
+    let ws: Vec<usize> = want["shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     assert_eq!(ws, got_shape, "{name}: shape");
     if common::sha256_u16(got.iter().copied()) == want["sha256"].as_str().unwrap() {
         return;
@@ -45,7 +70,11 @@ fn check(name: &str, want: &Value, got_shape: &[usize], got: &[u16], tol: i32, f
     let step = want["step"].as_u64().unwrap() as usize;
     let sample = common::u16s(&common::unzlib_b64(want["sample"].as_str().unwrap()));
     let (h, w) = (got_shape[0], got_shape[1]);
-    let c = if got_shape.len() == 3 { got_shape[2] } else { 1 };
+    let c = if got_shape.len() == 3 {
+        got_shape[2]
+    } else {
+        1
+    };
     let mut k = 0;
     let (mut n, mut maxd) = (0, 0);
     for y in (0..h).step_by(step) {
@@ -85,10 +114,23 @@ fn numerics_match_python() {
     let mut fails = Vec::new();
     let flat = |a: &Array3<u16>| a.iter().copied().collect::<Vec<u16>>();
 
-    let m = merge_exposures_result(&short, &long, 14000, 42000, Some((0.0, 0.0)), None, None).unwrap();
-    check("merge_noshift", &cases["merge_noshift"]["rgb"], m.rgb.shape(), &flat(&m.rgb), 1, &mut fails);
+    let m =
+        merge_exposures_result(&short, &long, 14000, 42000, Some((0.0, 0.0)), None, None).unwrap();
+    check(
+        "merge_noshift",
+        &cases["merge_noshift"]["rgb"],
+        m.rgb.shape(),
+        &flat(&m.rgb),
+        1,
+        &mut fails,
+    );
     if let Some(MergeStats::Fusion(st)) = &m.fusion_stats {
-        let fitted: Vec<bool> = cases["merge_noshift"]["fitted"].as_array().unwrap().iter().map(|v| v.as_bool().unwrap()).collect();
+        let fitted: Vec<bool> = cases["merge_noshift"]["fitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_bool().unwrap())
+            .collect();
         assert_eq!(st.noise_fitted.as_ref().unwrap(), &fitted);
         for (k, key) in [(0, "alpha"), (1, "beta"), (2, "ratio")] {
             let got = match k {
@@ -97,9 +139,15 @@ fn numerics_match_python() {
                 _ => st.exposure_ratio_per_channel.clone(),
             }
             .unwrap();
-            for (g, wv) in got.iter().zip(cases["merge_noshift"][key].as_array().unwrap()) {
+            for (g, wv) in got
+                .iter()
+                .zip(cases["merge_noshift"][key].as_array().unwrap())
+            {
                 let wv = wv.as_f64().unwrap();
-                assert!((g - wv).abs() <= 1e-4 * wv.abs().max(1.0), "{key}: {g} vs {wv}");
+                assert!(
+                    (g - wv).abs() <= 1e-4 * wv.abs().max(1.0),
+                    "{key}: {g} vs {wv}"
+                );
             }
         }
     }
@@ -110,26 +158,76 @@ fn numerics_match_python() {
         })
         .collect();
     let mp = merge_n_passes(&frames, None, None).unwrap();
-    check("merge_n3", &cases["merge_n3"]["rgb"], mp.rgb.shape(), &flat(&mp.rgb), 1, &mut fails);
+    check(
+        "merge_n3",
+        &cases["merge_n3"]["rgb"],
+        mp.rgb.shape(),
+        &flat(&mp.rgb),
+        1,
+        &mut fails,
+    );
 
     let close = |a: (f64, f64), b: &Value, what: &str| {
         let b = b.as_array().unwrap();
         let (bx, by) = (b[0].as_f64().unwrap(), b[1].as_f64().unwrap());
-        assert!((a.0 - bx).abs() < 1e-3 && (a.1 - by).abs() < 1e-3, "{what}: {a:?} vs ({bx}, {by})");
+        assert!(
+            (a.0 - bx).abs() < 1e-3 && (a.1 - by).abs() < 1e-3,
+            "{what}: {a:?} vs ({bx}, {by})"
+        );
     };
-    close(estimate_pass_shift(&short, &roll(&short, -2, 3)), &cases["shift_est"], "shift_est");
-    close(estimate_pass_shift(&short, &shifted), &cases["shift_est_long"], "shift_est_long");
+    close(
+        estimate_pass_shift(&short, &roll(&short, -2, 3)),
+        &cases["shift_est"],
+        "shift_est",
+    );
+    close(
+        estimate_pass_shift(&short, &shifted),
+        &cases["shift_est_long"],
+        "shift_est_long",
+    );
     let (al, sh) = align_pass_to_reference(&short, &shifted, None).unwrap();
     close(sh, &cases["align"]["shift"], "align shift");
-    check("align", &cases["align"]["rgb"], al.shape(), &flat(&al), 1, &mut fails);
-    let tall = ndarray::concatenate(Axis(0), &[short.view(), short.view(), short.view(), short.view()]).unwrap();
+    check(
+        "align",
+        &cases["align"]["rgb"],
+        al.shape(),
+        &flat(&al),
+        1,
+        &mut fails,
+    );
+    let tall = ndarray::concatenate(
+        Axis(0),
+        &[short.view(), short.view(), short.view(), short.view()],
+    )
+    .unwrap();
     let (alb, sb) = align_pass_to_reference_banded(&tall, &roll(&tall, 0, 1)).unwrap();
     close(sb, &cases["banded"]["shift"], "banded shift");
-    check("banded", &cases["banded"]["rgb"], alb.shape(), &flat(&alb), 1, &mut fails);
+    check(
+        "banded",
+        &cases["banded"]["rgb"],
+        alb.shape(),
+        &flat(&alb),
+        1,
+        &mut fails,
+    );
     let wl = warp_linear(&short, 1.3, -0.6);
-    check("warp_linear", &cases["warp_linear"], wl.shape(), &flat(&wl), 0, &mut fails);
+    check(
+        "warp_linear",
+        &cases["warp_linear"],
+        wl.shape(),
+        &flat(&wl),
+        0,
+        &mut fails,
+    );
     let wc = warp_cubic(&short, -2.25, 0.4);
-    check("warp_cubic", &cases["warp_cubic"], wc.shape(), &flat(&wc), 0, &mut fails);
+    check(
+        "warp_cubic",
+        &cases["warp_cubic"],
+        wc.shape(),
+        &flat(&wc),
+        0,
+        &mut fails,
+    );
 
     let d = select_long_exposure(short.view(), 14000, &LongExposureParams::default());
     let sl = &cases["select_long"];
@@ -138,11 +236,35 @@ fn numerics_match_python() {
     assert_eq!(d.reason, sl["reason"].as_str().unwrap());
 
     let ir: Array2<u16> = short.slice(s![.., .., 1]).to_owned();
-    let white: Vec<i64> = (0..w).map(|x| (20000.0 + 3000.0 * (x as f64 / 90.0).sin()) as i64).collect();
+    let white: Vec<i64> = (0..w)
+        .map(|x| (20000.0 + 3000.0 * (x as f64 / 90.0).sin()) as i64)
+        .collect();
     let f1 = flatten_ir_columns(ir.view(), &white, None, None).unwrap();
-    check("flatten_ir_columns", &cases["flatten_ir_columns"], f1.shape(), &f1.iter().copied().collect::<Vec<_>>(), 0, &mut fails);
-    let f2 = flatten_ir_image_columns(ir.view(), 90.0, Some(IR_SIDECAR_TARGET_LEVEL), None, IR_FLATTEN_BORDER_INSET, IR_FLATTEN_MAX_GAIN).unwrap();
-    check("flatten_ir_image", &cases["flatten_ir_image"], f2.shape(), &f2.iter().copied().collect::<Vec<_>>(), 0, &mut fails);
+    check(
+        "flatten_ir_columns",
+        &cases["flatten_ir_columns"],
+        f1.shape(),
+        &f1.iter().copied().collect::<Vec<_>>(),
+        0,
+        &mut fails,
+    );
+    let f2 = flatten_ir_image_columns(
+        ir.view(),
+        90.0,
+        Some(IR_SIDECAR_TARGET_LEVEL),
+        None,
+        IR_FLATTEN_BORDER_INSET,
+        IR_FLATTEN_MAX_GAIN,
+    )
+    .unwrap();
+    check(
+        "flatten_ir_image",
+        &cases["flatten_ir_image"],
+        f2.shape(),
+        &f2.iter().copied().collect::<Vec<_>>(),
+        0,
+        &mut fails,
+    );
     assert!(fails.is_empty(), "{fails:#?}");
 }
 
@@ -154,7 +276,10 @@ fn vendor_jobs_and_derived_infrared_match_python() {
         let (mode, dpi) = key.split_once('_').unwrap();
         let p = replay_profile("OpticFilm 7600i (v1)", mode, dpi.parse().unwrap()).unwrap();
         let text = serde_json::to_string(&p).unwrap();
-        let got: String = Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+        let got: String = Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(got, h.as_str().unwrap(), "{key}");
     }
 }

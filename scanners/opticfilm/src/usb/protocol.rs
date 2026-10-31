@@ -59,8 +59,16 @@ impl GenesysUsbProtocol {
         self.transport
     }
 
-    fn ctrl(&mut self, rt: u8, req: u8, value: u16, index: u16, data: ControlData<'_>) -> Result<Vec<u8>> {
-        self.transport.control_msg(rt, req, value, index, data, None)
+    fn ctrl(
+        &mut self,
+        rt: u8,
+        req: u8,
+        value: u16,
+        index: u16,
+        data: ControlData<'_>,
+    ) -> Result<Vec<u8>> {
+        self.transport
+            .control_msg(rt, req, value, index, data, None)
     }
 
     /// SANE genesys validates USB link with `0x55` on GL845-class reads.
@@ -82,9 +90,18 @@ impl GenesysUsbProtocol {
         if address > 0xFF {
             usb_value |= 0x100;
         }
-        let raw = self.ctrl(REQUEST_TYPE_IN, REQUEST_BUFFER, usb_value, address16, ControlData::In(2))?;
+        let raw = self.ctrl(
+            REQUEST_TYPE_IN,
+            REQUEST_BUFFER,
+            usb_value,
+            address16,
+            ControlData::In(2),
+        )?;
         if raw.len() != 2 {
-            return Err(Error::Usb(format!("Register read returned {} bytes, expected 2", raw.len())));
+            return Err(Error::Usb(format!(
+                "Register read returned {} bytes, expected 2",
+                raw.len()
+            )));
         }
         Self::check_link_status(raw[1])?;
         debug!("read_register(0x{address:04x}) -> 0x{:02x}", raw[0]);
@@ -98,7 +115,13 @@ impl GenesysUsbProtocol {
         if address > 0xFF {
             usb_value |= 0x100;
         }
-        self.ctrl(REQUEST_TYPE_OUT, REQUEST_BUFFER, usb_value, INDEX, ControlData::Out(&payload))?;
+        self.ctrl(
+            REQUEST_TYPE_OUT,
+            REQUEST_BUFFER,
+            usb_value,
+            INDEX,
+            ControlData::Out(&payload),
+        )?;
         debug!("write_register(0x{address:04x}, 0x{value:02x})");
         Ok(())
     }
@@ -140,8 +163,17 @@ impl GenesysUsbProtocol {
             0 => {}
             1 => self.write_register(batch[0].0, batch[0].1)?,
             n => {
-                let payload: Vec<u8> = batch.iter().flat_map(|&(a, v)| [(a & 0xFF) as u8, v]).collect();
-                self.ctrl(REQUEST_TYPE_OUT, REQUEST_BUFFER, VALUE_SET_REGISTER, INDEX, ControlData::Out(&payload))?;
+                let payload: Vec<u8> = batch
+                    .iter()
+                    .flat_map(|&(a, v)| [(a & 0xFF) as u8, v])
+                    .collect();
+                self.ctrl(
+                    REQUEST_TYPE_OUT,
+                    REQUEST_BUFFER,
+                    VALUE_SET_REGISTER,
+                    INDEX,
+                    ControlData::Out(&payload),
+                )?;
                 debug!("write_registers_batched: {n} pairs");
             }
         }
@@ -151,7 +183,13 @@ impl GenesysUsbProtocol {
 
     /// SANE `write_0x8c` — VALUE_BUF_ENDACCESS vendor request.
     pub fn write_0x8c(&mut self, index: u8, value: u8) -> Result<()> {
-        self.ctrl(REQUEST_TYPE_OUT, REQUEST_REGISTER, VALUE_BUF_ENDACCESS, index as u16, ControlData::Out(&[value]))?;
+        self.ctrl(
+            REQUEST_TYPE_OUT,
+            REQUEST_REGISTER,
+            VALUE_BUF_ENDACCESS,
+            index as u16,
+            ControlData::Out(&[value]),
+        )?;
         Ok(())
     }
 
@@ -165,10 +203,18 @@ impl GenesysUsbProtocol {
     /// Index `0x00` is the SANE USB-speed / warm-boot probe; index `0x21` is
     /// polled during fast feeds until it returns `0x04`.
     pub fn read_request_register(&mut self, index: u8) -> Result<u8> {
-        let raw = self.ctrl(REQUEST_TYPE_IN, REQUEST_REGISTER, VALUE_GET_REGISTER, index as u16, ControlData::In(1))?;
-        raw.first()
-            .copied()
-            .ok_or_else(|| Error::Usb(format!("REQUEST_REGISTER probe index=0x{index:02x} returned no data")))
+        let raw = self.ctrl(
+            REQUEST_TYPE_IN,
+            REQUEST_REGISTER,
+            VALUE_GET_REGISTER,
+            index as u16,
+            ControlData::In(1),
+        )?;
+        raw.first().copied().ok_or_else(|| {
+            Error::Usb(format!(
+                "REQUEST_REGISTER probe index=0x{index:02x} returned no data"
+            ))
+        })
     }
 
     /// Write analog frontend register (GL845 non-GL124 path).
@@ -222,7 +268,13 @@ impl GenesysUsbProtocol {
     /// GL845/846/847/GL124 bulk-read preamble (fixed 0x10000000 address).
     fn bulk_read_send_header(&mut self, size: usize) -> Result<()> {
         let pre = Self::bulk_preamble(0x1000_0000, size as u32);
-        self.ctrl(REQUEST_TYPE_OUT, REQUEST_BUFFER, VALUE_BUFFER, 0x00, ControlData::Out(&pre))?;
+        self.ctrl(
+            REQUEST_TYPE_OUT,
+            REQUEST_BUFFER,
+            VALUE_BUFFER,
+            0x00,
+            ControlData::Out(&pre),
+        )?;
         Ok(())
     }
 
@@ -232,7 +284,13 @@ impl GenesysUsbProtocol {
     /// `index` `0x00` reads scanner RAM and `0x08` reads the live image stream.
     pub fn bulk_read_begin(&mut self, size: usize, index: u8, addr: u32) -> Result<()> {
         let pre = Self::bulk_preamble(addr, size as u32);
-        self.ctrl(REQUEST_TYPE_OUT, REQUEST_BUFFER, VALUE_BUFFER, index as u16, ControlData::Out(&pre))?;
+        self.ctrl(
+            REQUEST_TYPE_OUT,
+            REQUEST_BUFFER,
+            VALUE_BUFFER,
+            index as u16,
+            ControlData::Out(&pre),
+        )?;
         debug!("bulk_read_begin size={size} index=0x{index:02x} addr=0x{addr:08x}");
         Ok(())
     }
@@ -244,7 +302,9 @@ impl GenesysUsbProtocol {
         }
         let data = self.transport.bulk_read(size.min(BULK_MAX_SIZE), None)?;
         if data.is_empty() {
-            return Err(Error::Usb("bulk_read returned empty data mid-transfer".into()));
+            return Err(Error::Usb(
+                "bulk_read returned empty data mid-transfer".into(),
+            ));
         }
         Ok(data)
     }
@@ -257,9 +317,14 @@ impl GenesysUsbProtocol {
         let step = max_transfer.max(1);
         let mut buf = Vec::with_capacity(size);
         while buf.len() < size {
-            let data = self.transport.bulk_read((size - buf.len()).min(step), None)?;
+            let data = self
+                .transport
+                .bulk_read((size - buf.len()).min(step), None)?;
             if data.is_empty() {
-                return Err(Error::Usb(format!("bulk_read returned empty after {} of {size} bytes", buf.len())));
+                return Err(Error::Usb(format!(
+                    "bulk_read returned empty after {} of {size} bytes",
+                    buf.len()
+                )));
             }
             buf.extend_from_slice(&data);
         }
@@ -289,11 +354,16 @@ impl GenesysUsbProtocol {
             self.bulk_read_send_header(block)?;
             let data = self.transport.bulk_read(block, None)?;
             if data.is_empty() {
-                return Err(Error::Usb("bulk_read returned empty data mid-transfer".into()));
+                return Err(Error::Usb(
+                    "bulk_read returned empty data mid-transfer".into(),
+                ));
             }
             remaining -= data.len() as isize;
             out.extend_from_slice(&data);
-            debug!("bulk_read_data: got {} bytes, {remaining} remaining", data.len());
+            debug!(
+                "bulk_read_data: got {} bytes, {remaining} remaining",
+                data.len()
+            );
         }
         Ok(out)
     }
@@ -301,13 +371,23 @@ impl GenesysUsbProtocol {
     /// Write an AHB memory window (GL845/846/847/GL124 table upload path).
     pub fn write_ahb(&mut self, addr: u32, data: &[u8]) -> Result<()> {
         let pre = Self::bulk_preamble(addr, data.len() as u32);
-        self.ctrl(REQUEST_TYPE_OUT, REQUEST_BUFFER, VALUE_BUFFER, 0x01, ControlData::Out(&pre))?;
+        self.ctrl(
+            REQUEST_TYPE_OUT,
+            REQUEST_BUFFER,
+            VALUE_BUFFER,
+            0x01,
+            ControlData::Out(&pre),
+        )?;
         let mut offset = 0;
         while offset < data.len() {
             let block = (data.len() - offset).min(BULK_MAX_SIZE);
-            let written = self.transport.bulk_write(&data[offset..offset + block], None)?;
+            let written = self
+                .transport
+                .bulk_write(&data[offset..offset + block], None)?;
             if written == 0 {
-                return Err(Error::Usb("bulk_write wrote 0 bytes mid-AHB transfer".into()));
+                return Err(Error::Usb(
+                    "bulk_write wrote 0 bytes mid-AHB transfer".into(),
+                ));
             }
             offset += written;
         }

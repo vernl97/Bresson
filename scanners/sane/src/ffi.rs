@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::{
-    Backend, Constraint, DeviceInfo, Error, Frame, Handle, OptionInfo, OptionType, Parameters, Result, Status, Unit, Value,
+    Backend, Constraint, DeviceInfo, Error, Frame, Handle, OptionInfo, OptionType, Parameters,
+    Result, Status, Unit, Value,
 };
 
 pub type SaneWord = c_int;
@@ -62,8 +63,10 @@ struct Fns {
     get_devices: unsafe extern "C" fn(*mut *const *const SaneDevice, SaneWord) -> c_int,
     open: unsafe extern "C" fn(*const c_char, *mut SaneHandle) -> c_int,
     close: unsafe extern "C" fn(SaneHandle),
-    get_option_descriptor: unsafe extern "C" fn(SaneHandle, SaneWord) -> *const SaneOptionDescriptor,
-    control_option: unsafe extern "C" fn(SaneHandle, SaneWord, c_int, *mut c_void, *mut SaneWord) -> c_int,
+    get_option_descriptor:
+        unsafe extern "C" fn(SaneHandle, SaneWord) -> *const SaneOptionDescriptor,
+    control_option:
+        unsafe extern "C" fn(SaneHandle, SaneWord, c_int, *mut c_void, *mut SaneWord) -> c_int,
     get_parameters: unsafe extern "C" fn(SaneHandle, *mut SaneParameters) -> c_int,
     start: unsafe extern "C" fn(SaneHandle) -> c_int,
     read: unsafe extern "C" fn(SaneHandle, *mut u8, SaneWord, *mut SaneWord) -> c_int,
@@ -92,11 +95,28 @@ fn lock() -> MutexGuard<'static, ()> {
 
 /// Where libsane is looked for: `$NLP_SANE_LIB`, then the platform's usual names.
 pub fn candidates() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = std::env::var_os("NLP_SANE_LIB").map(PathBuf::from).into_iter().collect();
+    let mut out: Vec<PathBuf> = std::env::var_os("NLP_SANE_LIB")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect();
     if cfg!(target_os = "macos") {
-        out.extend(["/opt/homebrew/lib/libsane.1.dylib", "/usr/local/lib/libsane.1.dylib", "libsane.1.dylib"].map(PathBuf::from));
+        out.extend(
+            [
+                "/opt/homebrew/lib/libsane.1.dylib",
+                "/usr/local/lib/libsane.1.dylib",
+                "libsane.1.dylib",
+            ]
+            .map(PathBuf::from),
+        );
     } else {
-        out.extend(["libsane.so.1", "/usr/lib/x86_64-linux-gnu/libsane.so.1", "/usr/lib64/libsane.so.1"].map(PathBuf::from));
+        out.extend(
+            [
+                "libsane.so.1",
+                "/usr/lib/x86_64-linux-gnu/libsane.so.1",
+                "/usr/lib64/libsane.so.1",
+            ]
+            .map(PathBuf::from),
+        );
     }
     out
 }
@@ -151,7 +171,12 @@ impl LibSane {
         let fns = unsafe {
             macro_rules! sym {
                 ($name:literal) => {
-                    *lib.get($name).map_err(|e| Error::Unavailable(format!("libsane lacks {}: {e}", String::from_utf8_lossy($name))))?
+                    *lib.get($name).map_err(|e| {
+                        Error::Unavailable(format!(
+                            "libsane lacks {}: {e}",
+                            String::from_utf8_lossy($name)
+                        ))
+                    })?
                 };
             }
             Fns {
@@ -180,7 +205,9 @@ impl Backend for LibSane {
         let _g = lock();
         let mut list: *const *const SaneDevice = std::ptr::null();
         // SAFETY: valid out pointer; the list stays valid until the next call.
-        status("sane_get_devices", unsafe { (self.lib.fns.get_devices)(&mut list, 0) })?;
+        status("sane_get_devices", unsafe {
+            (self.lib.fns.get_devices)(&mut list, 0)
+        })?;
         let mut out = Vec::new();
         let mut i = 0;
         while !list.is_null() {
@@ -191,7 +218,12 @@ impl Backend for LibSane {
             }
             // SAFETY: non-null device record.
             let d = unsafe { &*d };
-            out.push(DeviceInfo { name: cstr(d.name), vendor: cstr(d.vendor), model: cstr(d.model), kind: cstr(d.kind) });
+            out.push(DeviceInfo {
+                name: cstr(d.name),
+                vendor: cstr(d.vendor),
+                model: cstr(d.model),
+                kind: cstr(d.kind),
+            });
             i += 1;
         }
         Ok(out)
@@ -202,8 +234,13 @@ impl Backend for LibSane {
         let mut h: SaneHandle = std::ptr::null_mut();
         let _g = lock();
         // SAFETY: valid name and out pointer.
-        status("sane_open", unsafe { (self.lib.fns.open)(c.as_ptr(), &mut h) })?;
-        Ok(Box::new(LibHandle { lib: self.lib.clone(), h }))
+        status("sane_open", unsafe {
+            (self.lib.fns.open)(c.as_ptr(), &mut h)
+        })?;
+        Ok(Box::new(LibHandle {
+            lib: self.lib.clone(),
+            h,
+        }))
     }
 }
 
@@ -237,7 +274,13 @@ impl Handle for LibHandle {
         let mut info = 0;
         // SAFETY: option 0 is the option count, an Int.
         status("sane_control_option", unsafe {
-            (self.lib.fns.control_option)(self.h, 0, ACTION_GET, (&mut n as *mut SaneWord).cast(), &mut info)
+            (self.lib.fns.control_option)(
+                self.h,
+                0,
+                ACTION_GET,
+                (&mut n as *mut SaneWord).cast(),
+                &mut info,
+            )
         })?;
         Ok(n)
     }
@@ -253,7 +296,11 @@ impl Handle for LibHandle {
             match d.constraint_type {
                 1 if !d.constraint.is_null() => {
                     let r = &*(d.constraint as *const SaneRange);
-                    Constraint::Range { min: r.min, max: r.max, quant: r.quant }
+                    Constraint::Range {
+                        min: r.min,
+                        max: r.max,
+                        quant: r.quant,
+                    }
                 }
                 2 if !d.constraint.is_null() => {
                     let w = d.constraint as *const SaneWord;
@@ -292,7 +339,13 @@ impl Handle for LibHandle {
         let _g = lock();
         // SAFETY: the buffer holds the option's declared size.
         status("sane_control_option", unsafe {
-            (self.lib.fns.control_option)(self.h, opt.index, ACTION_GET, buf.as_mut_ptr().cast(), &mut info)
+            (self.lib.fns.control_option)(
+                self.h,
+                opt.index,
+                ACTION_GET,
+                buf.as_mut_ptr().cast(),
+                &mut info,
+            )
         })?;
         let word = SaneWord::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
         Ok(match opt.value_type {
@@ -322,7 +375,13 @@ impl Handle for LibHandle {
         let _g = lock();
         // SAFETY: the buffer holds the option's declared size.
         status("sane_control_option", unsafe {
-            (self.lib.fns.control_option)(self.h, opt.index, ACTION_SET, buf.as_mut_ptr().cast(), &mut info)
+            (self.lib.fns.control_option)(
+                self.h,
+                opt.index,
+                ACTION_SET,
+                buf.as_mut_ptr().cast(),
+                &mut info,
+            )
         })?;
         Ok(info as u32)
     }
@@ -331,7 +390,9 @@ impl Handle for LibHandle {
         let mut p = SaneParameters::default();
         let _g = lock();
         // SAFETY: valid out pointer.
-        status("sane_get_parameters", unsafe { (self.lib.fns.get_parameters)(self.h, &mut p) })?;
+        status("sane_get_parameters", unsafe {
+            (self.lib.fns.get_parameters)(self.h, &mut p)
+        })?;
         Ok(Parameters {
             format: Frame::from_code(p.format),
             last_frame: p.last_frame != 0,
@@ -353,7 +414,9 @@ impl Handle for LibHandle {
         let max = buf.len().min(i32::MAX as usize) as SaneWord;
         let _g = lock();
         // SAFETY: `buf` holds `max` bytes.
-        status("sane_read", unsafe { (self.lib.fns.read)(self.h, buf.as_mut_ptr(), max, &mut n) })?;
+        status("sane_read", unsafe {
+            (self.lib.fns.read)(self.h, buf.as_mut_ptr(), max, &mut n)
+        })?;
         Ok(n.max(0) as usize)
     }
 

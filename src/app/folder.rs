@@ -3,10 +3,10 @@
 
 use eframe::egui::{self, Color32, RichText, Sense, pos2, vec2};
 
-use super::widgets::{self, Icon, icon_button, theme};
 use super::NlpApp;
 use super::grid::GridFilter;
 pub use super::grid::{GRID_VISIBLE, GridState};
+use super::widgets::{self, Icon, icon_button, theme};
 use crate::engine::settings::*;
 
 /// One-line hint shown under the scan source.
@@ -20,7 +20,6 @@ pub fn source_instructions(s: Source) -> &'static str {
         Source::LinearScan => "Linear (gamma 1.0) scans are read as stored; no preparation needed.",
     }
 }
-
 
 /// Short name for the scan source chip.
 fn source_short(s: Source) -> &'static str {
@@ -154,7 +153,13 @@ pub fn crosstalk_ui(ui: &mut egui::Ui, s: &mut Settings) {
         "Crosstalk",
         &mut pick,
         &all,
-        |i| if i == 0 { "Generic C-41" } else { films[i - 1].name },
+        |i| {
+            if i == 0 {
+                "Generic C-41"
+            } else {
+                films[i - 1].name
+            }
+        },
         "Unmixes the dyes' leakage into each other's channels. Film matrices are read off \
          spec sheets for a narrowband scanner (approx); Generic is the engine's own.",
     ) {
@@ -207,7 +212,6 @@ pub fn flat_field_ui(
         });
     });
 }
-
 
 impl NlpApp {
     pub fn sel_vec(&self) -> Vec<usize> {
@@ -325,9 +329,8 @@ impl NlpApp {
         self.folder_shortcuts(&ctx);
         let cmd = egui::Modifiers::COMMAND;
         let key_text = |m, k| RichText::new(widgets::shortcut(&ctx, m, k)).color(theme::FAINT);
-        let export_key = widgets::shortcut(&ctx, cmd, egui::Key::E);
         let (picks, needs_look) = self.filter_counts();
-        // With nothing selected the actions cover the frames on show.
+        // The top bar acts on the frames on show; the selection has its own bar.
         let shown = self.shown_frames();
         egui::Panel::top("folder_top")
             .exact_size(44.0)
@@ -419,51 +422,11 @@ impl NlpApp {
                         }
                     }
 
-                    // Right: what to do with them.
+                    // Right: scanning and the menu.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let n = self.selected.len();
-                        let targets: Vec<usize> = if n > 0 { self.sel_vec() } else { shown.clone() };
-                        let export_label = match (n, self.grid.filter) {
-                            (0, GridFilter::All) => "Export all".to_string(),
-                            (0, GridFilter::Picks) => "Export picks".to_string(),
-                            (0, _) => format!("Export {}", targets.len()),
-                            (1, _) => "Export".to_string(),
-                            (n, _) => format!("Export {n}"),
-                        };
-                        if ui
-                            .add_enabled(!targets.is_empty(), widgets::primary(&export_label))
-                            .on_hover_text(format!("Export positive copies ({export_key})"))
-                            .clicked()
-                        {
-                            self.open_export_dialog(targets.clone());
-                        }
-                        // Split Convert button: main action + ▾ for roll mode.
-                        ui.spacing_mut().item_spacing.x = 1.0;
-                        let more = ui
-                            .add(widgets::ghost("").min_size(vec2(22.0, 28.0)))
-                            .on_hover_text("Convert options");
-                        widgets::chevron(ui.painter(), more.rect.center(), true, theme::MUTED);
-                        egui::Popup::menu(&more).show(|ui| {
-                            if ui
-                                .add_enabled(targets.len() >= 2, egui::Button::new("Convert as roll…"))
-                                .on_hover_text("Analyse the frames together for one consistent roll balance")
-                                .on_disabled_hover_text("Select two or more frames")
-                                .clicked()
-                            {
-                                self.open_convert_dialog(targets.clone(), true);
-                            }
-                        });
-                        let converted = targets.iter().all(|&i| self.frames[i].sc.is_converted());
-                        if ui
-                            .add_enabled(
-                                !targets.is_empty(),
-                                widgets::ghost(if converted { "Re-convert…" } else { "Convert…" }),
-                            )
-                            .on_hover_text("Analyse each frame on its own, with new conversion options")
-                            .clicked()
-                        {
-                            self.open_convert_dialog(targets.clone(), false);
-                        }
+                        // Actions live in the action bar under the grid; up here
+                        // only scanning into the roll and the menu.
+                        let targets = shown.clone();
                         ui.spacing_mut().item_spacing.x = 6.0;
                         if !self.single_mode
                             && ui
@@ -484,24 +447,6 @@ impl NlpApp {
                             }
                             ui.separator();
                             if ui
-                                .add_enabled(
-                                    n > 0,
-                                    egui::Button::new("Copy settings").shortcut_text(key_text(cmd, egui::Key::C)),
-                                )
-                                .clicked()
-                            {
-                                self.copy_settings();
-                            }
-                            if ui
-                                .add_enabled(
-                                    self.clipboard.is_some() && n > 0,
-                                    egui::Button::new("Paste settings").shortcut_text(key_text(cmd, egui::Key::V)),
-                                )
-                                .clicked()
-                            {
-                                self.paste_settings();
-                            }
-                            if ui
                                 .add(egui::Button::new("Select all").shortcut_text(key_text(cmd, egui::Key::A)))
                                 .clicked()
                             {
@@ -520,7 +465,7 @@ impl NlpApp {
                             }
                             if ui
                                 .button("Contact sheet")
-                                .on_hover_text("Save a JPEG contact sheet in the NLP folder (selection, or the frames on show)")
+                                .on_hover_text("Save a JPEG contact sheet of the frames on show in the NLP folder")
                                 .clicked()
                             {
                                 self.make_contact_sheet(targets.clone());
@@ -556,23 +501,14 @@ impl NlpApp {
                     let conv = self.frames.iter().filter(|f| f.sc.is_converted()).count();
                     let status = format!("{} frames · {} converted", self.frames.len(), conv);
                     ui.label(RichText::new(status).small().color(theme::MUTED));
-                    let n = self.selected.len();
-                    if n == 0 {
+                    if self.selected.is_empty() {
                         ui.label(
-                            RichText::new("· Click or drag to select · Space to preview · ? for shortcuts")
-                                .small()
-                                .color(theme::FAINT),
+                            RichText::new(
+                                "· Click or drag to select · Space to preview · ? for shortcuts",
+                            )
+                            .small()
+                            .color(theme::FAINT),
                         );
-                    } else {
-                        ui.label(RichText::new(format!("· {n} selected")).small().color(theme::TEXT))
-                            .on_hover_text(super::LAB_KEYS_HELP);
-                        if ui
-                            .add(egui::Button::new(RichText::new("Clear").small().color(theme::ACCENT)).frame(false))
-                            .on_hover_text("Clear the selection (Esc)")
-                            .clicked()
-                        {
-                            self.selected.clear();
-                        }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -643,11 +579,17 @@ impl NlpApp {
                 if self.frames.is_empty() {
                     ui.add_space((ui.available_height() * 0.35).max(24.0));
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("No scans in this roll yet").font(theme::medium(16.0)));
-                        ui.label(RichText::new("Drop scans here, or scan film into it with Scan.").color(theme::MUTED));
+                        ui.label(
+                            RichText::new("No scans in this roll yet").font(theme::medium(16.0)),
+                        );
+                        ui.label(
+                            RichText::new("Drop scans here, or scan film into it with Scan.")
+                                .color(theme::MUTED),
+                        );
                     });
                 } else {
                     self.grid(ui);
+                    self.selection_bar_ui(ui);
                     self.quick_look_ui(ui);
                 }
             });
@@ -727,7 +669,10 @@ impl NlpApp {
             }
         }
         if enter && !dialog {
-            let lead = self.active.filter(|a| self.selected.contains(a)).or(self.selected.first().copied());
+            let lead = self
+                .active
+                .filter(|a| self.selected.contains(a))
+                .or(self.selected.first().copied());
             if let Some(i) = lead {
                 self.grid.quick_look = false;
                 self.open_editor(i);
@@ -740,7 +685,12 @@ impl NlpApp {
             self.paste_settings();
         }
         if export {
-            self.open_export_dialog(self.sel_vec());
+            let idx = if self.selected.is_empty() {
+                self.shown_frames()
+            } else {
+                self.sel_vec()
+            };
+            self.open_export_dialog(idx);
         }
         if let Some(key) = super::lab_key(ctx).filter(|_| self.export_targets.is_none()) {
             let sel = self.sel_vec();
@@ -929,10 +879,9 @@ pub fn conversion_fields(ui: &mut egui::Ui, s: &mut Settings, start: Option<&std
         "",
     );
     ui.add_space(6.0);
-    widgets::checkbox(ui, &mut s.auto_crop, "Auto-crop frames")
-        .on_hover_text(
-            "Find each uncropped frame inside the film rebate and holder, and straighten it",
-        );
+    widgets::checkbox(ui, &mut s.auto_crop, "Auto-crop frames").on_hover_text(
+        "Find each uncropped frame inside the film rebate and holder, and straighten it",
+    );
 }
 
 impl NlpApp {
@@ -1131,7 +1080,11 @@ fn filter_tab(ui: &mut egui::Ui, on: bool, label: &str, warn: bool) -> egui::Res
     if warn {
         p.circle_filled(pos2(rect.left() + 12.0, rect.center().y), 3.0, theme::WARN);
     }
-    let col = if on || resp.hovered() { theme::TEXT } else { theme::MUTED };
+    let col = if on || resp.hovered() {
+        theme::TEXT
+    } else {
+        theme::MUTED
+    };
     p.galley_with_override_text_color(
         pos2(rect.left() + 10.0 + dot, rect.center().y - g.size().y / 2.0),
         g,

@@ -33,10 +33,17 @@ impl Asic {
         Ok(match model.asic {
             "GL128" => Asic::Gl128(Gl128::new(proto(transport), model)),
             "GL845" => Asic::Gl845(Gl845::new(proto(transport), model, Gl84xVariant::Gl845)),
-            "GL843" if model.kind == ModelKind::Opticfilm7600iV1 => Asic::Gl843V1(Gl843V1::new(transport, model)),
+            "GL843" if model.kind == ModelKind::Opticfilm7600iV1 => {
+                Asic::Gl843V1(Gl843V1::new(transport, model))
+            }
             "GL843" => Asic::Gl845(Gl845::new(proto(transport), model, Gl84xVariant::Gl843)),
             "GL842" => Asic::Gl845(Gl845::new(proto(transport), model, Gl84xVariant::Gl842)),
-            a => return Err(Error::UnsupportedDevice(format!("No ASIC driver for model {:?} asic={a:?}", model.name))),
+            a => {
+                return Err(Error::UnsupportedDevice(format!(
+                    "No ASIC driver for model {:?} asic={a:?}",
+                    model.name
+                )));
+            }
         })
     }
 

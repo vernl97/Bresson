@@ -68,7 +68,11 @@ mod tests {
 /// numpy `_lerp` as used by `np.percentile(method="linear")`.
 fn np_lerp(a: f64, b: f64, t: f64) -> f64 {
     let d = b - a;
-    if t >= 0.5 { b - d * (1.0 - t) } else { a + d * t }
+    if t >= 0.5 {
+        b - d * (1.0 - t)
+    } else {
+        a + d * t
+    }
 }
 
 /// `np.percentile(sorted, q)` (linear method) on already-sorted data.
@@ -106,7 +110,11 @@ pub fn median(data: impl IntoIterator<Item = f64>) -> f64 {
     let s = sorted_f64(data);
     let n = s.len();
     assert!(n > 0, "median of empty data");
-    if n % 2 == 1 { s[n / 2] } else { (s[n / 2 - 1] + s[n / 2]) / 2.0 }
+    if n % 2 == 1 {
+        s[n / 2]
+    } else {
+        (s[n / 2 - 1] + s[n / 2]) / 2.0
+    }
 }
 
 /// `np.mean` (f64 accumulator).
@@ -173,7 +181,11 @@ impl U16Hist {
         let j = (i + 1).min(self.n - 1);
         let (a, b) = (self.kth(i), self.kth(j));
         let d = b - a;
-        if gamma >= 0.5 { b - d * (1.0 - gamma) } else { a + d * gamma }
+        if gamma >= 0.5 {
+            b - d * (1.0 - gamma)
+        } else {
+            a + d * gamma
+        }
     }
 }
 
@@ -188,7 +200,11 @@ impl U16Hist {
         let j = (i + 1).min(self.n - 1);
         let (a, b) = (f(self.kth(i)), f(self.kth(j)));
         let d = b - a;
-        if gamma >= 0.5 { b - d * (1.0 - gamma) } else { a + d * gamma }
+        if gamma >= 0.5 {
+            b - d * (1.0 - gamma)
+        } else {
+            a + d * gamma
+        }
     }
 }
 
@@ -203,7 +219,11 @@ pub fn percentile_sorted_f32(sorted: &[f32], q: f64) -> f32 {
     let j = (i + 1).min(n - 1);
     let (a, b) = (sorted[i], sorted[j]);
     let d = b - a;
-    if gamma >= 0.5 { b - d * (1.0 - gamma) } else { a + d * gamma }
+    if gamma >= 0.5 {
+        b - d * (1.0 - gamma)
+    } else {
+        a + d * gamma
+    }
 }
 
 /// `np.quantile(f32_data, qs_array)`: float32 difference, float64 result.
@@ -218,7 +238,11 @@ pub fn quantiles_sorted_f32(sorted: &[f32], qs: &[f64]) -> Vec<f64> {
             let j = (i + 1).min(n - 1);
             let (a, b) = (sorted[i], sorted[j]);
             let d = (b - a) as f64;
-            if gamma >= 0.5 { b as f64 - d * (1.0 - gamma) } else { a as f64 + d * gamma }
+            if gamma >= 0.5 {
+                b as f64 - d * (1.0 - gamma)
+            } else {
+                a as f64 + d * gamma
+            }
         })
         .collect()
 }
@@ -233,7 +257,11 @@ pub fn median_f32(v: Vec<f32>) -> f32 {
     let s = sort_f32(v);
     let n = s.len();
     assert!(n > 0, "median of empty data");
-    if n % 2 == 1 { s[n / 2] } else { (s[n / 2 - 1] + s[n / 2]) / 2.0 }
+    if n % 2 == 1 {
+        s[n / 2]
+    } else {
+        (s[n / 2 - 1] + s[n / 2]) / 2.0
+    }
 }
 
 /// `np.linspace(a, b, n)`.

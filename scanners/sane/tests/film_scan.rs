@@ -17,11 +17,16 @@ fn device(config: FakeConfig) -> (Device, Arc<Mutex<FakeLog>>) {
 }
 
 fn job(dpi: u32, area: [f64; 4]) -> FilmScan {
-    FilmScan { source: None, dpi, area }
+    FilmScan {
+        source: None,
+        dpi,
+        area,
+    }
 }
 
 fn scan(dev: &mut Device, j: &FilmScan) -> sane::SaneImage {
-    dev.scan_film(j, &AtomicBool::new(false), &mut |_| {}).unwrap()
+    dev.scan_film(j, &AtomicBool::new(false), &mut |_| {})
+        .unwrap()
 }
 
 #[test]
@@ -29,7 +34,10 @@ fn lists_the_simulated_device() {
     let mut sane = Sane::simulated(FakeConfig::default());
     let d = sane.devices().unwrap();
     assert_eq!(d.len(), 1);
-    assert_eq!((d[0].name.as_str(), d[0].model.as_str()), (DEVICE_NAME, "Simulated flatbed"));
+    assert_eq!(
+        (d[0].name.as_str(), d[0].model.as_str()),
+        (DEVICE_NAME, "Simulated flatbed")
+    );
     assert!(sane.open("other:device").is_err());
 }
 
@@ -40,16 +48,25 @@ fn film_setup_picks_the_transparency_unit_and_neutral_options() {
     // Before: flatbed area, film type inactive.
     assert!(!dev.option("film-type").unwrap().active());
     dev.prepare_film(None).unwrap();
-    assert_eq!(dev.get("source").unwrap(), Value::Str("Transparency Unit".into()));
+    assert_eq!(
+        dev.get("source").unwrap(),
+        Value::Str("Transparency Unit".into())
+    );
     assert_eq!(dev.get("mode").unwrap(), Value::Str("Color".into()));
     assert_eq!(dev.get("depth").unwrap(), Value::Int(16));
-    assert_eq!(dev.get("film-type").unwrap(), Value::Str("Positive Film".into()));
+    assert_eq!(
+        dev.get("film-type").unwrap(),
+        Value::Str("Positive Film".into())
+    );
     assert_eq!(dev.get("custom-gamma").unwrap(), Value::Bool(false));
     // The source change reloaded the options: the area is now the unit's, film type active.
     assert_eq!(log.lock().unwrap().reloads, 1);
     assert!(dev.option("film-type").unwrap().active());
     let a = dev.area_mm().unwrap();
-    assert!((a[2] - 63.5).abs() < 1e-3 && (a[3] - 228.6).abs() < 1e-3, "{a:?}");
+    assert!(
+        (a[2] - 63.5).abs() < 1e-3 && (a[3] - 228.6).abs() < 1e-3,
+        "{a:?}"
+    );
     // An explicit source wins over the film guess.
     dev.prepare_film(Some("Flatbed")).unwrap();
     assert_eq!(dev.get("source").unwrap(), Value::Str("Flatbed".into()));
@@ -58,7 +75,10 @@ fn film_setup_picks_the_transparency_unit_and_neutral_options() {
 #[test]
 fn resolutions_and_sources_come_from_the_device() {
     let (dev, _) = device(FakeConfig::default());
-    assert_eq!(dev.resolutions(), [75, 100, 150, 300, 600, 1200, 2400, 3200, 6400]);
+    assert_eq!(
+        dev.resolutions(),
+        [75, 100, 150, 300, 600, 1200, 2400, 3200, 6400]
+    );
     assert_eq!(dev.sources(), ["Flatbed", "Transparency Unit"]);
 }
 
@@ -74,11 +94,18 @@ fn normalised_area_maps_to_millimetres() {
     let (mut dev, _) = device(FakeConfig::default());
     dev.prepare_film(None).unwrap();
     dev.set_window(300, [0.25, 0.5, 0.75, 1.0]).unwrap();
-    assert!((mm(&mut dev, "tl-x") - 15.875).abs() < 1e-3 && (mm(&mut dev, "br-x") - 47.625).abs() < 1e-3);
-    assert!((mm(&mut dev, "tl-y") - 114.3).abs() < 1e-3 && (mm(&mut dev, "br-y") - 228.6).abs() < 1e-3);
+    assert!(
+        (mm(&mut dev, "tl-x") - 15.875).abs() < 1e-3
+            && (mm(&mut dev, "br-x") - 47.625).abs() < 1e-3
+    );
+    assert!(
+        (mm(&mut dev, "tl-y") - 114.3).abs() < 1e-3 && (mm(&mut dev, "br-y") - 228.6).abs() < 1e-3
+    );
     // Reversed corners are put in order.
     dev.set_window(300, [0.75, 1.0, 0.25, 0.5]).unwrap();
-    assert!((mm(&mut dev, "tl-x") - 15.875).abs() < 1e-3 && (mm(&mut dev, "br-y") - 228.6).abs() < 1e-3);
+    assert!(
+        (mm(&mut dev, "tl-x") - 15.875).abs() < 1e-3 && (mm(&mut dev, "br-y") - 228.6).abs() < 1e-3
+    );
 }
 
 /// The frame area of the first frame on the strip, normalised to the unit.
@@ -97,7 +124,10 @@ fn film_scan_reads_linear_positive_16_bit_rgb() {
     let p = px(10, 200);
     assert!(p[0] > p[1] && p[1] > p[2], "{p:?}");
     let (left, right) = (px(5, 400)[1], px(275, 400)[1]);
-    assert!(left > right * 4, "falloff across the frame: {left} vs {right}");
+    assert!(
+        left > right * 4,
+        "falloff across the frame: {left} vs {right}"
+    );
     let l = log.lock().unwrap();
     assert_eq!(l.starts, 1);
     assert_eq!(l.cancels, 1, "a scan ends with sane_cancel");
@@ -106,9 +136,25 @@ fn film_scan_reads_linear_positive_16_bit_rgb() {
 #[test]
 fn three_pass_gray_8_bit_and_padding_decode_alike() {
     let reference = scan(&mut device(FakeConfig::default()).0, &job(150, FRAME1));
-    let three = scan(&mut device(FakeConfig { three_pass: true, max_read: 1000, ..Default::default() }).0, &job(150, FRAME1));
+    let three = scan(
+        &mut device(FakeConfig {
+            three_pass: true,
+            max_read: 1000,
+            ..Default::default()
+        })
+        .0,
+        &job(150, FRAME1),
+    );
     assert_eq!(three, reference);
-    let padded = scan(&mut device(FakeConfig { line_padding: 6, unknown_lines: true, ..Default::default() }).0, &job(150, FRAME1));
+    let padded = scan(
+        &mut device(FakeConfig {
+            line_padding: 6,
+            unknown_lines: true,
+            ..Default::default()
+        })
+        .0,
+        &job(150, FRAME1),
+    );
     assert_eq!(padded, reference);
 
     // 8-bit: samples expand as v << 8 | v, within one 8-bit step of the 16-bit scan.
@@ -117,9 +163,17 @@ fn three_pass_gray_8_bit_and_padding_decode_alike() {
     dev.set("depth", Value::Int(8)).unwrap();
     dev.set_window(150, FRAME1).unwrap();
     let img8 = dev.scan(&AtomicBool::new(false), &mut |_| {}).unwrap();
-    assert_eq!((img8.width, img8.height), (reference.width, reference.height));
+    assert_eq!(
+        (img8.width, img8.height),
+        (reference.width, reference.height)
+    );
     assert!(img8.rgb.iter().all(|v| v >> 8 == v & 0xFF));
-    assert!(img8.rgb.iter().zip(&reference.rgb).all(|(a, b)| (*a as i32 - *b as i32).abs() <= 257));
+    assert!(
+        img8.rgb
+            .iter()
+            .zip(&reference.rgb)
+            .all(|(a, b)| (*a as i32 - *b as i32).abs() <= 257)
+    );
 
     // Gray: one channel replicated.
     let (mut dev, _) = device(FakeConfig::default());
@@ -128,23 +182,41 @@ fn three_pass_gray_8_bit_and_padding_decode_alike() {
     dev.set_window(150, FRAME1).unwrap();
     let g = dev.scan(&AtomicBool::new(false), &mut |_| {}).unwrap();
     assert!(g.rgb.chunks_exact(3).all(|p| p[0] == p[1] && p[1] == p[2]));
-    assert!(g.rgb.chunks_exact(3).zip(reference.rgb.chunks_exact(3)).all(|(a, b)| a[1] == b[1]));
+    assert!(
+        g.rgb
+            .chunks_exact(3)
+            .zip(reference.rgb.chunks_exact(3))
+            .all(|(a, b)| a[1] == b[1])
+    );
 }
 
 #[test]
 fn progress_rises_to_one() {
-    let (mut dev, _) = device(FakeConfig { three_pass: true, max_read: 4096, ..Default::default() });
+    let (mut dev, _) = device(FakeConfig {
+        three_pass: true,
+        max_read: 4096,
+        ..Default::default()
+    });
     let mut seen = Vec::new();
-    dev.scan_film(&job(150, FRAME1), &AtomicBool::new(false), &mut |p| seen.push(p)).unwrap();
+    dev.scan_film(&job(150, FRAME1), &AtomicBool::new(false), &mut |p| {
+        seen.push(p)
+    })
+    .unwrap();
     assert!(seen.len() > 3);
     assert!(seen.windows(2).all(|w| w[0] <= w[1] + 1e-9), "{seen:?}");
     assert_eq!(seen.last().copied(), Some(1.0));
-    assert!(seen.iter().any(|&p| (0.3..0.4).contains(&p)), "three-pass progress spans the frames");
+    assert!(
+        seen.iter().any(|&p| (0.3..0.4).contains(&p)),
+        "three-pass progress spans the frames"
+    );
 }
 
 #[test]
 fn cancel_mid_read_stops_and_cancels_the_scan() {
-    let (mut dev, log) = device(FakeConfig { max_read: 4096, ..Default::default() });
+    let (mut dev, log) = device(FakeConfig {
+        max_read: 4096,
+        ..Default::default()
+    });
     let cancel = AtomicBool::new(false);
     let r = dev.scan_film(&job(300, FRAME1), &cancel, &mut |p| {
         if p > 0.2 {
@@ -155,7 +227,10 @@ fn cancel_mid_read_stops_and_cancels_the_scan() {
     assert_eq!(log.lock().unwrap().cancels, 1);
     // The device is usable again.
     cancel.store(false, Ordering::SeqCst);
-    assert!(dev.scan_film(&job(150, FRAME1), &cancel, &mut |_| {}).is_ok());
+    assert!(
+        dev.scan_film(&job(150, FRAME1), &cancel, &mut |_| {})
+            .is_ok()
+    );
 }
 
 #[test]
@@ -180,15 +255,30 @@ fn libsane_test_backend() {
 
     let mut sane = Sane::load().expect("libsane");
     let devices = sane.devices().unwrap();
-    let name = devices.iter().find(|d| d.name.starts_with("test")).map(|d| d.name.clone()).expect("test backend device");
+    let name = devices
+        .iter()
+        .find(|d| d.name.starts_with("test"))
+        .map(|d| d.name.clone())
+        .expect("test backend device");
     let mut dev = sane.open(&name).unwrap();
 
     // Film setup on a real backend: colour, 16 bit; a window in mm from the normalised area.
-    let job = FilmScan { source: None, dpi: 75, area: [0.0, 0.0, 0.5, 0.5] };
-    let img = dev.scan_film(&job, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    let job = FilmScan {
+        source: None,
+        dpi: 75,
+        area: [0.0, 0.0, 0.5, 0.5],
+    };
+    let img = dev
+        .scan_film(&job, &AtomicBool::new(false), &mut |_| {})
+        .unwrap();
     assert_eq!(dev.get("mode").unwrap(), Value::Str("Color".into()));
     assert_eq!(dev.get("depth").unwrap(), Value::Int(16));
-    assert!(img.width > 0 && img.height > 0, "{}×{}", img.width, img.height);
+    assert!(
+        img.width > 0 && img.height > 0,
+        "{}×{}",
+        img.width,
+        img.height
+    );
     assert_eq!(img.rgb.len(), img.width * img.height * 3);
     assert!(dev.resolutions().contains(&75));
 
@@ -201,6 +291,9 @@ fn libsane_test_backend() {
     // Cancel stops a real scan.
     dev.set("three-pass", Value::Bool(false)).unwrap();
     let cancel = AtomicBool::new(true);
-    assert!(matches!(dev.scan(&cancel, &mut |_| {}), Err(Error::Cancelled)));
+    assert!(matches!(
+        dev.scan(&cancel, &mut |_| {}),
+        Err(Error::Cancelled)
+    ));
     let _ = std::fs::remove_dir_all(&conf);
 }

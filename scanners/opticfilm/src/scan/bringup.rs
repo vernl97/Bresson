@@ -48,7 +48,11 @@ pub fn is_gl128_opticfilm(model: &FilmModel) -> bool {
 
 fn window_end_steps(model: &FilmModel) -> i64 {
     let g = model.g();
-    if g.scan_window_end_steps != 0 { g.scan_window_end_steps } else { g.feed_to_scan_bottom_steps }
+    if g.scan_window_end_steps != 0 {
+        g.scan_window_end_steps
+    } else {
+        g.feed_to_scan_bottom_steps
+    }
 }
 
 /// Invert `feed_to_scan_steps_for_area` so a feed2 maps back to `y1`.
@@ -112,7 +116,11 @@ pub fn ladder_scan_area(model: &FilmModel, dpi: i64) -> (Area, GeometryMeta) {
     let meta = GeometryMeta {
         profile: "ppi_ladder",
         feed2: actual_feed2,
-        max_lincnt: if max_lincnt != 0 { max_lincnt } else { target_lincnt },
+        max_lincnt: if max_lincnt != 0 {
+            max_lincnt
+        } else {
+            target_lincnt
+        },
         target_lincnt,
         oversample: model.oversample_for(dpi),
         y2,
@@ -132,23 +140,35 @@ pub fn ladder_scan_area(model: &FilmModel, dpi: i64) -> (Area, GeometryMeta) {
 /// Force image `LINCNT` / USB line count to a capture table value.
 pub fn apply_target_lincnt(geometry: &ScanGeometry, target_lincnt: i64) -> ScanGeometry {
     let per_line = geometry.lincnt_per_line.max(1);
-    let halved = geometry.register_lincnt != 0 && geometry.optical_line_count * 2 == geometry.register_lincnt;
+    let halved = geometry.register_lincnt != 0
+        && geometry.optical_line_count * 2 == geometry.register_lincnt;
     let lines = (target_lincnt / per_line - geometry.num_staggered_lines).max(1);
     ScanGeometry {
         register_lincnt: target_lincnt,
-        optical_line_count: if halved { target_lincnt / 2 } else { target_lincnt },
+        optical_line_count: if halved {
+            target_lincnt / 2
+        } else {
+            target_lincnt
+        },
         lines,
         ..geometry.clone()
     }
 }
 
 /// Build SE geometry for Full window (`preview_safe`) or PPI ladder.
-pub fn bringup_scan_geometry(model: &FilmModel, dpi: i64, profile: GeometryProfile) -> Result<(ScanGeometry, GeometryMeta)> {
+pub fn bringup_scan_geometry(
+    model: &FilmModel,
+    dpi: i64,
+    profile: GeometryProfile,
+) -> Result<(ScanGeometry, GeometryMeta)> {
     let (area, mut meta) = match profile {
         GeometryProfile::PpiLadder => ladder_scan_area(model, dpi),
         GeometryProfile::PreviewSafe => preview_safe_scan_area(model, dpi, 0.0),
     };
-    let geometry = apply_target_lincnt(&compute_geometry(dpi, model, Some(area))?, meta.target_lincnt);
+    let geometry = apply_target_lincnt(
+        &compute_geometry(dpi, model, Some(area))?,
+        meta.target_lincnt,
+    );
     meta.geometry_lincnt = Some(geometry.lincnt_register());
     meta.optical_line_count = Some(geometry.optical_line_count);
     meta.area = geometry.area;
@@ -160,7 +180,12 @@ pub fn bringup_scan_geometry(model: &FilmModel, dpi: i64, profile: GeometryProfi
 pub fn clamp_area_to_shading_table(model: &FilmModel, dpi: i64, area: Area) -> Result<Area> {
     let probe = compute_geometry(dpi, model, Some(area))?;
     let table_n = shading_width_for_resolution(dpi);
-    let n = shading_acquire_width(probe.pixel_startx, probe.pixel_endx, probe.register_dpiset, model.optical_resolution)?;
+    let n = shading_acquire_width(
+        probe.pixel_startx,
+        probe.pixel_endx,
+        probe.register_dpiset,
+        model.optical_resolution,
+    )?;
     if n <= table_n {
         return Ok(area);
     }
@@ -211,7 +236,8 @@ pub fn effective_scan_area(model: &FilmModel, geometry: &ScanGeometry, requested
     let eff_x2 = (x1 + width_mm / model.x_size_ta_mm).max(x1 + 1e-6).min(1.0);
     let mut out_mm = geometry.travel_mm();
     if geometry.frame_lines > 0 {
-        out_mm = out_mm.min(geometry.frame_lines as f64 * MM_PER_INCH / geometry.asic_dpi().max(1) as f64);
+        out_mm = out_mm
+            .min(geometry.frame_lines as f64 * MM_PER_INCH / geometry.asic_dpi().max(1) as f64);
     }
     let eff_y2 = (y1 + out_mm / model.y_size_ta_mm).max(y1 + 1e-6).min(1.0);
     clamp_area([x1, y1, eff_x2, eff_y2])
@@ -231,7 +257,11 @@ pub fn crop_adjustment_message(requested: Area, effective: Area) -> Option<Strin
 }
 
 /// Geometry for an arbitrary normalized crop inside the TA window (LINCNT clamped).
-pub fn crop_scan_geometry(model: &FilmModel, dpi: i64, area: Area) -> Result<(ScanGeometry, GeometryMeta)> {
+pub fn crop_scan_geometry(
+    model: &FilmModel,
+    dpi: i64,
+    area: Area,
+) -> Result<(ScanGeometry, GeometryMeta)> {
     let area = clamp_area(area);
     let feed2 = feed2_for(model, area[1]);
     let max_lincnt = model.max_lincnt_for(feed2, dpi);

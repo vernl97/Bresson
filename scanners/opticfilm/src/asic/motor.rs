@@ -22,7 +22,11 @@ impl MotorSlope {
         let initial_v = 1.0 / initial_w as f64;
         let max_v = 1.0 / max_w as f64;
         let accel = (max_v * max_v - initial_v * initial_v) / (2.0 * steps as f64);
-        Self { initial_speed_w: initial_w, max_speed_w: max_w, acceleration: accel }
+        Self {
+            initial_speed_w: initial_w,
+            max_speed_w: max_w,
+            acceleration: accel,
+        }
     }
 
     pub fn get_table_step_shifted(&self, step: i64, step_type: i64) -> i64 {
@@ -47,7 +51,14 @@ impl MotorSlopeTable {
     }
 }
 
-pub fn create_slope_table_for_speed(slope: &MotorSlope, target_speed_w: i64, step_type: i64, steps_alignment: i64, min_size: i64, max_size: i64) -> MotorSlopeTable {
+pub fn create_slope_table_for_speed(
+    slope: &MotorSlope,
+    target_speed_w: i64,
+    step_type: i64,
+    steps_alignment: i64,
+    min_size: i64,
+    max_size: i64,
+) -> MotorSlopeTable {
     let target_shifted = target_speed_w >> step_type;
     let max_shifted = slope.max_speed_w >> step_type;
     let final_speed = target_shifted.max(max_shifted);
@@ -60,35 +71,73 @@ pub fn create_slope_table_for_speed(slope: &MotorSlope, target_speed_w: i64, ste
         table.push(current);
     }
     table.push(final_speed);
-    while (table.len() as i64) < max_size - 1 && ((table.len() as i64) % steps_alignment != 0 || (table.len() as i64) < min_size) {
+    while (table.len() as i64) < max_size - 1
+        && ((table.len() as i64) % steps_alignment != 0 || (table.len() as i64) < min_size)
+    {
         table.push(*table.last().unwrap());
     }
     MotorSlopeTable { table }
 }
 
-pub fn create_scan_slope_table(ydpi: i64, exposure: i64, base_ydpi: i64, step_multiplier: i64, profile: Option<&MotorProfile>) -> MotorSlopeTable {
+pub fn create_scan_slope_table(
+    ydpi: i64,
+    exposure: i64,
+    base_ydpi: i64,
+    step_multiplier: i64,
+    profile: Option<&MotorProfile>,
+) -> MotorSlopeTable {
     let mp = profile.copied().unwrap_or(DEFAULT_GL845_MOTOR);
     let slope = MotorSlope::create_from_steps(mp.initial_w, mp.max_w, mp.slope_steps);
     let target = crate::num::floor_div(exposure * ydpi, base_ydpi);
-    create_slope_table_for_speed(&slope, target, mp.step_type, step_multiplier, 2 * step_multiplier, mp.slope_table_max)
+    create_slope_table_for_speed(
+        &slope,
+        target,
+        mp.step_type,
+        step_multiplier,
+        2 * step_multiplier,
+        mp.slope_table_max,
+    )
 }
 
-pub fn create_fast_slope_table(step_multiplier: i64, profile: Option<&MotorProfile>) -> MotorSlopeTable {
+pub fn create_fast_slope_table(
+    step_multiplier: i64,
+    profile: Option<&MotorProfile>,
+) -> MotorSlopeTable {
     let mp = profile.copied().unwrap_or(DEFAULT_GL845_MOTOR);
     let slope = MotorSlope::create_from_steps(mp.initial_w, mp.max_w, mp.slope_steps);
-    create_slope_table_for_speed(&slope, slope.max_speed_w, mp.step_type, step_multiplier, 2 * step_multiplier, mp.slope_table_max)
+    create_slope_table_for_speed(
+        &slope,
+        slope.max_speed_w,
+        mp.step_type,
+        step_multiplier,
+        2 * step_multiplier,
+        mp.slope_table_max,
+    )
 }
 
 pub fn slope_table_to_bytes(table: &[i64]) -> Vec<u8> {
-    table.iter().flat_map(|&v| [(v & 0xFF) as u8, ((v >> 8) & 0xFF) as u8]).collect()
+    table
+        .iter()
+        .flat_map(|&v| [(v & 0xFF) as u8, ((v >> 8) & 0xFF) as u8])
+        .collect()
 }
 
 /// `sanei_genesys_calculate_zmod` (single-table path).
-pub fn calculate_zmod(exposure_time: i64, slope_table: &[i64], acceleration_steps: i64, move_steps: i64, buffer_acceleration_steps: i64) -> (i64, i64) {
+pub fn calculate_zmod(
+    exposure_time: i64,
+    slope_table: &[i64],
+    acceleration_steps: i64,
+    move_steps: i64,
+    buffer_acceleration_steps: i64,
+) -> (i64, i64) {
     let steps = (acceleration_steps as usize).min(slope_table.len());
     let total: i64 = slope_table[..steps].iter().sum();
     // Python `slope_table[steps - 1]` wraps to the last entry when steps is 0.
-    let cruise = if steps == 0 { *slope_table.last().unwrap() } else { slope_table[steps - 1] };
+    let cruise = if steps == 0 {
+        *slope_table.last().unwrap()
+    } else {
+        slope_table[steps - 1]
+    };
     let z1 = crate::num::py_mod(total + buffer_acceleration_steps * cruise, exposure_time);
     let z2 = crate::num::py_mod(total + move_steps * cruise, exposure_time);
     (z1, z2)

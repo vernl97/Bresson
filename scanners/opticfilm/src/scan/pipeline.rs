@@ -45,7 +45,9 @@ fn edge_column_means(rgb: &Rgb16, n: usize) -> (Vec<f64>, Vec<f64>) {
     }
     let count = n.min((w / 2).max(1));
     let head = (0..count).map(|i| column_mean(rgb.view(), i, 3)).collect();
-    let tail = (0..count).map(|i| column_mean(rgb.view(), w - count + i, 3)).collect();
+    let tail = (0..count)
+        .map(|i| column_mean(rgb.view(), w - count + i, 3))
+        .collect();
     (head, tail)
 }
 
@@ -81,7 +83,10 @@ pub fn trim_to_optical_span(rgb: Rgb16, geometry: &ScanGeometry) -> Rgb16 {
     if expected < 8 || rgb.dim().1 <= expected {
         return rgb;
     }
-    info!("trimmed optical span width {} → {expected} (USB wider than geometry.pixels)", rgb.dim().1);
+    info!(
+        "trimmed optical span width {} → {expected} (USB wider than geometry.pixels)",
+        rgb.dim().1
+    );
     rgb.slice(s![.., ..expected, ..]).to_owned()
 }
 
@@ -113,23 +118,47 @@ pub fn inset_slice(h: usize, w: usize, inset: f64) -> Option<((usize, usize), (u
 
 impl ImagePipeline {
     pub fn new(model: FilmModel) -> Self {
-        Self { model, last_usb_end_drop: 0 }
+        Self {
+            model,
+            last_usb_end_drop: 0,
+        }
     }
 
     /// Decode USB RGB optical buffer → uint16 HxWx3.
     ///
     /// 8-bit streams are upsampled to 16-bit (`value * 257`). Layout is
     /// chunky `RGBRGB…` unless `planar` (or the model) says `RRR…GGG…BBB…`.
-    pub fn decode_rgb(&self, raw: &[u8], geometry: &ScanGeometry, planar: Option<bool>) -> Result<Rgb16> {
+    pub fn decode_rgb(
+        &self,
+        raw: &[u8],
+        geometry: &ScanGeometry,
+        planar: Option<bool>,
+    ) -> Result<Rgb16> {
         let expected = geometry.total_bytes() as usize;
         if raw.len() < expected {
-            return Err(Error::Value(format!("Short scan buffer: got {} want {expected}", raw.len())));
+            return Err(Error::Value(format!(
+                "Short scan buffer: got {} want {expected}",
+                raw.len()
+            )));
         }
-        let (h, w, c) = (geometry.optical_line_count as usize, geometry.pixels as usize, geometry.channels as usize);
-        let planar = planar.unwrap_or_else(|| self.model.gl128.as_ref().is_some_and(|g| g.usb_planar_rgb));
-        let index = |y: usize, x: usize, ch: usize| if planar { (y * c + ch) * w + x } else { (y * w + x) * c + ch };
+        let (h, w, c) = (
+            geometry.optical_line_count as usize,
+            geometry.pixels as usize,
+            geometry.channels as usize,
+        );
+        let planar =
+            planar.unwrap_or_else(|| self.model.gl128.as_ref().is_some_and(|g| g.usb_planar_rgb));
+        let index = |y: usize, x: usize, ch: usize| {
+            if planar {
+                (y * c + ch) * w + x
+            } else {
+                (y * w + x) * c + ch
+            }
+        };
         match geometry.depth {
-            8 => Ok(Array3::from_shape_fn((h, w, c), |(y, x, ch)| raw[index(y, x, ch)] as u16 * 257)),
+            8 => Ok(Array3::from_shape_fn((h, w, c), |(y, x, ch)| {
+                raw[index(y, x, ch)] as u16 * 257
+            })),
             16 => {
                 let swap = self.model.swap_16bit_data.unwrap_or(false);
                 Ok(Array3::from_shape_fn((h, w, c), |(y, x, ch)| {
@@ -154,7 +183,9 @@ impl ImagePipeline {
         let (height, width, channels) = rgb.dim();
         let groups = height / n;
         if groups < 1 {
-            return Err(Error::Value(format!("Buffer of {height} rows is shorter than one {n}-row group")));
+            return Err(Error::Value(format!(
+                "Buffer of {height} rows is shorter than one {n}-row group"
+            )));
         }
         let out = Array3::from_shape_fn((groups, width, channels), |(g, x, c)| {
             let s: u32 = (0..n).map(|k| rgb[[g * n + k, x, c]] as u32).sum();
@@ -185,7 +216,11 @@ impl ImagePipeline {
             }
             ((s + count / 2) / count) as u16
         });
-        debug!("host downsample {h}x{w} -> {}x{} (factor={f})", out.dim().0, out.dim().1);
+        debug!(
+            "host downsample {h}x{w} -> {}x{} (factor={f})",
+            out.dim().0,
+            out.dim().1
+        );
         out
     }
 
@@ -201,7 +236,9 @@ impl ImagePipeline {
         let (height, width, _) = rgb.dim();
         out_h = out_h.min(height.saturating_sub(max_shift));
         if height < max_shift || out_h < 1 {
-            return Err(Error::Value("Optical buffer shorter than required after shift".into()));
+            return Err(Error::Value(
+                "Optical buffer shorter than required after shift".into(),
+            ));
         }
         let out = Array3::from_shape_fn((out_h, width, 3), |(y, x, c)| rgb[[y + shifts[c], x, c]]);
         debug!("applied line shifts r/g/b={shifts:?}");
@@ -219,10 +256,14 @@ impl ImagePipeline {
         let max_shift = *shifts.iter().max().unwrap() as usize;
         let out_h = (geometry.lines as usize).min(height.saturating_sub(max_shift));
         if height < max_shift || out_h < 1 {
-            return Err(Error::Value("Buffer shorter than required for Y stagger".into()));
+            return Err(Error::Value(
+                "Buffer shorter than required for Y stagger".into(),
+            ));
         }
         let n = shifts.len();
-        let out = Array3::from_shape_fn((out_h, width, 3), |(y, x, c)| rgb[[y + shifts[x % n] as usize, x, c]]);
+        let out = Array3::from_shape_fn((out_h, width, 3), |(y, x, c)| {
+            rgb[[y + shifts[x % n] as usize, x, c]]
+        });
         debug!("applied y stagger shifts={shifts:?} out_h={out_h}");
         Ok(out)
     }
@@ -230,7 +271,9 @@ impl ImagePipeline {
     /// Pull full-window holder chrome down to the film-window highlight peak (per channel).
     pub fn clamp_border_highlights(&self, rgb: Rgb16, inset: f64, peak_percentile: f64) -> Rgb16 {
         let (h, w, _) = rgb.dim();
-        let Some(((y0, y1), (x0, x1))) = inset_slice(h, w, inset) else { return rgb };
+        let Some(((y0, y1), (x0, x1))) = inset_slice(h, w, inset) else {
+            return rgb;
+        };
         let peaks = channel_percentiles(rgb.slice(s![y0..y1, x0..x1, ..]), peak_percentile);
         if peaks.iter().cloned().fold(f64::MIN, f64::max) <= 0.0 {
             return rgb;
@@ -306,13 +349,28 @@ impl ImagePipeline {
     }
 
     /// Host-side shading: column flat-field, then optionally expose film base.
-    pub fn apply_host_calib(&self, rgb: Rgb16, dark: &Array2<f32>, white: &Array2<f32>, peak_target: i64, peak_percentile: f64, expose_base: bool) -> Result<Rgb16> {
+    pub fn apply_host_calib(
+        &self,
+        rgb: Rgb16,
+        dark: &Array2<f32>,
+        white: &Array2<f32>,
+        peak_target: i64,
+        peak_percentile: f64,
+        expose_base: bool,
+    ) -> Result<Rgb16> {
         if dark.dim() != white.dim() {
-            return Err(Error::Value(format!("dark/white shape mismatch: {:?} vs {:?}", dark.dim(), white.dim())));
+            return Err(Error::Value(format!(
+                "dark/white shape mismatch: {:?} vs {:?}",
+                dark.dim(),
+                white.dim()
+            )));
         }
         let (h, w, _) = rgb.dim();
         if dark.nrows() < w || dark.ncols() != 3 {
-            return Err(Error::Value(format!("calib width {:?} incompatible with image width {w}", dark.dim())));
+            return Err(Error::Value(format!(
+                "calib width {:?} incompatible with image width {w}",
+                dark.dim()
+            )));
         }
         let mut bad = Array2::from_elem((w, 3), false);
         let mut offset = Array2::<f32>::zeros((w, 3));
@@ -347,7 +405,15 @@ impl ImagePipeline {
         if !expose_base {
             return Ok(out);
         }
-        let exposed = self.expose_film_base(out, "host calib", peak_target, peak_percentile, false, HOST_CALIB_HIGHLIGHT_CEILING, HOST_CALIB_HIGHLIGHT_PERCENTILE);
+        let exposed = self.expose_film_base(
+            out,
+            "host calib",
+            peak_target,
+            peak_percentile,
+            false,
+            HOST_CALIB_HIGHLIGHT_CEILING,
+            HOST_CALIB_HIGHLIGHT_PERCENTILE,
+        );
         Ok(self.clamp_border_highlights(exposed, HOST_CALIB_BORDER_INSET, peak_percentile))
     }
 
@@ -372,7 +438,11 @@ impl ImagePipeline {
         }
         rgb = self.apply_host_downsample(rgb, geometry);
         rgb = trim_to_optical_span(rgb, geometry);
-        let cap = if geometry.disable_buffer_full_move { 0 } else { geometry.usb_end_drop };
+        let cap = if geometry.disable_buffer_full_move {
+            0
+        } else {
+            geometry.usb_end_drop
+        };
         let drop = match usb_end_drop {
             None => count_usb_end_dummy_columns(&rgb, cap, USB_END_DUMMY_MEAN_MAX),
             Some(d) => d.min(cap).min(0.max(rgb.dim().1 as i64 - 8)).max(0),
@@ -381,14 +451,36 @@ impl ImagePipeline {
         if drop > 0 {
             let w = rgb.dim().1 - drop as usize;
             rgb = rgb.slice(s![.., ..w, ..]).to_owned();
-            info!("dropped {drop} USB-end columns (ENDPIXEL dummy, cap {cap}) → width {}", rgb.dim().1);
+            info!(
+                "dropped {drop} USB-end columns (ENDPIXEL dummy, cap {cap}) → width {}",
+                rgb.dim().1
+            );
         }
         let host_calib = dark.is_some() && white.is_some();
         if let (Some(d), Some(wt)) = (dark, white) {
-            rgb = self.apply_host_calib(rgb, d, wt, HOST_CALIB_PEAK_TARGET, HOST_CALIB_PEAK_PERCENTILE, expose_base)?;
+            rgb = self.apply_host_calib(
+                rgb,
+                d,
+                wt,
+                HOST_CALIB_PEAK_TARGET,
+                HOST_CALIB_PEAK_PERCENTILE,
+                expose_base,
+            )?;
         } else if expose_base {
-            rgb = self.expose_film_base(rgb, "asic shading", HOST_CALIB_PEAK_TARGET, HOST_CALIB_PEAK_PERCENTILE, false, HOST_CALIB_HIGHLIGHT_CEILING, HOST_CALIB_HIGHLIGHT_PERCENTILE);
-            rgb = self.clamp_border_highlights(rgb, HOST_CALIB_BORDER_INSET, HOST_CALIB_PEAK_PERCENTILE);
+            rgb = self.expose_film_base(
+                rgb,
+                "asic shading",
+                HOST_CALIB_PEAK_TARGET,
+                HOST_CALIB_PEAK_PERCENTILE,
+                false,
+                HOST_CALIB_HIGHLIGHT_CEILING,
+                HOST_CALIB_HIGHLIGHT_PERCENTILE,
+            );
+            rgb = self.clamp_border_highlights(
+                rgb,
+                HOST_CALIB_BORDER_INSET,
+                HOST_CALIB_PEAK_PERCENTILE,
+            );
         }
         let (pre_head, pre_tail) = edge_column_means(&rgb, 16);
         if self.model.mirror_x() {

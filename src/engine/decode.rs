@@ -153,7 +153,11 @@ fn load_bitmap(path: &Path, bytes: &[u8]) -> Result<SourceImage> {
             const N: usize = 4096;
             let luts: Vec<Vec<f32>> = trc
                 .iter()
-                .map(|c| (0..=N).map(|i| c.eval(i as f64 / N as f64) as f32).collect())
+                .map(|c| {
+                    (0..=N)
+                        .map(|i| c.eval(i as f64 / N as f64) as f32)
+                        .collect()
+                })
                 .collect();
             let dec = |c: usize, v: f32| {
                 let x = v.clamp(0.0, 1.0) * N as f32;

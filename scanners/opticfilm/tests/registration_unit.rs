@@ -9,13 +9,21 @@ mod common;
 
 use common::noise;
 use ndarray::{Array1, Array2, Array3, ArrayView3, Axis, s};
-use opticfilm::pass_align::{align_pass_to_reference, align_pass_to_reference_banded, estimate_pass_shift};
+use opticfilm::pass_align::{
+    align_pass_to_reference, align_pass_to_reference_banded, estimate_pass_shift,
+};
 use opticfilm::registration::*;
 
 /// Integers in `[lo, hi)` from the deterministic noise.
 fn ints(shape: (usize, usize, usize), lo: f64, hi: f64, seed: u64) -> Array3<u16> {
     let n = noise(shape.0 * shape.1 * shape.2, seed);
-    Array3::from_shape_vec(shape, n.iter().map(|v| (lo + (v + 1.0) / 2.0 * (hi - lo)).floor() as u16).collect()).unwrap()
+    Array3::from_shape_vec(
+        shape,
+        n.iter()
+            .map(|v| (lo + (v + 1.0) / 2.0 * (hi - lo)).floor() as u16)
+            .collect(),
+    )
+    .unwrap()
 }
 
 fn plane(a: &Array3<u16>) -> Array2<f32> {
@@ -50,7 +58,10 @@ fn phase_correlate_shift_recovers_warp() {
     let mov = shift(&base, -3.0, 2.0);
     let (dx, dy, resp) = phase_correlate_shift(plane(&base).view(), plane(&mov).view(), 1.0, 16);
     assert!(resp > 0.05, "{resp}");
-    assert!((dx - 3.0).abs() < 0.5 && (dy + 2.0).abs() < 0.5, "({dx}, {dy})");
+    assert!(
+        (dx - 3.0).abs() < 0.5 && (dy + 2.0).abs() < 0.5,
+        "({dx}, {dy})"
+    );
 }
 
 #[test]
@@ -69,10 +80,19 @@ fn guizar_matches_centroid_sign_and_subpixel() {
     let (b, m) = (plane(&base), plane(&mov));
     let (dx_c, dy_c, _) = phase_correlate_shift(b.view(), m.view(), 1.0, 1);
     let (dx_g, dy_g, _) = phase_correlate_shift(b.view(), m.view(), 1.0, 16);
-    assert!((dx_c - truth.0).abs() < 0.35 && (dy_c - truth.1).abs() < 0.35, "centroid ({dx_c}, {dy_c})");
+    assert!(
+        (dx_c - truth.0).abs() < 0.35 && (dy_c - truth.1).abs() < 0.35,
+        "centroid ({dx_c}, {dy_c})"
+    );
     assert!(dx_g * dx_c > 0.0 && dy_g * dy_c > 0.0);
-    assert!((dx_g - dx_c).abs() < 0.15 && (dy_g - dy_c).abs() < 0.15, "guizar ({dx_g}, {dy_g}) vs ({dx_c}, {dy_c})");
-    assert!((dx_g - truth.0).abs() < 0.2 && (dy_g - truth.1).abs() < 0.2, "guizar ({dx_g}, {dy_g})");
+    assert!(
+        (dx_g - dx_c).abs() < 0.15 && (dy_g - dy_c).abs() < 0.15,
+        "guizar ({dx_g}, {dy_g}) vs ({dx_c}, {dy_c})"
+    );
+    assert!(
+        (dx_g - truth.0).abs() < 0.2 && (dy_g - truth.1).abs() < 0.2,
+        "guizar ({dx_g}, {dy_g})"
+    );
 }
 
 // --- test_resample.py ---
@@ -83,9 +103,17 @@ fn integer_warp_exact_overlap() {
     let (dx, dy) = (3i64, -2i64);
     let out = warp_integer(&src, dx, dy);
     // out[y,x] = src[y-dy, x-dx] away from the border fill, which copies from ~2|shift| deep.
-    let (y0, y1, x0, x1) = (2 * dy.abs(), 32 - 2 * dy.abs(), 2 * dx.abs(), 40 - 2 * dx.abs());
+    let (y0, y1, x0, x1) = (
+        2 * dy.abs(),
+        32 - 2 * dy.abs(),
+        2 * dx.abs(),
+        40 - 2 * dx.abs(),
+    );
     let r = |a: i64, b: i64| a as isize..b as isize;
-    assert_eq!(out.slice(s![r(y0, y1), r(x0, x1), ..]), src.slice(s![r(y0 - dy, y1 - dy), r(x0 - dx, x1 - dx), ..]));
+    assert_eq!(
+        out.slice(s![r(y0, y1), r(x0, x1), ..]),
+        src.slice(s![r(y0 - dy, y1 - dy), r(x0 - dx, x1 - dx), ..])
+    );
 }
 
 #[test]
@@ -131,10 +159,19 @@ fn register_apply_round_trip_reduces_residual() {
     let truth = (4.0, -3.0);
     let mis = shift(&reference, -truth.0, -truth.1);
     let before = luma_residual(reference.view(), mis.view(), 0.05);
-    let (aligned, result) = register_and_align(&reference, &mis, RegistrationMode::MultiExposure, &RegistrationOptions::default(), None);
+    let (aligned, result) = register_and_align(
+        &reference,
+        &mis,
+        RegistrationMode::MultiExposure,
+        &RegistrationOptions::default(),
+        None,
+    );
     assert!(result.accepted, "{}", result.reason);
     let (dx, dy) = result.shift();
-    assert!((dx - truth.0).abs() < 0.5 && (dy - truth.1).abs() < 0.5, "({dx}, {dy})");
+    assert!(
+        (dx - truth.0).abs() < 0.5 && (dy - truth.1).abs() < 0.5,
+        "({dx}, {dy})"
+    );
     let after = luma_residual(reference.view(), aligned.view(), 0.05);
     assert!(after < 0.25 * before, "{before} -> {after}");
 }
@@ -165,15 +202,28 @@ fn downsample_plane_to_width_identity_when_small() {
 
 #[test]
 fn rgb_ir_seed_axes() {
-    let close = |(a, b): (f64, f64), (x, y): (f64, f64)| (a - x).abs() < 1e-9 && (b - y).abs() < 1e-9;
+    let close =
+        |(a, b): (f64, f64), (x, y): (f64, f64)| (a - x).abs() < 1e-9 && (b - y).abs() < 1e-9;
     // Prefers luma when the axes agree.
-    assert!(close(rgb_ir_merge_seed_axes(-0.40, -0.12, -0.35, -0.05), (-0.35, -0.05)));
+    assert!(close(
+        rgb_ir_merge_seed_axes(-0.40, -0.12, -0.35, -0.05),
+        (-0.35, -0.05)
+    ));
     // 1800 IR case: luma pulled to −1.95, gradient nearer the true −1.5.
-    assert!(close(rgb_ir_merge_seed_axes(-1.43, -0.13, -1.95, -0.01), (-1.43, -0.01)));
+    assert!(close(
+        rgb_ir_merge_seed_axes(-1.43, -0.13, -1.95, -0.01),
+        (-1.43, -0.01)
+    ));
     // 3600 IR case: luma residual small, gradient still biased.
-    assert!(close(rgb_ir_merge_seed_axes(-1.03, 0.09, -0.27, -0.08), (-0.27, -0.08)));
+    assert!(close(
+        rgb_ir_merge_seed_axes(-1.03, 0.09, -0.27, -0.08),
+        (-0.27, -0.08)
+    ));
     // Keep the seed axis when the refine grows its magnitude.
-    assert!(close(rgb_ir_keep_seed_axes(-1.43, -0.01, -1.90, -0.02), (-1.43, -0.02)));
+    assert!(close(
+        rgb_ir_keep_seed_axes(-1.43, -0.01, -1.90, -0.02),
+        (-1.43, -0.02)
+    ));
 }
 
 // --- test_rgb_ir_refine.py ---
@@ -182,7 +232,8 @@ fn rgb_ir_seed_axes() {
 fn ir_from(rgb: &Array3<u16>, f: impl Fn(f64) -> f64) -> Array3<u16> {
     let (h, w, _) = rgb.dim();
     Array3::from_shape_fn((h, w, 1), |(y, x, _)| {
-        let luma = (rgb[[y, x, 0]] as f64 + 2.0 * rgb[[y, x, 1]] as f64 + rgb[[y, x, 2]] as f64) * 0.25;
+        let luma =
+            (rgb[[y, x, 0]] as f64 + 2.0 * rgb[[y, x, 1]] as f64 + rgb[[y, x, 2]] as f64) * 0.25;
         f(luma).clamp(0.0, 65535.0) as u16
     })
 }
@@ -194,10 +245,20 @@ fn rgb_ir_recovers_fractional_y_shift() {
     let ir = ir_from(&rgb, |l| (l / 65535.0).sqrt() * 65535.0);
     let truth = (2.35, -1.40);
     let mis = shift(&ir, -truth.0, -truth.1);
-    let result = register(rgb.view(), mis.view(), RegistrationMode::RgbIr, None, &RegistrationOptions::default(), None);
+    let result = register(
+        rgb.view(),
+        mis.view(),
+        RegistrationMode::RgbIr,
+        None,
+        &RegistrationOptions::default(),
+        None,
+    );
     assert!(result.accepted, "{}", result.reason);
     let (dx, dy) = result.shift();
-    assert!((dx - truth.0).abs() <= 0.15 && (dy - truth.1).abs() <= 0.15, "({dx}, {dy})");
+    assert!(
+        (dx - truth.0).abs() <= 0.15 && (dy - truth.1).abs() <= 0.15,
+        "({dx}, {dy})"
+    );
 }
 
 #[test]
@@ -205,7 +266,14 @@ fn rgb_ir_near_zero_on_aligned_pair() {
     // Large enough that refine runs (the engine skips refine below 512²).
     let rgb = ints((640, 768, 3), 3000.0, 40000.0, 12);
     let ir = ir_from(&rgb, |l| l * 0.9 + 1000.0);
-    let result = register(rgb.view(), ir.view(), RegistrationMode::RgbIr, None, &RegistrationOptions::default(), None);
+    let result = register(
+        rgb.view(),
+        ir.view(),
+        RegistrationMode::RgbIr,
+        None,
+        &RegistrationOptions::default(),
+        None,
+    );
     assert!(result.accepted, "{}", result.reason);
     let (dx, dy) = result.shift();
     assert!(dx.abs() <= 0.15 && dy.abs() <= 0.15, "({dx}, {dy})");
@@ -217,29 +285,56 @@ fn rgb_ir_near_zero_on_aligned_pair() {
 fn estimate_pass_shift_recovers_known_translation() {
     let base = ints((96, 96, 3), 1000.0, 20000.0, 1);
     let (dx, dy) = estimate_pass_shift(&base, &shift(&base, -3.0, 2.0));
-    assert!((dx - 3.0).abs() < 0.6 && (dy + 2.0).abs() < 0.6, "({dx}, {dy})");
+    assert!(
+        (dx - 3.0).abs() < 0.6 && (dy + 2.0).abs() < 0.6,
+        "({dx}, {dy})"
+    );
 }
 
 #[test]
 fn register_rejects_featureless() {
     let blank = Array3::from_elem((128, 128, 3), 1000u16);
-    let result = register(blank.view(), blank.view(), RegistrationMode::MultiExposure, None, &RegistrationOptions::default(), None);
+    let result = register(
+        blank.view(),
+        blank.view(),
+        RegistrationMode::MultiExposure,
+        None,
+        &RegistrationOptions::default(),
+        None,
+    );
     assert!(!result.accepted || result.shift() == (0.0, 0.0));
 }
 
 #[test]
 fn register_and_align_me_gain_change() {
     let short = ints((128, 128, 3), 2000.0, 12000.0, 7);
-    let long = shift(&short.mapv(|v| (v as f64 * 3.0).min(65535.0) as u16), -2.0, -1.0);
-    let (aligned, result) = register_and_align(&short, &long, RegistrationMode::MultiExposure, &RegistrationOptions::default(), None);
+    let long = shift(
+        &short.mapv(|v| (v as f64 * 3.0).min(65535.0) as u16),
+        -2.0,
+        -1.0,
+    );
+    let (aligned, result) = register_and_align(
+        &short,
+        &long,
+        RegistrationMode::MultiExposure,
+        &RegistrationOptions::default(),
+        None,
+    );
     assert!(result.accepted, "{}", result.reason);
     let (dx, dy) = result.shift();
-    assert!((dx - 2.0).abs() < 0.75 && (dy - 1.0).abs() < 0.75, "({dx}, {dy})");
+    assert!(
+        (dx - 2.0).abs() < 0.75 && (dy - 1.0).abs() < 0.75,
+        "({dx}, {dy})"
+    );
     assert_eq!(aligned.dim(), short.dim());
 }
 
 fn residual(a: ArrayView3<u16>, b: ArrayView3<u16>) -> f64 {
-    a.iter().zip(b.iter()).map(|(&x, &y)| (x as f64 - y as f64).abs()).sum::<f64>() / a.len() as f64
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| (x as f64 - y as f64).abs())
+        .sum::<f64>()
+        / a.len() as f64
 }
 
 #[test]
@@ -257,7 +352,12 @@ fn banded_beats_whole_frame_on_progressive_drift() {
     let (whole, _) = align_pass_to_reference(&reference, &moving, None).unwrap();
     let band = 200;
     for (y0, y1) in [(0, band), (h - band, h)] {
-        let r = |img: &Array3<u16>| residual(reference.slice(s![y0..y1, .., ..]), img.slice(s![y0..y1, .., ..]));
+        let r = |img: &Array3<u16>| {
+            residual(
+                reference.slice(s![y0..y1, .., ..]),
+                img.slice(s![y0..y1, .., ..]),
+            )
+        };
         assert!(r(&warped) < 0.75 * r(&whole), "rows {y0}..{y1}");
     }
 }

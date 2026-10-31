@@ -13,17 +13,20 @@ use log::{info, warn};
 use ndarray::{Array2, Array3, s};
 
 use super::calib_gl128::{
-    IR_FLATTEN_BORDER_INSET, IR_FLATTEN_MAX_GAIN, IR_SIDECAR_TARGET_LEVEL, flatten_ir_columns, flatten_ir_image_columns,
+    IR_FLATTEN_BORDER_INSET, IR_FLATTEN_MAX_GAIN, IR_SIDECAR_TARGET_LEVEL, flatten_ir_columns,
+    flatten_ir_image_columns,
 };
 use super::calibrate::{CalibEntry, Calibrator};
 use super::exposure_merge::{MergeStats, merge_exposures_result, merge_n_passes};
 use super::exposure_override::{validate_manual_exposure, validate_n_passes};
 use super::geometry::{ScanGeometry, compute_geometry};
 use super::me_debug::{MeScanDebug, MultiPassDebug, SlotStackDebug};
-use super::me_exposure::{LongExposureParams, MeExposureDecision, MeLongMode, select_long_exposure};
+use super::me_exposure::{
+    LongExposureParams, MeExposureDecision, MeLongMode, select_long_exposure,
+};
 use super::pipeline::{
-    HOST_CALIB_BORDER_INSET, HOST_CALIB_HIGHLIGHT_CEILING, HOST_CALIB_HIGHLIGHT_PERCENTILE, HOST_CALIB_PEAK_PERCENTILE, HOST_CALIB_PEAK_TARGET, ImagePipeline,
-    inset_slice,
+    HOST_CALIB_BORDER_INSET, HOST_CALIB_HIGHLIGHT_CEILING, HOST_CALIB_HIGHLIGHT_PERCENTILE,
+    HOST_CALIB_PEAK_PERCENTILE, HOST_CALIB_PEAK_TARGET, ImagePipeline, inset_slice,
 };
 use super::request::{Progress, ScanControl, ScanMode, ScanRequest, SubProgress};
 use super::session::{DATA_TIMEOUT_S, HostCalib, device_model, green_plane, set16, set24};
@@ -35,7 +38,9 @@ use crate::device::model::{FilmModel, RegMap, ScanMethod};
 use crate::device::tables::exposure_table;
 use crate::error::{Error, Result};
 use crate::image::ScanImage;
-use crate::pass_align::{align_pass_to_reference, align_pass_to_reference_banded, estimate_pass_shift};
+use crate::pass_align::{
+    align_pass_to_reference, align_pass_to_reference_banded, estimate_pass_shift,
+};
 use crate::usb::device::BULK_MAX_SIZE;
 
 /// Default max bytes announced per `bulk_read_begin`.
@@ -66,11 +71,23 @@ pub fn native_line_floor(model: &FilmModel) -> i64 {
 }
 
 /// Raise for multi-exposure / Multi-Pass where they are disabled.
-pub fn check_gl128_multi_pass(model: &FilmModel, resolution: i64, multi_exposure: bool, n_passes: i64) -> Result<()> {
-    if !(multi_exposure || n_passes > 1) || !model.is_gl128() || model.multi_pass_allowed_at(resolution) {
+pub fn check_gl128_multi_pass(
+    model: &FilmModel,
+    resolution: i64,
+    multi_exposure: bool,
+    n_passes: i64,
+) -> Result<()> {
+    if !(multi_exposure || n_passes > 1)
+        || !model.is_gl128()
+        || model.multi_pass_allowed_at(resolution)
+    {
         return Ok(());
     }
-    let mode = if multi_exposure { "multi_exposure=True".to_string() } else { format!("n_passes={n_passes}") };
+    let mode = if multi_exposure {
+        "multi_exposure=True".to_string()
+    } else {
+        format!("n_passes={n_passes}")
+    };
     Err(Error::Scan(format!(
         "{mode} is not supported at {resolution} dpi on {}: multi-exposure and Multi-Pass are disabled at native resolution. \
          Scan a single pass, or pick a lower resolution.",
@@ -133,7 +150,13 @@ impl Gl128ScanSession {
     }
 
     /// Refuse unless the ASIC explicitly arms motor moves.
-    pub fn run(&mut self, asic: &mut Gl128, calibrator: Option<&mut Calibrator>, req: &ScanRequest, ctl: &mut ScanControl) -> Result<ScanImage> {
+    pub fn run(
+        &mut self,
+        asic: &mut Gl128,
+        calibrator: Option<&mut Calibrator>,
+        req: &ScanRequest,
+        ctl: &mut ScanControl,
+    ) -> Result<ScanImage> {
         if !asic.motor_moves_enabled {
             return Err(Error::Asic(MOTOR_GATED_HINT.into()));
         }
@@ -142,7 +165,12 @@ impl Gl128ScanSession {
         validate_manual_exposure(req.me_long_exposure, "me_long_exposure")?;
         validate_n_passes(req.n_passes)?;
         self.use_asic_shading = req.apply_calib && calibrator.is_some();
-        check_gl128_multi_pass(&self.model, req.resolution(), req.multi_exposure, req.n_passes)?;
+        check_gl128_multi_pass(
+            &self.model,
+            req.resolution(),
+            req.multi_exposure,
+            req.n_passes,
+        )?;
         if req.multi_exposure || req.n_passes > 1 || (req.infrared && req.mode == ScanMode::Color) {
             if req.infrared && !self.model.supports_infrared {
                 return Err(Error::Scan(format!(
@@ -177,13 +205,24 @@ impl Gl128ScanSession {
     }
 
     /// The base `ScanSession.run` single-pass path with GL128 hooks.
-    fn run_single(&mut self, asic: &mut Gl128, calibrator: Option<&mut Calibrator>, req: &ScanRequest, ctl: &mut ScanControl) -> Result<ScanImage> {
+    fn run_single(
+        &mut self,
+        asic: &mut Gl128,
+        calibrator: Option<&mut Calibrator>,
+        req: &ScanRequest,
+        ctl: &mut ScanControl,
+    ) -> Result<ScanImage> {
         let model = self.model.clone();
         if req.infrared && !model.supports_infrared {
-            return Err(Error::Value(format!("{} does not support infrared", model.model)));
+            return Err(Error::Value(format!(
+                "{} does not support infrared",
+                model.model
+            )));
         }
         if req.multi_exposure || req.infrared {
-            return Err(Error::NotImplemented("Multi-exposure / combined IR scans are not implemented for GL128".into()));
+            return Err(Error::NotImplemented(
+                "Multi-exposure / combined IR scans are not implemented for GL128".into(),
+            ));
         }
         if req.me_short_exposure.is_some() || req.me_long_exposure.is_some() {
             return Err(Error::NotImplemented("ME exposure overrides are only implemented for GL128 and GL845; GL128 does not support them.".into()));
@@ -192,10 +231,15 @@ impl Gl128ScanSession {
             return Err(Error::NotImplemented("Manual exposure overrides are only implemented for GL128 and GL845; GL128 does not support single_pass_exposure.".into()));
         }
         if req.mode == ScanMode::Gray {
-            return Err(Error::Value("Grayscale is experimental / not implemented yet".into()));
+            return Err(Error::Value(
+                "Grayscale is experimental / not implemented yet".into(),
+            ));
         }
         if req.mode == ScanMode::Infrared && !model.supports_infrared {
-            return Err(Error::Value(format!("{} does not support infrared", model.model)));
+            return Err(Error::Value(format!(
+                "{} does not support infrared",
+                model.model
+            )));
         }
         if !asic.initialized {
             asic.init(false)?;
@@ -205,7 +249,11 @@ impl Gl128ScanSession {
             Some(g) => g.clone(),
             None => {
                 let mut g = compute_geometry(req.resolution, &model, req.area)?;
-                let lp = crate::device::sensor_lookup::exposure_lperiod_for(&model, g.resolution, method);
+                let lp = crate::device::sensor_lookup::exposure_lperiod_for(
+                    &model,
+                    g.resolution,
+                    method,
+                );
                 if lp != g.exposure_lperiod {
                     g.exposure_lperiod = lp;
                 }
@@ -222,13 +270,31 @@ impl Gl128ScanSession {
             geometry.total_bytes(),
             geometry.num_staggered_lines
         );
-        let rgb = self.acquire_pass_single(asic, calibrator, &geometry, method, req.apply_calib, ctl)?;
-        let ir = if req.mode == ScanMode::Infrared { Some(self.infrared_plane(asic, &rgb)?) } else { None };
-        Ok(ScanImage::new(rgb, geometry.resolution, device_model(&model), ir))
+        let rgb =
+            self.acquire_pass_single(asic, calibrator, &geometry, method, req.apply_calib, ctl)?;
+        let ir = if req.mode == ScanMode::Infrared {
+            Some(self.infrared_plane(asic, &rgb)?)
+        } else {
+            None
+        };
+        Ok(ScanImage::new(
+            rgb,
+            geometry.resolution,
+            device_model(&model),
+            ir,
+        ))
     }
 
     /// Base `_acquire_pass` with the GL128 calibration branch.
-    fn acquire_pass_single(&mut self, asic: &mut Gl128, calibrator: Option<&mut Calibrator>, geometry: &ScanGeometry, method: ScanMethod, apply_calib: bool, ctl: &mut ScanControl) -> Result<Array3<u16>> {
+    fn acquire_pass_single(
+        &mut self,
+        asic: &mut Gl128,
+        calibrator: Option<&mut Calibrator>,
+        geometry: &ScanGeometry,
+        method: ScanMethod,
+        apply_calib: bool,
+        ctl: &mut ScanControl,
+    ) -> Result<Array3<u16>> {
         let mut calib: Option<CalibEntry> = None;
         let mut use_host = false;
         if apply_calib && let Some(cal) = calibrator {
@@ -244,9 +310,20 @@ impl Gl128ScanSession {
         if calib.is_some() && !use_host {
             info!("Using ASIC shading; skipping host dark/white stretch");
         }
-        let hc = calib.as_ref().filter(|_| use_host).map(HostCalib::from_entry);
+        let hc = calib
+            .as_ref()
+            .filter(|_| use_host)
+            .map(HostCalib::from_entry);
         let planar = asic.usb_planar_rgb;
-        self.pipeline.assemble(&raw, geometry, hc.as_ref().map(|h| &h.dark), hc.as_ref().map(|h| &h.white), Some(planar), true, None)
+        self.pipeline.assemble(
+            &raw,
+            geometry,
+            hc.as_ref().map(|h| &h.dark),
+            hc.as_ref().map(|h| &h.white),
+            Some(planar),
+            true,
+            None,
+        )
     }
 
     /// Build the HxW IR sidecar: green CCD plane + host flatten.
@@ -266,11 +343,26 @@ impl Gl128ScanSession {
                 Err(e) => warn!("IR host-white flatten skipped: {e}"),
             }
         }
-        flatten_ir_image_columns(plane.view(), 90.0, Some(IR_SIDECAR_TARGET_LEVEL), None, IR_FLATTEN_BORDER_INSET, IR_FLATTEN_MAX_GAIN)
+        flatten_ir_image_columns(
+            plane.view(),
+            90.0,
+            Some(IR_SIDECAR_TARGET_LEVEL),
+            None,
+            IR_FLATTEN_BORDER_INSET,
+            IR_FLATTEN_MAX_GAIN,
+        )
     }
 
     /// Configure ASIC, run one capture, return raw optical bytes.
-    pub fn acquire_raw(&mut self, asic: &mut Gl128, geometry: &ScanGeometry, method: ScanMethod, lamp_on: bool, start_motor: bool, progress: &mut dyn Progress) -> Result<Vec<u8>> {
+    pub fn acquire_raw(
+        &mut self,
+        asic: &mut Gl128,
+        geometry: &ScanGeometry,
+        method: ScanMethod,
+        lamp_on: bool,
+        start_motor: bool,
+        progress: &mut dyn Progress,
+    ) -> Result<Vec<u8>> {
         asic.set_scan_method(method);
         self.lamp_requested = lamp_on;
         if lamp_on {
@@ -313,9 +405,15 @@ impl Gl128ScanSession {
         let no_tables = || {
             let mut res = model.resolutions_dpi.clone();
             res.sort_unstable();
-            Error::Scan(format!("No capture-derived register values for {dpi} dpi on {}; supported: {res:?}", model.model))
+            Error::Scan(format!(
+                "No capture-derived register values for {dpi} dpi on {}; supported: {res:?}",
+                model.model
+            ))
         };
-        cache.insert(0x2B, *g.dummy_by_dpi.get(&asic_dpi).ok_or_else(no_tables)? as u16);
+        cache.insert(
+            0x2B,
+            *g.dummy_by_dpi.get(&asic_dpi).ok_or_else(no_tables)? as u16,
+        );
         let clk = model.pixel_clock_for_image(dpi, self.pass_long_exposure);
         cache.insert(0xA5, clk as u16);
         cache.insert(0xAB, clk as u16);
@@ -328,7 +426,9 @@ impl Gl128ScanSession {
             cache.insert(r::REG_DEPTH_B, r::DEPTH8_B as u16);
         }
         // DVDSET only with a measured ASIC table for this scan, never on IR or calib.
-        let mut reg01 = (cache.get_or(r::REG_0X01, 0x22) | r::SHDAREA as u16) & !(r::SCAN as u16) & !(r::STAGGER as u16);
+        let mut reg01 = (cache.get_or(r::REG_0X01, 0x22) | r::SHDAREA as u16)
+            & !(r::SCAN as u16)
+            & !(r::STAGGER as u16);
         let infrared = asic.scan_method == ScanMethod::Infrared;
         let ready = self.use_asic_shading && asic.asic_shading_ready;
         if shading || infrared || !ready {
@@ -336,12 +436,21 @@ impl Gl128ScanSession {
         }
         cache.insert(r::REG_0X01, reg01);
         // Leave lamp / IR LED and the AFE ports alone.
-        for a in [r::REG_0X03, r::REG_IR, r::REG_FE_INDEX, r::REG_FE_HIGH, r::REG_FE_LOW] {
+        for a in [
+            r::REG_0X03,
+            r::REG_IR,
+            r::REG_FE_INDEX,
+            r::REG_FE_HIGH,
+            r::REG_FE_LOW,
+        ] {
             cache.remove(&a);
         }
         if !shading {
             let low = crate::num::lookup(&IMAGE_REG_1D_LOW_BY_DPI, asic_dpi).unwrap_or(0);
-            cache.insert(REG_1D, (cache.get_or(REG_1D, 0x80) & !REG_1D_LOW_MASK) | low);
+            cache.insert(
+                REG_1D,
+                (cache.get_or(REG_1D, 0x80) & !REG_1D_LOW_MASK) | low,
+            );
         }
         let mut motor = r::MTRPWR;
         if !shading {
@@ -353,16 +462,25 @@ impl Gl128ScanSession {
         let span = geometry.pixel_endx - geometry.pixel_startx;
         let lperiod = model.line_period_for(dpi, Some(span));
         set24(&mut cache, r::REG_LPERIOD, lperiod);
-        let dpiset = if shading { model.optical_resolution / 6 } else { geometry.register_dpiset };
+        let dpiset = if shading {
+            model.optical_resolution / 6
+        } else {
+            geometry.register_dpiset
+        };
         set16(&mut cache, r::REG_DPISET, dpiset);
         set24(&mut cache, r::REG_STRPIXEL, geometry.pixel_startx);
         set24(&mut cache, r::REG_ENDPIXEL, geometry.pixel_endx);
         verify_geometry_usb_span(geometry)?;
-        let mut exposure_reg = self.pass_exposure.unwrap_or_else(|| model.image_exposure(false));
+        let mut exposure_reg = self
+            .pass_exposure
+            .unwrap_or_else(|| model.image_exposure(false));
         if self.pass_manual {
             info!("REG_EXPOSURE {exposure_reg} — manual-override, hardware-max clamp bypassed");
         } else if exposure_reg > g.me_hardware_max_exposure {
-            warn!("REG_EXPOSURE {exposure_reg} above hardware max {} — clamping", g.me_hardware_max_exposure);
+            warn!(
+                "REG_EXPOSURE {exposure_reg} above hardware max {} — clamping",
+                g.me_hardware_max_exposure
+            );
             exposure_reg = g.me_hardware_max_exposure;
         }
         set24(&mut cache, r::REG_EXPOSURE, exposure_reg);
@@ -427,9 +545,17 @@ impl Gl128ScanSession {
 
     // --- multi-pass (ME / IR) ---
 
-    fn run_multi_pass(&mut self, asic: &mut Gl128, mut calibrator: Option<&mut Calibrator>, req: &ScanRequest, ctl: &mut ScanControl) -> Result<ScanImage> {
+    fn run_multi_pass(
+        &mut self,
+        asic: &mut Gl128,
+        mut calibrator: Option<&mut Calibrator>,
+        req: &ScanRequest,
+        ctl: &mut ScanControl,
+    ) -> Result<ScanImage> {
         if req.mode == ScanMode::Infrared {
-            return Err(Error::Value("Use mode='color' with infrared=True for colour+IR scans".into()));
+            return Err(Error::Value(
+                "Use mode='color' with infrared=True for colour+IR scans".into(),
+            ));
         }
         let n_passes = req.n_passes;
         if req.infrared && n_passes > 1 {
@@ -464,13 +590,42 @@ impl Gl128ScanSession {
             if req.multi_exposure { "True" } else { "False" },
             if req.infrared { "True" } else { "False" }
         );
-        let mut st = PassState { locked_usb_end_drop: None, pass_idx: 0, n_pass };
+        let mut st = PassState {
+            locked_usb_end_drop: None,
+            pass_idx: 0,
+            n_pass,
+        };
 
-        let (rgb_short, short_shifts, short_stats) =
-            self.capture_stacked_slot(asic, calibrator.as_deref_mut(), req, ctl, &mut st, &geometry, "color_short", ScanMethod::Transparency, exp_short, false, short_manual, false)?;
+        let (rgb_short, short_shifts, short_stats) = self.capture_stacked_slot(
+            asic,
+            calibrator.as_deref_mut(),
+            req,
+            ctl,
+            &mut st,
+            &geometry,
+            "color_short",
+            ScanMethod::Transparency,
+            exp_short,
+            false,
+            short_manual,
+            false,
+        )?;
         let mut ir_plane = None;
         if req.infrared {
-            let ir_raw = self.mp_acquire_pass(asic, calibrator.as_deref_mut(), req, ctl, &mut st, &geometry, "ir", ScanMethod::Infrared, exp_short, false, false, short_manual)?;
+            let ir_raw = self.mp_acquire_pass(
+                asic,
+                calibrator.as_deref_mut(),
+                req,
+                ctl,
+                &mut st,
+                &geometry,
+                "ir",
+                ScanMethod::Infrared,
+                exp_short,
+                false,
+                false,
+                short_manual,
+            )?;
             ir_plane = Some(self.infrared_plane(asic, &ir_raw)?);
         }
         let long_manual = req.me_long_exposure.is_some();
@@ -486,11 +641,17 @@ impl Gl128ScanSession {
             } else if req.me_long_mode == MeLongMode::Fixed {
                 let requested = g.me_fixed_long_exposure;
                 exp_long = clamp_me_long(&model, geometry.resolution, requested);
-                fixed_reason = Some(if exp_long == requested { "fixed".into() } else { "fixed (clamped)".into() });
+                fixed_reason = Some(if exp_long == requested {
+                    "fixed".into()
+                } else {
+                    "fixed (clamped)".into()
+                });
                 info!("ME long exposure: fixed requested={requested} selected={exp_long}");
             } else {
-                let adaptive_max = clamp_me_long(&model, geometry.resolution, g.me_adaptive_max_exposure);
-                let hardware_max = clamp_me_long(&model, geometry.resolution, g.me_hardware_max_exposure);
+                let adaptive_max =
+                    clamp_me_long(&model, geometry.resolution, g.me_adaptive_max_exposure);
+                let hardware_max =
+                    clamp_me_long(&model, geometry.resolution, g.me_hardware_max_exposure);
                 let (h, w, _) = rgb_short.dim();
                 let metered = match inset_slice(h, w, HOST_CALIB_BORDER_INSET) {
                     Some(((y0, y1), (x0, x1))) => rgb_short.slice(s![y0..y1, x0..x1, ..]),
@@ -513,7 +674,10 @@ impl Gl128ScanSession {
                 exp_long = d.selected;
                 let clamped = clamp_me_long(&model, geometry.resolution, exp_long);
                 if clamped != exp_long {
-                    warn!("ME colour-long exposure clamped at {} dpi: {exp_long} → {clamped}", geometry.resolution);
+                    warn!(
+                        "ME colour-long exposure clamped at {} dpi: {exp_long} → {clamped}",
+                        geometry.resolution
+                    );
                     exp_long = clamped;
                 }
                 let (p, c) = (d.dense_p05, d.predicted_clip);
@@ -531,16 +695,36 @@ impl Gl128ScanSession {
                 );
                 decision = Some(d);
             }
-            let (rl, ls, lstats) =
-                self.capture_stacked_slot(asic, calibrator.as_deref_mut(), req, ctl, &mut st, &geometry, "color_long", ScanMethod::Transparency, exp_long, true, long_manual, true)?;
+            let (rl, ls, lstats) = self.capture_stacked_slot(
+                asic,
+                calibrator.as_deref_mut(),
+                req,
+                ctl,
+                &mut st,
+                &geometry,
+                "color_long",
+                ScanMethod::Transparency,
+                exp_long,
+                true,
+                long_manual,
+                true,
+            )?;
             rgb_long = Some(rl);
             long_shifts = ls;
             long_stats = lstats;
         }
         if n_passes > 1 {
             self.last_multi_pass_debug = Some(MultiPassDebug {
-                short: SlotStackDebug { n_passes, align_shifts: short_shifts, stack_stats: short_stats },
-                long: req.multi_exposure.then(|| SlotStackDebug { n_passes, align_shifts: long_shifts, stack_stats: long_stats }),
+                short: SlotStackDebug {
+                    n_passes,
+                    align_shifts: short_shifts,
+                    stack_stats: short_stats,
+                },
+                long: req.multi_exposure.then(|| SlotStackDebug {
+                    n_passes,
+                    align_shifts: long_shifts,
+                    stack_stats: long_stats,
+                }),
             });
         }
         let mut align_shift_long: Option<Shift> = None;
@@ -566,8 +750,13 @@ impl Gl128ScanSession {
         if req.multi_exposure
             && let Some(rl) = &rgb_long
         {
-            let shift = if req.align_passes { align_shift_long } else { Some((0.0, 0.0)) };
-            let merged = merge_exposures_result(&rgb_short, rl, exp_short, exp_long, shift, None, None)?;
+            let shift = if req.align_passes {
+                align_shift_long
+            } else {
+                Some((0.0, 0.0))
+            };
+            let merged =
+                merge_exposures_result(&rgb_short, rl, exp_short, exp_long, shift, None, None)?;
             primary = merged.rgb;
             self.last_me_debug = Some(MeScanDebug {
                 rgb_short: rgb_short.clone(),
@@ -578,14 +767,35 @@ impl Gl128ScanSession {
                 align_shift_long,
                 align_shift_ir,
                 exposure_proposed: decision.as_ref().map(|d| d.proposed),
-                exposure_reason: if long_manual { Some("manual-override".into()) } else { fixed_reason.or_else(|| decision.as_ref().map(|d| d.reason.clone())) },
+                exposure_reason: if long_manual {
+                    Some("manual-override".into())
+                } else {
+                    fixed_reason.or_else(|| decision.as_ref().map(|d| d.reason.clone()))
+                },
             });
         }
         // Single film-base makeup on the deliverable only.
         let preserve_headroom = (req.multi_exposure && rgb_long.is_some()) || n_passes == 1;
-        primary = self.pipeline.expose_film_base(primary, "me deliverable", HOST_CALIB_PEAK_TARGET, HOST_CALIB_PEAK_PERCENTILE, preserve_headroom, HOST_CALIB_HIGHLIGHT_CEILING, HOST_CALIB_HIGHLIGHT_PERCENTILE);
-        primary = self.pipeline.clamp_border_highlights(primary, HOST_CALIB_BORDER_INSET, HOST_CALIB_PEAK_PERCENTILE);
-        Ok(ScanImage::new(primary, geometry.resolution, device_model(&model), ir_plane))
+        primary = self.pipeline.expose_film_base(
+            primary,
+            "me deliverable",
+            HOST_CALIB_PEAK_TARGET,
+            HOST_CALIB_PEAK_PERCENTILE,
+            preserve_headroom,
+            HOST_CALIB_HIGHLIGHT_CEILING,
+            HOST_CALIB_HIGHLIGHT_PERCENTILE,
+        );
+        primary = self.pipeline.clamp_border_highlights(
+            primary,
+            HOST_CALIB_BORDER_INSET,
+            HOST_CALIB_PEAK_PERCENTILE,
+        );
+        Ok(ScanImage::new(
+            primary,
+            geometry.resolution,
+            device_model(&model),
+            ir_plane,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -609,7 +819,9 @@ impl Gl128ScanSession {
         asic.enter_scan_clock()?;
         let mut calib = None;
         let mut use_host = false;
-        if req.apply_calib && let Some(cal) = calibrator {
+        if req.apply_calib
+            && let Some(cal) = calibrator
+        {
             if method == ScanMethod::Transparency {
                 if remeasure {
                     asic.asic_shading_ready = false;
@@ -637,17 +849,32 @@ impl Gl128ScanSession {
         self.pass_long_exposure = long_pass;
         self.pass_manual = manual;
         let raw = {
-            let mut sub = SubProgress { ctl, idx: idx as f64, n: st.n_pass as f64 };
+            let mut sub = SubProgress {
+                ctl,
+                idx: idx as f64,
+                n: st.n_pass as f64,
+            };
             self.acquire_raw(asic, geometry, method, true, true, &mut sub)
         };
         self.pass_exposure = None;
         self.pass_long_exposure = false;
         self.pass_manual = false;
         let raw = raw?;
-        let hc = calib.as_ref().filter(|_| use_host).map(HostCalib::from_entry);
+        let hc = calib
+            .as_ref()
+            .filter(|_| use_host)
+            .map(HostCalib::from_entry);
         let planar = asic.usb_planar_rgb;
         // Keep ME colour (and IR) planes linear; makeup runs once on the deliverable.
-        let rgb = self.pipeline.assemble(&raw, geometry, hc.as_ref().map(|h| &h.dark), hc.as_ref().map(|h| &h.white), Some(planar), false, st.locked_usb_end_drop)?;
+        let rgb = self.pipeline.assemble(
+            &raw,
+            geometry,
+            hc.as_ref().map(|h| &h.dark),
+            hc.as_ref().map(|h| &h.white),
+            Some(planar),
+            false,
+            st.locked_usb_end_drop,
+        )?;
         if st.locked_usb_end_drop.is_none() {
             st.locked_usb_end_drop = Some(self.pipeline.last_usb_end_drop);
         }
@@ -671,14 +898,40 @@ impl Gl128ScanSession {
         manual: bool,
         remeasure_first: bool,
     ) -> Result<(Array3<u16>, Vec<Shift>, Option<MergeStats>)> {
-        let first = self.mp_acquire_pass(asic, calibrator.as_deref_mut(), req, ctl, st, geometry, key, method, exposure, remeasure_first, long_pass, manual)?;
+        let first = self.mp_acquire_pass(
+            asic,
+            calibrator.as_deref_mut(),
+            req,
+            ctl,
+            st,
+            geometry,
+            key,
+            method,
+            exposure,
+            remeasure_first,
+            long_pass,
+            manual,
+        )?;
         if req.n_passes == 1 {
             return Ok((first, Vec::new(), None));
         }
         let mut shifts = Vec::new();
         let mut frames = vec![first];
         for _ in 0..req.n_passes - 1 {
-            let frame = self.mp_acquire_pass(asic, calibrator.as_deref_mut(), req, ctl, st, geometry, key, method, exposure, false, long_pass, manual)?;
+            let frame = self.mp_acquire_pass(
+                asic,
+                calibrator.as_deref_mut(),
+                req,
+                ctl,
+                st,
+                geometry,
+                key,
+                method,
+                exposure,
+                false,
+                long_pass,
+                manual,
+            )?;
             if req.align_passes {
                 let (aligned, shift) = align_pass_to_reference_banded(&frames[0], &frame)?;
                 frames.push(aligned);
@@ -702,8 +955,12 @@ impl Gl128ScanSession {
         let reg01 = asic.protocol.read_register(r::REG_0X01)? | r::SCAN;
         asic.protocol.write_register(r::REG_0X01, reg01)?;
         asic.reg_cache.insert(r::REG_0X01, reg01 as u16);
-        asic.protocol.write_register(r::REG_START, if start_motor { r::START_GO } else { 0x00 })?;
-        info!("GL128 scan started motor={}", if start_motor { "True" } else { "False" });
+        asic.protocol
+            .write_register(r::REG_START, if start_motor { r::START_GO } else { 0x00 })?;
+        info!(
+            "GL128 scan started motor={}",
+            if start_motor { "True" } else { "False" }
+        );
         Ok(())
     }
 
@@ -717,16 +974,31 @@ impl Gl128ScanSession {
             }
             sleep(0.02);
         }
-        Err(Error::Scan(format!("No scan data within {DATA_TIMEOUT_S:.0}s")))
+        Err(Error::Scan(format!(
+            "No scan data within {DATA_TIMEOUT_S:.0}s"
+        )))
     }
 
     #[doc(hidden)]
-    pub fn acquire(&mut self, asic: &mut Gl128, geometry: &ScanGeometry, progress: &mut dyn Progress) -> Result<Vec<u8>> {
+    pub fn acquire(
+        &mut self,
+        asic: &mut Gl128,
+        geometry: &ScanGeometry,
+        progress: &mut dyn Progress,
+    ) -> Result<Vec<u8>> {
         self.wait_data(asic, progress)?;
         let total = geometry.total_bytes() as usize;
-        let index = if geometry.disable_buffer_full_move { r::BULK_INDEX_RAM } else { r::BULK_INDEX_IMAGE };
+        let index = if geometry.disable_buffer_full_move {
+            r::BULK_INDEX_RAM
+        } else {
+            r::BULK_INDEX_IMAGE
+        };
         let chunk_max = (self.model.g().image_read_chunk_bytes as usize).max(1);
-        let step = if chunk_max <= BULK_MAX_SIZE { BULK_MAX_SIZE } else { chunk_max };
+        let step = if chunk_max <= BULK_MAX_SIZE {
+            BULK_MAX_SIZE
+        } else {
+            chunk_max
+        };
         let mut buf = vec![0u8; total];
         let mut got = 0usize;
         let mut timing: Vec<(usize, usize, f64, f64)> = Vec::new();
@@ -744,13 +1016,20 @@ impl Gl128ScanSession {
                 self.bulk_stream_active = false;
                 let chunk = chunk?;
                 if chunk.is_empty() {
-                    return Err(Error::Scan(format!("Bulk stream ended after {got} of {total} bytes")));
+                    return Err(Error::Scan(format!(
+                        "Bulk stream ended after {got} of {total} bytes"
+                    )));
                 }
                 let n = chunk.len().min(remaining);
                 buf[got..got + n].copy_from_slice(&chunk[..n]);
                 got += n;
                 progress.report((got as f64 / total as f64).min(1.0));
-                timing.push((got - n, n, p0.elapsed().as_secs_f64(), (p0 - t_prev_end).as_secs_f64()));
+                timing.push((
+                    got - n,
+                    n,
+                    p0.elapsed().as_secs_f64(),
+                    (p0 - t_prev_end).as_secs_f64(),
+                ));
                 t_prev_end = Instant::now();
             }
             Ok(())
@@ -784,12 +1063,18 @@ struct PassState {
 fn verify_geometry_usb_span(geometry: &ScanGeometry) -> Result<()> {
     let span = geometry.pixel_endx - geometry.pixel_startx;
     if span != geometry.optical_pixels {
-        return Err(Error::Scan(format!("STR/END span {span} != optical_pixels {} at {} dpi", geometry.optical_pixels, geometry.resolution)));
+        return Err(Error::Scan(format!(
+            "STR/END span {span} != optical_pixels {} at {} dpi",
+            geometry.optical_pixels, geometry.resolution
+        )));
     }
     let sample = if geometry.depth == 16 { 2 } else { 1 };
     let expected = geometry.pixels * geometry.channels * sample;
     if geometry.line_bytes != expected {
-        return Err(Error::Scan(format!("USB line_bytes {} != pixels×channels×sample ({expected}) at {} dpi", geometry.line_bytes, geometry.resolution)));
+        return Err(Error::Scan(format!(
+            "USB line_bytes {} != pixels×channels×sample ({expected}) at {} dpi",
+            geometry.line_bytes, geometry.resolution
+        )));
     }
     Ok(())
 }
@@ -804,7 +1089,11 @@ pub fn chunk_bytes(geometry: &ScanGeometry, remaining: usize, max_bytes: usize) 
         return line.min(remaining);
     }
     let full = (remaining / line).min(max_bytes / line);
-    if full >= 1 { full * line } else { line.min(remaining) }
+    if full >= 1 {
+        full * line
+    } else {
+        line.min(remaining)
+    }
 }
 
 fn read_was_instant(nbytes: usize, seconds: f64) -> bool {
@@ -812,7 +1101,11 @@ fn read_was_instant(nbytes: usize, seconds: f64) -> bool {
 }
 
 /// Log one summary line per image read; optionally dump per-chunk CSV.
-fn report_acquire_timing(geometry: &ScanGeometry, timing: &[(usize, usize, f64, f64)], wall_s: f64) {
+fn report_acquire_timing(
+    geometry: &ScanGeometry,
+    timing: &[(usize, usize, f64, f64)],
+    wall_s: f64,
+) {
     if timing.is_empty() {
         return;
     }
@@ -824,24 +1117,34 @@ fn report_acquire_timing(geometry: &ScanGeometry, timing: &[(usize, usize, f64, 
         "GL128 image read: {} dpi {:.1} MB in {wall_s:.1} s ({:.2} MB/s) chunks={} instant_reads={instant} longest_read={longest_read:.3} s longest_gap={longest_gap:.3} s",
         geometry.resolution,
         nbytes as f64 / 1e6,
-        if wall_s > 0.0 { nbytes as f64 / 1e6 / wall_s } else { 0.0 },
+        if wall_s > 0.0 {
+            nbytes as f64 / 1e6 / wall_s
+        } else {
+            0.0
+        },
         timing.len()
     );
-    let Ok(path) = std::env::var(ACQUIRE_TIMING_ENV) else { return };
+    let Ok(path) = std::env::var(ACQUIRE_TIMING_ENV) else {
+        return;
+    };
     if path.is_empty() {
         return;
     }
     let out = std::path::Path::new(&path);
     let new = !out.exists();
-    let r = std::fs::OpenOptions::new().create(true).append(true).open(out).and_then(|mut fh| {
-        if new {
-            writeln!(fh, "dpi,offset,bytes,read_s,gap_s")?;
-        }
-        for (off, n, read_s, gap) in timing {
-            writeln!(fh, "{},{off},{n},{read_s:.6},{gap:.6}", geometry.resolution)?;
-        }
-        Ok(())
-    });
+    let r = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(out)
+        .and_then(|mut fh| {
+            if new {
+                writeln!(fh, "dpi,offset,bytes,read_s,gap_s")?;
+            }
+            for (off, n, read_s, gap) in timing {
+                writeln!(fh, "{},{off},{n},{read_s:.6},{gap:.6}", geometry.resolution)?;
+            }
+            Ok(())
+        });
     match r {
         Ok(()) => info!("GL128 image read timing appended to {}", out.display()),
         Err(e) => warn!("Could not write {ACQUIRE_TIMING_ENV}={path}: {e}"),

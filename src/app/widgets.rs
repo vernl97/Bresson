@@ -460,7 +460,13 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             let body = Rect::from_min_max(q(-6.0, -1.0), q(6.0, 8.0));
             p.rect_stroke(body, 1.5, st, egui::StrokeKind::Middle);
             let lift = if locked { 0.0 } else { -3.0 };
-            let mut pts = arc(q(0.0, -1.0 + lift), 4.0 * s, std::f32::consts::PI, std::f32::consts::TAU, 10);
+            let mut pts = arc(
+                q(0.0, -1.0 + lift),
+                4.0 * s,
+                std::f32::consts::PI,
+                std::f32::consts::TAU,
+                10,
+            );
             if locked {
                 pts.push(q(4.0, -1.0));
             }
@@ -645,21 +651,30 @@ pub fn stock_combo(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> e
     let arrow = ui
         .interact(arrow_rect, ui.id().with("stock_arrow"), Sense::click())
         .on_hover_text("Choose a film stock");
-    let col = if arrow.hovered() { theme::TEXT } else { theme::MUTED };
+    let col = if arrow.hovered() {
+        theme::TEXT
+    } else {
+        theme::MUTED
+    };
     chevron(ui.painter(), arrow.rect.center(), true, col);
     let names = crate::engine::presets::film_stock_names();
     let q = value.trim().to_lowercase();
     let typed = !q.is_empty() && !names.iter().any(|n| n.to_lowercase() == q);
     egui::Popup::menu(&arrow).show(|ui| {
         ui.set_min_width(220.0);
-        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-            for n in names.iter().filter(|n| !typed || n.to_lowercase().contains(&q)) {
-                if ui.selectable_label(*value == *n, n).clicked() {
-                    *value = n.clone();
-                    changed = true;
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .show(ui, |ui| {
+                for n in names
+                    .iter()
+                    .filter(|n| !typed || n.to_lowercase().contains(&q))
+                {
+                    if ui.selectable_label(*value == *n, n).clicked() {
+                        *value = n.clone();
+                        changed = true;
+                    }
                 }
-            }
-        });
+            });
     });
     let mut r = edit;
     if changed {
@@ -980,7 +995,10 @@ pub fn fold_section(ui: &mut Ui, title: &str, default_open: bool, modified: bool
     if modified && hot {
         let g = p.layout_no_wrap("Reset".into(), FontId::proportional(11.0), theme::MUTED);
         let r = Rect::from_min_size(
-            egui::pos2(rect.right() - 24.0 - g.size().x, rect.center().y - g.size().y / 2.0),
+            egui::pos2(
+                rect.right() - 24.0 - g.size().x,
+                rect.center().y - g.size().y / 2.0,
+            ),
             g.size(),
         );
         let over = ui
@@ -1079,7 +1097,13 @@ pub fn path_label(ui: &mut Ui, path: &str) -> egui::Response {
     };
     let font = FontId::proportional(11.0);
     let max_w = ui.available_width();
-    let fits = |t: &str| ui.fonts_mut(|f| f.layout_no_wrap(t.to_string(), font.clone(), theme::FAINT).size().x) <= max_w;
+    let fits = |t: &str| {
+        ui.fonts_mut(|f| {
+            f.layout_no_wrap(t.to_string(), font.clone(), theme::FAINT)
+                .size()
+                .x
+        }) <= max_w
+    };
     let mut text = short.clone();
     let mut cut = 0;
     while !fits(&text) && cut < short.len() {
@@ -1089,8 +1113,10 @@ pub fn path_label(ui: &mut Ui, path: &str) -> egui::Response {
             .map_or(short.len(), |(k, _)| cut + k);
         text = format!("…{}", &short[cut..]);
     }
-    ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(theme::FAINT)))
-        .on_hover_text(path)
+    ui.add(egui::Label::new(
+        egui::RichText::new(text).font(font).color(theme::FAINT),
+    ))
+    .on_hover_text(path)
 }
 
 /// Checkbox in the app's style: an outlined box that fills with the accent
@@ -1110,7 +1136,10 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool, text: &str) -> egui::Response {
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, text));
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
-        let b = Rect::from_center_size(egui::pos2(rect.left() + 7.0, rect.center().y), egui::vec2(14.0, 14.0));
+        let b = Rect::from_center_size(
+            egui::pos2(rect.left() + 7.0, rect.center().y),
+            egui::vec2(14.0, 14.0),
+        );
         let hot = resp.hovered();
         if on {
             p.rect_filled(b, 3.5, if hot { ACCENT_HOVER } else { theme::ACCENT });

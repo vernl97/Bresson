@@ -70,6 +70,8 @@ const NAME_H: f32 = 24.0;
 /// Clipped share of the print that earns a "needs a look".
 const CLIP_WHITE: f32 = 0.03;
 const CLIP_BLACK: f32 = 0.06;
+/// Space kept free under the grid for the floating selection bar.
+const SELECTION_BAR_ROOM: f32 = 64.0;
 /// Density (≈ 1 stop) away from the roll's median that earns one.
 const DENSITY_OUTLIER: f64 = 0.3;
 
@@ -117,7 +119,10 @@ impl NlpApp {
                 out.push(format!("{:.0}% of the print clips to white", white * 100.0));
             }
             if black > CLIP_BLACK {
-                out.push(format!("{:.0}% of the print blocks up to black", black * 100.0));
+                out.push(format!(
+                    "{:.0}% of the print blocks up to black",
+                    black * 100.0
+                ));
             }
         }
         if let Some(m) = roll_density {
@@ -146,7 +151,11 @@ impl NlpApp {
     /// (picks, needing a look) for the filter tabs.
     pub fn filter_counts(&self) -> (usize, usize) {
         let density = self.roll_density();
-        let picks = self.frames.iter().filter(|f| f.sc.flag == Flag::Pick).count();
+        let picks = self
+            .frames
+            .iter()
+            .filter(|f| f.sc.flag == Flag::Pick)
+            .count();
         let look = (0..self.frames.len())
             .filter(|&i| !self.look_issues(i, density).is_empty())
             .count();
@@ -241,7 +250,10 @@ impl NlpApp {
                 cells.iter().position(|c| c.idx == a).unwrap_or(0),
                 cells.iter().position(|c| c.idx == next).unwrap_or(0),
             );
-            self.selected = cells[pa.min(pn)..=pa.max(pn)].iter().map(|c| c.idx).collect();
+            self.selected = cells[pa.min(pn)..=pa.max(pn)]
+                .iter()
+                .map(|c| c.idx)
+                .collect();
         } else {
             self.selected.clear();
             self.selected.insert(next);
@@ -267,6 +279,9 @@ impl NlpApp {
         let negatives = self.negatives_shown(&ctx);
         let density = self.roll_density();
         let shown = self.shown_frames();
+        // Frames the filter hides drop out of the selection, so actions
+        // never reach frames you can't see.
+        self.selected.retain(|i| shown.contains(i));
         if shown.is_empty() {
             ui.add_space((ui.available_height() * 0.35).max(24.0));
             ui.vertical_centered(|ui| {
@@ -302,7 +317,11 @@ impl NlpApp {
                 // Justified rows: frames keep their shape, each row fills the width.
                 let aspect = |i: usize| {
                     let f = &self.frames[i];
-                    let t = if negatives { f.thumb_neg.as_ref().or(f.thumb.as_ref()) } else { f.thumb.as_ref() };
+                    let t = if negatives {
+                        f.thumb_neg.as_ref().or(f.thumb.as_ref())
+                    } else {
+                        f.thumb.as_ref()
+                    };
                     match t {
                         Some(t) => {
                             let s = t.size_vec2();
@@ -328,9 +347,13 @@ impl NlpApp {
                 if !row.is_empty() {
                     rows.push((row, target_h));
                 }
-                let height: f32 = rows.iter().map(|r| r.1 + NAME_H + GAP).sum();
-                let (content, bg) =
-                    ui.allocate_exact_size(vec2(w, height.max(ui.available_height())), Sense::click_and_drag());
+                // Room under the last row so the selection bar never covers it.
+                let height: f32 =
+                    rows.iter().map(|r| r.1 + NAME_H + GAP).sum::<f32>() + SELECTION_BAR_ROOM;
+                let (content, bg) = ui.allocate_exact_size(
+                    vec2(w, height.max(ui.available_height())),
+                    Sense::click_and_drag(),
+                );
 
                 let mut y = content.top();
                 for (r, (items, h)) in rows.iter().enumerate() {
@@ -338,9 +361,14 @@ impl NlpApp {
                     for &i in items {
                         let iw = aspect(i) * h;
                         let img = Rect::from_min_size(pos2(x, y), vec2(iw, *h));
-                        let cell = Rect::from_min_max(img.min, pos2(img.right(), img.bottom() + NAME_H));
+                        let cell =
+                            Rect::from_min_max(img.min, pos2(img.right(), img.bottom() + NAME_H));
                         x += iw + GAP;
-                        cells.push(Cell { idx: i, row: r, cx: img.center().x });
+                        cells.push(Cell {
+                            idx: i,
+                            row: r,
+                            cx: img.center().x,
+                        });
                         marquee_hits.push((i, cell));
                         if scroll_to == Some(i) {
                             ui.scroll_to_rect(cell.expand(GAP), None);
@@ -376,9 +404,27 @@ impl NlpApp {
                             };
                             item(ui, "Open in editor", &keys[0], CellAction::Open, true);
                             ui.separator();
-                            item(ui, "Pick", "P", CellAction::Flag(Flag::Pick), flag != Flag::Pick);
-                            item(ui, "Reject", "X", CellAction::Flag(Flag::Reject), flag != Flag::Reject);
-                            item(ui, "Unflag", "U", CellAction::Flag(Flag::None), flag != Flag::None);
+                            item(
+                                ui,
+                                "Pick",
+                                "P",
+                                CellAction::Flag(Flag::Pick),
+                                flag != Flag::Pick,
+                            );
+                            item(
+                                ui,
+                                "Reject",
+                                "X",
+                                CellAction::Flag(Flag::Reject),
+                                flag != Flag::Reject,
+                            );
+                            item(
+                                ui,
+                                "Unflag",
+                                "U",
+                                CellAction::Flag(Flag::None),
+                                flag != Flag::None,
+                            );
                             ui.separator();
                             item(ui, "Convert", "", CellAction::Convert, true);
                             if multi && sel {
@@ -404,14 +450,23 @@ impl NlpApp {
                     && let Some(p) = ui.input(|i| i.pointer.press_origin())
                 {
                     let keep = ui.input(|i| i.modifiers.shift || i.modifiers.command);
-                    let base = if keep { self.selected.clone() } else { BTreeSet::new() };
+                    let base = if keep {
+                        self.selected.clone()
+                    } else {
+                        BTreeSet::new()
+                    };
                     self.grid.marquee = Some((p - content.min, base));
                 }
                 if let Some((start, base)) = &self.grid.marquee {
                     if let Some(p) = ui.ctx().pointer_latest_pos() {
                         let r = Rect::from_two_pos(content.min + *start, p);
                         let mut sel = base.clone();
-                        sel.extend(marquee_hits.iter().filter(|(_, c)| c.intersects(r)).map(|(i, _)| *i));
+                        sel.extend(
+                            marquee_hits
+                                .iter()
+                                .filter(|(_, c)| c.intersects(r))
+                                .map(|(i, _)| *i),
+                        );
                         self.selected = sel;
                         ui.painter().rect(
                             r,
@@ -461,7 +516,11 @@ impl NlpApp {
         }
         // Hover buttons act on that frame alone, or on the selection it is part of.
         if let Some((i, act)) = hover_action {
-            let idx = if self.selected.contains(&i) { self.sel_vec() } else { vec![i] };
+            let idx = if self.selected.contains(&i) {
+                self.sel_vec()
+            } else {
+                vec![i]
+            };
             match act {
                 CellAction::Rotate(cw) => self.rotate_frames(&idx, cw),
                 CellAction::Flag(f) => self.set_flag(&idx, f),
@@ -506,7 +565,11 @@ impl NlpApp {
         let sel = self.selected.contains(&i);
         let p = ui.painter();
         let rejected = f.sc.flag == Flag::Reject;
-        let tex = if negatives { f.thumb_neg.as_ref().or(f.thumb.as_ref()) } else { f.thumb.as_ref() };
+        let tex = if negatives {
+            f.thumb_neg.as_ref().or(f.thumb.as_ref())
+        } else {
+            f.thumb.as_ref()
+        };
         match (tex, &f.proxy) {
             (Some(t), _) => {
                 let mut image = egui::Image::new((t.id(), t.size_vec2())).corner_radius(3.0);
@@ -529,7 +592,8 @@ impl NlpApp {
                 // Loading shimmer.
                 let a = (((now * 2.4 + i as f64 * 0.35).sin() * 0.5 + 0.5) * 10.0) as u8 + 6;
                 p.rect_filled(img, 3.0, Color32::from_white_alpha(a));
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
         if sel {
@@ -591,14 +655,14 @@ impl NlpApp {
         // Label row: frame number, name, status markers on the right.
         let row_y = cell.bottom() - NAME_H / 2.0 + 1.0;
         let mut x = cell.right() - 2.0;
-        let converting =
-            self.auto.in_flight.contains(&f.path) || self.auto.queue.contains(&f.path);
+        let converting = self.auto.in_flight.contains(&f.path) || self.auto.queue.contains(&f.path);
         let markers_right = x;
         if f.exporting {
             let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
             p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::WARN.gamma_multiply(a));
             x -= 12.0;
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
         }
         if converting {
             let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
@@ -606,11 +670,22 @@ impl NlpApp {
             x -= 12.0;
             ui.ctx().request_repaint();
         } else if !f.sc.is_converted() {
-            p.circle_stroke(pos2(x - 3.0, row_y), 2.5, egui::Stroke::new(1.0, theme::FAINT));
+            p.circle_stroke(
+                pos2(x - 3.0, row_y),
+                2.5,
+                egui::Stroke::new(1.0, theme::FAINT),
+            );
             x -= 12.0;
         } else if f.is_roll() {
-            let g = p.layout_no_wrap("Roll".into(), egui::FontId::proportional(10.0), theme::MUTED);
-            let chip = Rect::from_min_max(pos2(x - g.size().x - 10.0, row_y - 8.0), pos2(x, row_y + 8.0));
+            let g = p.layout_no_wrap(
+                "Roll".into(),
+                egui::FontId::proportional(10.0),
+                theme::MUTED,
+            );
+            let chip = Rect::from_min_max(
+                pos2(x - g.size().x - 10.0, row_y - 8.0),
+                pos2(x, row_y + 8.0),
+            );
             p.rect_stroke(
                 chip,
                 8.0,
@@ -705,7 +780,9 @@ impl NlpApp {
                     let s = t.size_vec2();
                     let k = (pic.width() / s.x).min(pic.height() / s.y);
                     let rect = Rect::from_center_size(pic.center() - vec2(0.0, 8.0), s * k);
-                    egui::Image::new((t.id(), s)).corner_radius(2.0).paint_at(ui, rect);
+                    egui::Image::new((t.id(), s))
+                        .corner_radius(2.0)
+                        .paint_at(ui, rect);
                 }
                 let mut line = title.clone();
                 match flag {
@@ -730,13 +807,251 @@ impl NlpApp {
                     egui::Align2::CENTER_CENTER,
                     hint,
                     egui::FontId::proportional(11.5),
-                    if issues.is_empty() { theme::MUTED } else { theme::WARN },
+                    if issues.is_empty() {
+                        theme::MUTED
+                    } else {
+                        theme::WARN
+                    },
                 );
                 resp
             })
             .inner;
         if resp.clicked() {
             self.grid.quick_look = false;
+        }
+    }
+
+    /// The floating action bar over the bottom of the grid: the frames on
+    /// show (convert, export) or, while frames are selected, the selection
+    /// (cull, rotate, copy / paste, convert, export).
+    pub fn selection_bar_ui(&mut self, ui: &mut egui::Ui) {
+        if self.grid.quick_look || self.grid.marquee.is_some() {
+            return;
+        }
+        let n = self.selected.len();
+        if n == 0 {
+            self.roll_bar_ui(ui);
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let area = ui.max_rect();
+        let sel = self.sel_vec();
+        let cmd = egui::Modifiers::COMMAND;
+        let key = |m, k| widgets::shortcut(&ctx, m, k);
+        let all = |f: Flag| sel.iter().all(|&i| self.frames[i].sc.flag == f);
+        let (picked, rejected) = (all(Flag::Pick), all(Flag::Reject));
+        let converted = sel.iter().all(|&i| self.frames[i].sc.is_converted());
+        let has_clip = self.clipboard.is_some();
+        let mut act: Option<BarAction> = None;
+        bar_area(&ctx, area, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(
+                    RichText::new(format!("{n} selected"))
+                        .font(theme::medium(12.5))
+                        .color(theme::TEXT),
+                );
+                divider(ui);
+                if bar_icon(
+                    ui,
+                    if picked { "Unflag (U)" } else { "Pick (P)" },
+                    picked,
+                    |p, r, c| {
+                        paint_flag(p, r.shrink(7.0), if picked { theme::OK } else { c }, picked)
+                    },
+                )
+                .clicked()
+                {
+                    act = Some(BarAction::Flag(if picked {
+                        Flag::None
+                    } else {
+                        Flag::Pick
+                    }));
+                }
+                if bar_icon(
+                    ui,
+                    if rejected { "Unflag (U)" } else { "Reject (X)" },
+                    rejected,
+                    |p, r, c| {
+                        widgets::paint_icon(
+                            p,
+                            r.shrink(6.0),
+                            Icon::Close,
+                            if rejected { theme::ERR } else { c },
+                        )
+                    },
+                )
+                .clicked()
+                {
+                    act = Some(BarAction::Flag(if rejected {
+                        Flag::None
+                    } else {
+                        Flag::Reject
+                    }));
+                }
+                divider(ui);
+                let left = format!("Rotate left ({})", key(cmd, egui::Key::OpenBracket));
+                let right = format!("Rotate right ({})", key(cmd, egui::Key::CloseBracket));
+                if bar_icon(ui, &left, false, |p, r, c| {
+                    widgets::paint_icon(p, r.shrink(5.0), Icon::RotateLeft, c)
+                })
+                .clicked()
+                {
+                    act = Some(BarAction::Rotate(false));
+                }
+                if bar_icon(ui, &right, false, |p, r, c| {
+                    widgets::paint_icon(p, r.shrink(5.0), Icon::RotateRight, c)
+                })
+                .clicked()
+                {
+                    act = Some(BarAction::Rotate(true));
+                }
+                divider(ui);
+                if ui
+                    .add_enabled(n == 1, bar_text("Copy settings"))
+                    .on_hover_text(format!(
+                        "Copy this frame's settings ({})",
+                        key(cmd, egui::Key::C)
+                    ))
+                    .on_disabled_hover_text("Select one frame to copy from")
+                    .clicked()
+                {
+                    act = Some(BarAction::Copy);
+                }
+                if ui
+                    .add_enabled(has_clip, bar_text("Paste settings"))
+                    .on_hover_text(format!(
+                        "Paste the copied settings ({})",
+                        key(cmd, egui::Key::V)
+                    ))
+                    .on_disabled_hover_text("Copy a frame's settings first")
+                    .clicked()
+                {
+                    act = Some(BarAction::Paste);
+                }
+                divider(ui);
+                if ui
+                    .add(bar_text(if converted {
+                        "Re-convert…"
+                    } else {
+                        "Convert…"
+                    }))
+                    .on_hover_text("Analyse each selected frame on its own")
+                    .clicked()
+                {
+                    act = Some(BarAction::Convert(false));
+                }
+                if n >= 2
+                    && ui
+                        .add(bar_text("As roll…"))
+                        .on_hover_text(
+                            "Convert the selection together, for one consistent roll balance",
+                        )
+                        .clicked()
+                {
+                    act = Some(BarAction::Convert(true));
+                }
+                ui.add_space(4.0);
+                if ui
+                    .add(widgets::primary(&if n == 1 {
+                        "Export".to_string()
+                    } else {
+                        format!("Export {n}")
+                    }))
+                    .on_hover_text(format!("Export the selection ({})", key(cmd, egui::Key::E)))
+                    .clicked()
+                {
+                    act = Some(BarAction::Export);
+                }
+                ui.add_space(2.0);
+                if ui
+                    .add(egui::Button::new(RichText::new("Clear").color(theme::MUTED)).frame(false))
+                    .on_hover_text("Clear the selection (Esc)")
+                    .clicked()
+                {
+                    act = Some(BarAction::Clear);
+                }
+            });
+        });
+        match act {
+            Some(BarAction::Flag(f)) => self.set_flag(&sel, f),
+            Some(BarAction::Rotate(cw)) => self.rotate_frames(&sel, cw),
+            Some(BarAction::Copy) => self.copy_settings(),
+            Some(BarAction::Paste) => self.paste_settings(),
+            Some(BarAction::Convert(roll)) => self.open_convert_dialog(sel, roll),
+            Some(BarAction::Export) => self.open_export_dialog(sel),
+            Some(BarAction::Clear) => self.selected.clear(),
+            None => {}
+        }
+    }
+
+    /// The action bar with nothing selected: convert or export the frames on show.
+    fn roll_bar_ui(&mut self, ui: &mut egui::Ui) {
+        let shown = self.shown_frames();
+        if shown.is_empty() {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let area = ui.max_rect();
+        let t = shown.len();
+        let (scope, export) = match self.grid.filter {
+            GridFilter::All => (
+                format!("{t} frame{}", if t == 1 { "" } else { "s" }),
+                "Export all".to_string(),
+            ),
+            GridFilter::Picks => (
+                format!("{t} pick{}", if t == 1 { "" } else { "s" }),
+                "Export picks".to_string(),
+            ),
+            GridFilter::NeedsLook => (format!("{t} to look at"), format!("Export {t}")),
+        };
+        let converted = shown.iter().all(|&i| self.frames[i].sc.is_converted());
+        let export_key = widgets::shortcut(&ctx, egui::Modifiers::COMMAND, egui::Key::E);
+        let mut act: Option<BarAction> = None;
+        bar_area(&ctx, area, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(
+                    RichText::new(scope)
+                        .font(theme::medium(12.5))
+                        .color(theme::TEXT),
+                );
+                divider(ui);
+                if ui
+                    .add(bar_text(if converted {
+                        "Re-convert…"
+                    } else {
+                        "Convert…"
+                    }))
+                    .on_hover_text("Analyse each frame on its own, with new conversion options")
+                    .clicked()
+                {
+                    act = Some(BarAction::Convert(false));
+                }
+                if t >= 2
+                    && ui
+                        .add(bar_text("As roll…"))
+                        .on_hover_text(
+                            "Analyse the frames together for one consistent roll balance",
+                        )
+                        .clicked()
+                {
+                    act = Some(BarAction::Convert(true));
+                }
+                ui.add_space(4.0);
+                if ui
+                    .add(widgets::primary(&export))
+                    .on_hover_text(format!("Export positive copies ({export_key})"))
+                    .clicked()
+                {
+                    act = Some(BarAction::Export);
+                }
+            });
+        });
+        match act {
+            Some(BarAction::Convert(roll)) => self.open_convert_dialog(shown, roll),
+            Some(BarAction::Export) => self.open_export_dialog(shown),
+            _ => {}
         }
     }
 
@@ -817,11 +1132,24 @@ fn hover_buttons(ui: &egui::Ui, i: usize, img: Rect, flag: Flag) -> Option<CellA
             size / 2.0,
             Color32::from_black_alpha(if resp.hovered() { 220 } else { 160 }),
         );
-        let col = if resp.hovered() { theme::TEXT } else { theme::MUTED };
+        let col = if resp.hovered() {
+            theme::TEXT
+        } else {
+            theme::MUTED
+        };
         match act {
-            CellAction::Rotate(true) => widgets::paint_icon(p, r.shrink(4.0), Icon::RotateRight, col),
-            CellAction::Rotate(false) => widgets::paint_icon(p, r.shrink(4.0), Icon::RotateLeft, col),
-            _ => paint_flag(p, r.shrink(5.0), if picked { theme::OK } else { col }, picked),
+            CellAction::Rotate(true) => {
+                widgets::paint_icon(p, r.shrink(4.0), Icon::RotateRight, col)
+            }
+            CellAction::Rotate(false) => {
+                widgets::paint_icon(p, r.shrink(4.0), Icon::RotateLeft, col)
+            }
+            _ => paint_flag(
+                p,
+                r.shrink(5.0),
+                if picked { theme::OK } else { col },
+                picked,
+            ),
         }
         if resp.clicked() {
             out = Some(act);
@@ -845,4 +1173,68 @@ fn paint_flag(p: &egui::Painter, r: Rect, color: Color32, filled: bool) {
     } else {
         p.add(egui::Shape::closed_line(pts, st));
     }
+}
+
+#[derive(Clone, Copy)]
+enum BarAction {
+    Flag(Flag),
+    Rotate(bool),
+    Copy,
+    Paste,
+    Convert(bool),
+    Export,
+    Clear,
+}
+
+/// Quiet text button for the selection bar.
+fn bar_text(text: &str) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(text).color(theme::TEXT))
+        .fill(Color32::TRANSPARENT)
+        .corner_radius(6.0)
+        .min_size(vec2(0.0, 28.0))
+}
+
+/// Square icon button for the selection bar; `on` shows it pressed.
+fn bar_icon(
+    ui: &mut egui::Ui,
+    tip: &str,
+    on: bool,
+    paint: impl FnOnce(&egui::Painter, Rect, Color32),
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 28.0), Sense::click());
+    let hot = resp.hovered();
+    let p = ui.painter();
+    if on {
+        p.rect_filled(rect, 6.0, theme::PRESSED);
+    } else if hot {
+        p.rect_filled(rect, 6.0, theme::HOVER);
+    }
+    paint(p, rect, if hot || on { theme::TEXT } else { theme::MUTED });
+    resp.on_hover_text(tip)
+}
+
+/// Thin vertical rule between groups of the selection bar.
+fn divider(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.y_range(),
+        egui::Stroke::new(1.0, Color32::from_white_alpha(18)),
+    );
+}
+
+/// The floating frame of the action bar, centred at the bottom of `area`.
+fn bar_area(ctx: &egui::Context, area: Rect, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Area::new(egui::Id::new("action_bar"))
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .fixed_pos(pos2(area.center().x, area.bottom() - 4.0))
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme::SURFACE)
+                .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(14)))
+                .corner_radius(12.0)
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .shadow(ui.visuals().popup_shadow)
+                .show(ui, add);
+        });
 }

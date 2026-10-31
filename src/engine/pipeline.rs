@@ -1335,7 +1335,11 @@ impl Renderer {
             let r = self.out_m[i];
             [r[0], r[1], r[2], self.out_luma[i]]
         };
-        (&self.lut, self.converted.then_some(&self.look), [row(0), row(1), row(2)])
+        (
+            &self.lut,
+            self.converted.then_some(&self.look),
+            [row(0), row(1), row(2)],
+        )
     }
 
     /// The dodge applied before the curves (see [`dodge`]), if any.
@@ -1424,8 +1428,15 @@ mod tests {
         s.crosstalk_strength = 50.0;
         let half = crosstalk_correction(&s);
         let gold = presets::crosstalk_profile("kodak_gold_200").unwrap().matrix;
-        assert!((half[0][1] - gold[0][1] * 0.5 / (1.0 + 0.5 * (gold[0].iter().sum::<f32>() - 1.0))).abs() < 1e-5);
-        assert!(half.iter().all(|row| (row.iter().sum::<f32>() - 1.0).abs() < 1e-5));
+        assert!(
+            (half[0][1] - gold[0][1] * 0.5 / (1.0 + 0.5 * (gold[0].iter().sum::<f32>() - 1.0)))
+                .abs()
+                < 1e-5
+        );
+        assert!(
+            half.iter()
+                .all(|row| (row.iter().sum::<f32>() - 1.0).abs() < 1e-5)
+        );
         assert_ne!(Settings::default().analysis_key(), s.analysis_key());
     }
 
@@ -1829,7 +1840,12 @@ mod tests {
         let s = Settings::default();
         let density = |src: &SourceImage| prepare_negative(src, &s, resolve_base(src, &s, None));
         for (name, src, space, prim) in [
-            ("Adobe RGB", &adobe, OutputSpace::AdobeRgb, &color::ADOBE_RGB),
+            (
+                "Adobe RGB",
+                &adobe,
+                OutputSpace::AdobeRgb,
+                &color::ADOBE_RGB,
+            ),
             ("ProPhoto", &pro, OutputSpace::ProPhoto, &color::PROPHOTO),
         ] {
             // The same linear pixels, handed over in that space directly.
@@ -2573,7 +2589,10 @@ mod tests {
             info: Default::default(),
         };
         let b = auto_base(&src, &Settings::default());
-        assert!((b[0] - 0.9).abs() < 1e-4 && (b[2] - 0.4).abs() < 1e-4, "{b:?}");
+        assert!(
+            (b[0] - 0.9).abs() < 1e-4 && (b[2] - 0.4).abs() < 1e-4,
+            "{b:?}"
+        );
         // With everything clipped there is nothing else to read.
         let mut all = src.clone();
         all.data.fill([1.0, 1.0, 1.0]);
@@ -2614,4 +2633,3 @@ mod tests {
         assert!((base_cropped[0] - 0.9).abs() < 1e-3);
     }
 }
-

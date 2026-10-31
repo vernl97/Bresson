@@ -73,7 +73,10 @@ pub fn from_hex(s: &str) -> Option<Vec<u8>> {
     if s.len() % 2 != 0 {
         return None;
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 impl UsbTransaction {
@@ -101,7 +104,14 @@ impl UsbTransaction {
     }
 
     /// Transaction for a control transfer about to be issued.
-    pub fn control(rt: u8, req: u8, value: u16, index: u16, data: ControlData<'_>, timeout_ms: Option<u32>) -> Self {
+    pub fn control(
+        rt: u8,
+        req: u8,
+        value: u16,
+        index: u16,
+        data: ControlData<'_>,
+        timeout_ms: Option<u32>,
+    ) -> Self {
         let mut t = match data {
             ControlData::In(n) => {
                 let mut t = Self::new(UsbOp::ControlRead);
@@ -204,7 +214,10 @@ impl UsbTransaction {
         t.data = obj.get("data").and_then(Value::as_str).and_then(from_hex);
         t.length = u("length").map(|v| v as usize);
         t.timeout_ms = u("timeout_ms").map(|v| v as u32);
-        t.response = obj.get("response").and_then(Value::as_str).and_then(from_hex);
+        t.response = obj
+            .get("response")
+            .and_then(Value::as_str)
+            .and_then(from_hex);
         Some(t)
     }
 }
@@ -213,7 +226,11 @@ impl UsbTransaction {
 pub fn format_usb_log_line(txn: &UsbTransaction, max_data: usize) -> String {
     let trunc = |d: &[u8]| {
         let shown = hex(&d[..d.len().min(max_data)]);
-        let extra = if d.len() > max_data { format!("…(+{}b)", d.len() - max_data) } else { String::new() };
+        let extra = if d.len() > max_data {
+            format!("…(+{}b)", d.len() - max_data)
+        } else {
+            String::new()
+        };
         format!("{shown}{extra}")
     };
     match txn.operation {
@@ -224,7 +241,12 @@ pub fn format_usb_log_line(txn: &UsbTransaction, max_data: usize) -> String {
         ),
         UsbOp::BulkWrite => {
             let p = txn.data.as_deref().unwrap_or(&[]);
-            format!("bulk_write ep=0x{:02x} {}b {}", txn.endpoint.unwrap_or(0), p.len(), trunc(p))
+            format!(
+                "bulk_write ep=0x{:02x} {}b {}",
+                txn.endpoint.unwrap_or(0),
+                p.len(),
+                trunc(p)
+            )
         }
         _ => {
             let mut bits = vec![
@@ -268,7 +290,14 @@ pub struct RecordingTransport {
 
 impl RecordingTransport {
     pub fn new(inner: Box<dyn UsbTransport>) -> Self {
-        Self { inner, listener: None, sink: None, keep_in_memory: true, transactions: Vec::new(), queued: VecDeque::new() }
+        Self {
+            inner,
+            listener: None,
+            sink: None,
+            keep_in_memory: true,
+            transactions: Vec::new(),
+            queued: VecDeque::new(),
+        }
     }
 
     fn record(&mut self, mut txn: UsbTransaction) {
@@ -289,7 +318,12 @@ impl RecordingTransport {
         }
     }
 
-    fn finish<T>(&mut self, mut txn: UsbTransaction, r: Result<T>, on_ok: impl FnOnce(&mut UsbTransaction, &T)) -> Result<T> {
+    fn finish<T>(
+        &mut self,
+        mut txn: UsbTransaction,
+        r: Result<T>,
+        on_ok: impl FnOnce(&mut UsbTransaction, &T),
+    ) -> Result<T> {
         txn.t1 = Some(perf_counter());
         match &r {
             Ok(v) => on_ok(&mut txn, v),
@@ -301,11 +335,21 @@ impl RecordingTransport {
 }
 
 impl UsbTransport for RecordingTransport {
-    fn control_msg(&mut self, rt: u8, req: u8, value: u16, index: u16, data: ControlData<'_>, timeout_ms: Option<u32>) -> Result<Vec<u8>> {
+    fn control_msg(
+        &mut self,
+        rt: u8,
+        req: u8,
+        value: u16,
+        index: u16,
+        data: ControlData<'_>,
+        timeout_ms: Option<u32>,
+    ) -> Result<Vec<u8>> {
         let is_read = data.is_read();
         let mut txn = UsbTransaction::control(rt, req, value, index, data, timeout_ms);
         txn.t0 = Some(perf_counter());
-        let r = self.inner.control_msg(rt, req, value, index, data, timeout_ms);
+        let r = self
+            .inner
+            .control_msg(rt, req, value, index, data, timeout_ms);
         self.finish(txn, r, |t, v| {
             if is_read {
                 t.response = Some(v.clone());

@@ -8,8 +8,8 @@ use ndarray::{Array2, Array3, ArrayView2, Axis};
 
 use crate::error::Result;
 use crate::registration::{
-    RegistrationMode, RegistrationOptions, Resampler, apply_transform, band_shift_profile, estimate_banded, estimate_translation, phase_correlate_shift,
-    warp_shift,
+    RegistrationMode, RegistrationOptions, Resampler, apply_transform, band_shift_profile,
+    estimate_banded, estimate_translation, phase_correlate_shift, warp_shift,
 };
 
 const ALIGN_PROBE_WIDTH: usize = 1024;
@@ -47,20 +47,40 @@ fn phase(r: ArrayView2<f32>, m: ArrayView2<f32>, scale: f64) -> (f64, f64, f64) 
 }
 
 /// Per-row-band profile for Multi-Pass.
-pub fn band_shift_profile_default(reference: &Array3<u16>, moving: &Array3<u16>, n_bands: usize) -> Option<(f64, Vec<f64>)> {
-    let opt = RegistrationOptions { band_count: n_bands, ..default_options() };
+pub fn band_shift_profile_default(
+    reference: &Array3<u16>,
+    moving: &Array3<u16>,
+    n_bands: usize,
+) -> Option<(f64, Vec<f64>)> {
+    let opt = RegistrationOptions {
+        band_count: n_bands,
+        ..default_options()
+    };
     band_shift_profile(reference.view(), moving.view(), &opt, Some(&phase))
 }
 
 /// Estimate `(dx, dy)` (sub-pixel) for `moving` → `reference`.
 pub fn estimate_pass_shift(reference: &Array3<u16>, moving: &Array3<u16>) -> Shift2D {
-    let r = estimate_translation(reference.view(), moving.view(), RegistrationMode::MultiExposure, &default_options(), None);
+    let r = estimate_translation(
+        reference.view(),
+        moving.view(),
+        RegistrationMode::MultiExposure,
+        &default_options(),
+        None,
+    );
     if r.accepted { r.shift() } else { (0.0, 0.0) }
 }
 
 /// Align `moving` onto `reference`; return aligned array and shift used.
-pub fn align_pass_to_reference(reference: &Array3<u16>, moving: &Array3<u16>, shift: Option<Shift2D>) -> Result<(Array3<u16>, Shift2D)> {
-    if moving.is_empty() || reference.dim().0 != moving.dim().0 || reference.dim().1 != moving.dim().1 {
+pub fn align_pass_to_reference(
+    reference: &Array3<u16>,
+    moving: &Array3<u16>,
+    shift: Option<Shift2D>,
+) -> Result<(Array3<u16>, Shift2D)> {
+    if moving.is_empty()
+        || reference.dim().0 != moving.dim().0
+        || reference.dim().1 != moving.dim().1
+    {
         return Ok((moving.clone(), (0.0, 0.0)));
     }
     let (dx, dy) = shift.unwrap_or_else(|| estimate_pass_shift(reference, moving));
@@ -71,15 +91,29 @@ pub fn align_pass_to_reference(reference: &Array3<u16>, moving: &Array3<u16>, sh
 }
 
 /// Row-banded Multi-Pass alignment (production default).
-pub fn align_pass_to_reference_banded(reference: &Array3<u16>, moving: &Array3<u16>) -> Result<(Array3<u16>, Shift2D)> {
-    if moving.is_empty() || reference.dim().0 != moving.dim().0 || reference.dim().1 != moving.dim().1 {
+pub fn align_pass_to_reference_banded(
+    reference: &Array3<u16>,
+    moving: &Array3<u16>,
+) -> Result<(Array3<u16>, Shift2D)> {
+    if moving.is_empty()
+        || reference.dim().0 != moving.dim().0
+        || reference.dim().1 != moving.dim().1
+    {
         return Ok((moving.clone(), (0.0, 0.0)));
     }
-    let r = estimate_banded(reference.view(), moving.view(), &default_options(), Some(&phase));
+    let r = estimate_banded(
+        reference.view(),
+        moving.view(),
+        &default_options(),
+        Some(&phase),
+    );
     if !r.accepted {
         return align_pass_to_reference(reference, moving, None);
     }
-    Ok((apply_transform(moving, &r.transform, Resampler::Linear), r.shift()))
+    Ok((
+        apply_transform(moving, &r.transform, Resampler::Linear),
+        r.shift(),
+    ))
 }
 
 fn ir3(ir: &Array2<u16>) -> Array3<u16> {
@@ -92,24 +126,48 @@ pub fn align_ir_to_rgb(rgb: &Array3<u16>, ir: &Array2<u16>) -> Result<Array2<u16
 }
 
 /// Like [`align_ir_to_rgb`] but also returns the shift actually applied.
-pub fn align_ir_to_rgb_result(rgb: &Array3<u16>, ir: &Array2<u16>) -> Result<(Array2<u16>, Shift2D)> {
+pub fn align_ir_to_rgb_result(
+    rgb: &Array3<u16>,
+    ir: &Array2<u16>,
+) -> Result<(Array2<u16>, Shift2D)> {
     let ir_v = ir3(ir);
-    let r = estimate_translation(rgb.view(), ir_v.view(), RegistrationMode::RgbIr, &default_options(), None);
+    let r = estimate_translation(
+        rgb.view(),
+        ir_v.view(),
+        RegistrationMode::RgbIr,
+        &default_options(),
+        None,
+    );
     let (out, shift) = if !r.accepted {
         // Fall back to plain luminance translation (historical path).
         align_pass_to_reference_mono(rgb, &ir_v)?
     } else {
-        (apply_transform(&ir_v, &r.transform, Resampler::Linear), r.shift())
+        (
+            apply_transform(&ir_v, &r.transform, Resampler::Linear),
+            r.shift(),
+        )
     };
     Ok((out.index_axis_move(Axis(2), 0), shift))
 }
 
 /// `align_pass_to_reference(rgb, ir)` with a mono moving plane.
-fn align_pass_to_reference_mono(reference: &Array3<u16>, moving: &Array3<u16>) -> Result<(Array3<u16>, Shift2D)> {
-    if moving.is_empty() || reference.dim().0 != moving.dim().0 || reference.dim().1 != moving.dim().1 {
+fn align_pass_to_reference_mono(
+    reference: &Array3<u16>,
+    moving: &Array3<u16>,
+) -> Result<(Array3<u16>, Shift2D)> {
+    if moving.is_empty()
+        || reference.dim().0 != moving.dim().0
+        || reference.dim().1 != moving.dim().1
+    {
         return Ok((moving.clone(), (0.0, 0.0)));
     }
-    let r = estimate_translation(reference.view(), moving.view(), RegistrationMode::MultiExposure, &default_options(), None);
+    let r = estimate_translation(
+        reference.view(),
+        moving.view(),
+        RegistrationMode::MultiExposure,
+        &default_options(),
+        None,
+    );
     let (dx, dy) = if r.accepted { r.shift() } else { (0.0, 0.0) };
     if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
         return Ok((moving.clone(), (0.0, 0.0)));

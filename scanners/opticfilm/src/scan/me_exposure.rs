@@ -30,7 +30,9 @@ impl MeLongMode {
         match s {
             "adaptive" => Ok(Self::Adaptive),
             "fixed" => Ok(Self::Fixed),
-            _ => Err(Error::Value(format!("me_long_mode must be one of ('adaptive', 'fixed'), got {s:?}"))),
+            _ => Err(Error::Value(format!(
+                "me_long_mode must be one of ('adaptive', 'fixed'), got {s:?}"
+            ))),
         }
     }
     pub fn as_str(self) -> &'static str {
@@ -57,7 +59,11 @@ fn channel_hists(rgb: ArrayView3<u16>) -> [U16Hist; 3] {
 }
 
 /// Per-channel dense percentile of `max(DN - black, 0)`.
-pub fn dense_percentiles(rgb: ArrayView3<u16>, black_level: f64, dense_percentile: f64) -> [f64; 3] {
+pub fn dense_percentiles(
+    rgb: ArrayView3<u16>,
+    black_level: f64,
+    dense_percentile: f64,
+) -> [f64; 3] {
     if rgb.dim().2 < 3 || rgb.len() == 0 {
         return [0.0; 3];
     }
@@ -66,7 +72,13 @@ pub fn dense_percentiles(rgb: ArrayView3<u16>, black_level: f64, dense_percentil
 }
 
 /// Propose a long exposure from per-channel dense percentiles.
-pub fn choose_long_exposure(rgb: ArrayView3<u16>, short_exposure: i64, black_level: f64, dense_percentile: f64, target_dense_dn: f64) -> Result<f64> {
+pub fn choose_long_exposure(
+    rgb: ArrayView3<u16>,
+    short_exposure: i64,
+    black_level: f64,
+    dense_percentile: f64,
+    target_dense_dn: f64,
+) -> Result<f64> {
     if rgb.dim().2 < 3 {
         return Err(Error::Value("short_rgb must be HxWx3".into()));
     }
@@ -77,12 +89,20 @@ pub fn choose_long_exposure(rgb: ArrayView3<u16>, short_exposure: i64, black_lev
         return Err(Error::Value("short_rgb is empty".into()));
     }
     let dense = dense_percentiles(rgb, black_level, dense_percentile);
-    let ratio = dense.iter().map(|&d| target_dense_dn / d.max(EPSILON)).fold(f64::MIN, f64::max);
+    let ratio = dense
+        .iter()
+        .map(|&d| target_dense_dn / d.max(EPSILON))
+        .fold(f64::MIN, f64::max);
     Ok(short_exposure as f64 * ratio)
 }
 
 /// Fraction of pixels predicted at/above soft-clip for each RGB channel.
-pub fn predicted_clip_fractions(rgb: ArrayView3<u16>, short_exposure: i64, long_exposure: i64, black_level: f64) -> [f64; 3] {
+pub fn predicted_clip_fractions(
+    rgb: ArrayView3<u16>,
+    short_exposure: i64,
+    long_exposure: i64,
+    black_level: f64,
+) -> [f64; 3] {
     let (h, w, c) = rgb.dim();
     if c < 3 || short_exposure <= 0 || h * w == 0 {
         return [0.0; 3];
@@ -90,17 +110,33 @@ pub fn predicted_clip_fractions(rgb: ArrayView3<u16>, short_exposure: i64, long_
     let scale = long_exposure as f64 / short_exposure as f64;
     let n = (h * w) as f64;
     [0, 1, 2].map(|ch| {
-        let k = rgb.index_axis(Axis(2), ch).iter().filter(|&&v| black_level + (v as f64 - black_level).max(0.0) * scale >= CLIP_DN).count();
+        let k = rgb
+            .index_axis(Axis(2), ch)
+            .iter()
+            .filter(|&&v| black_level + (v as f64 - black_level).max(0.0) * scale >= CLIP_DN)
+            .count();
         k as f64 / n
     })
 }
 
 /// Clamp a proposed long exposure into the validated safety envelope.
-pub fn clamp_long_exposure(proposed: f64, short_exposure: i64, adaptive_min: i64, adaptive_max: i64, hardware_max: i64, max_ratio: f64) -> (i64, String) {
-    let safe_max = hardware_max.min(adaptive_max).min(1.max(py_round(short_exposure as f64 * max_ratio)));
+pub fn clamp_long_exposure(
+    proposed: f64,
+    short_exposure: i64,
+    adaptive_min: i64,
+    adaptive_max: i64,
+    hardware_max: i64,
+    max_ratio: f64,
+) -> (i64, String) {
+    let safe_max = hardware_max
+        .min(adaptive_max)
+        .min(1.max(py_round(short_exposure as f64 * max_ratio)));
     let lo = adaptive_min;
     if lo > safe_max {
-        return (safe_max, "clamped to validated hardware maximum (min>max)".into());
+        return (
+            safe_max,
+            "clamped to validated hardware maximum (min>max)".into(),
+        );
     }
     if !proposed.is_finite() {
         return (lo, "fallback non-finite proposal → adaptive minimum".into());
@@ -144,7 +180,11 @@ impl Default for LongExposureParams {
 }
 
 /// Choose and clamp a long exposure; fall back to `default_long` on error.
-pub fn select_long_exposure(rgb: ArrayView3<u16>, short_exposure: i64, p: &LongExposureParams) -> MeExposureDecision {
+pub fn select_long_exposure(
+    rgb: ArrayView3<u16>,
+    short_exposure: i64,
+    p: &LongExposureParams,
+) -> MeExposureDecision {
     let p05 = dense_percentiles(rgb, p.black_level, p.dense_percentile);
     let fallback = || {
         let selected = p.default_long;
@@ -157,11 +197,24 @@ pub fn select_long_exposure(rgb: ArrayView3<u16>, short_exposure: i64, p: &LongE
             algorithm_version: ALGORITHM_VERSION,
         }
     };
-    let proposed_f = match choose_long_exposure(rgb, short_exposure, p.black_level, p.dense_percentile, p.target_dense_dn) {
+    let proposed_f = match choose_long_exposure(
+        rgb,
+        short_exposure,
+        p.black_level,
+        p.dense_percentile,
+        p.target_dense_dn,
+    ) {
         Ok(v) if v.is_finite() && v > 0.0 => v,
         _ => return fallback(),
     };
-    let (selected, reason) = clamp_long_exposure(proposed_f, short_exposure, p.adaptive_min, p.adaptive_max, p.hardware_max, p.max_ratio);
+    let (selected, reason) = clamp_long_exposure(
+        proposed_f,
+        short_exposure,
+        p.adaptive_min,
+        p.adaptive_max,
+        p.hardware_max,
+        p.max_ratio,
+    );
     MeExposureDecision {
         proposed: py_round(proposed_f),
         selected,

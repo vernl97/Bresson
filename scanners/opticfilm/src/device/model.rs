@@ -8,7 +8,10 @@
 use std::ops::{Deref, DerefMut};
 
 pub use super::generated::{Gl128Data, ModelFields};
-use super::generated::{gl128_common as g, model_7600i_v1 as v1, model_8100_v2, model_8200i_se, model_8300i_se, tables_8200i_se, tables_8300i_se};
+use super::generated::{
+    gl128_common as g, model_7600i_v1 as v1, model_8100_v2, model_8200i_se, model_8300i_se,
+    tables_8200i_se, tables_8300i_se,
+};
 use super::tables;
 use crate::error::{Error, Result};
 use crate::num::{ceil_i, nearest_key, py_int, py_round};
@@ -135,8 +138,14 @@ pub struct MotorProfile {
 }
 
 /// Default GL845 OpticFilm profile (8200i / 7400 / …).
-pub const DEFAULT_GL845_MOTOR: MotorProfile =
-    MotorProfile { initial_w: 64102 * 4, max_w: 400 * 4, slope_steps: 100, step_type: 2, vref: 3, slope_table_max: 1024 };
+pub const DEFAULT_GL845_MOTOR: MotorProfile = MotorProfile {
+    initial_w: 64102 * 4,
+    max_w: 400 * 4,
+    slope_steps: 100,
+    step_type: 2,
+    vref: 3,
+    slope_table_max: 1024,
+};
 
 /// Which Python class a model is: picks the leaf method overrides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -180,13 +189,20 @@ const NATIVE_DPI: i64 = 7200;
 
 /// `LPERIOD` for `pixels` read per line in a scan at ASIC `scan_dpi`.
 pub fn lperiod_for_line(pixels: f64, scan_dpi: i64) -> i64 {
-    let divisor = if scan_dpi >= g::LPERIOD_HIGH_FROM_DPI { 2.0 } else { 4.0 };
+    let divisor = if scan_dpi >= g::LPERIOD_HIGH_FROM_DPI {
+        2.0
+    } else {
+        4.0
+    };
     py_int(g::LPERIOD_BASE as f64 + pixels / divisor)
 }
 
 /// `LPERIOD` for an image or shading window `span_native` (`END - STR`) wide.
 pub fn lperiod_for_window(asic_dpi: i64, span_native: i64) -> i64 {
-    lperiod_for_line((span_native * asic_dpi) as f64 / NATIVE_DPI as f64, asic_dpi)
+    lperiod_for_line(
+        (span_native * asic_dpi) as f64 / NATIVE_DPI as f64,
+        asic_dpi,
+    )
 }
 
 /// `(0x2B, 0xA5, 0xAB)` SilverFast writes for a shading strip `span_native` wide.
@@ -198,7 +214,11 @@ pub fn shading_clocks_for_window(asic_dpi: i64, span_native: i64, dvdset: bool) 
     }
     let high = asic_dpi >= 3600;
     let clk = if high { 0x01 } else { 0x02 };
-    (ceil_i(if high { 2.0 } else { 1.0 } * line_bytes / 8192.0), clk, clk)
+    (
+        ceil_i(if high { 2.0 } else { 1.0 } * line_bytes / 8192.0),
+        clk,
+        clk,
+    )
 }
 
 /// USB serial-number string of current GL128 firmware.
@@ -220,9 +240,21 @@ pub fn gl128_firmware_variant(model: &FilmModel, firmware: Option<&str>) -> Film
 
 /// R/G/B line delays at `yres` lines/inch (7600i v1), scaled from twice it if needed.
 pub fn shifts_for_7600i_v1(yres: i64) -> [f64; 3] {
-    let r = if v1::CALIBRATED_SHIFTS.iter().any(|e| e.0 == yres) { yres } else { 2 * yres };
-    let s = v1::CALIBRATED_SHIFTS.iter().find(|e| e.0 == r).map(|e| e.1).expect("calibrated 7600i v1 shift");
-    [s[0] * yres as f64 / r as f64, s[1] * yres as f64 / r as f64, s[2] * yres as f64 / r as f64]
+    let r = if v1::CALIBRATED_SHIFTS.iter().any(|e| e.0 == yres) {
+        yres
+    } else {
+        2 * yres
+    };
+    let s = v1::CALIBRATED_SHIFTS
+        .iter()
+        .find(|e| e.0 == r)
+        .map(|e| e.1)
+        .expect("calibrated 7600i v1 shift");
+    [
+        s[0] * yres as f64 / r as f64,
+        s[1] * yres as f64 / r as f64,
+        s[2] * yres as f64 / r as f64,
+    ]
 }
 
 fn stagger_table(kind: ModelKind) -> &'static [(i64, &'static [i64])] {
@@ -240,12 +272,16 @@ impl FilmModel {
 
     /// GL128-only fields. Panics on other models (Python would raise AttributeError).
     pub fn g(&self) -> &Gl128Data {
-        self.gl128.as_deref().unwrap_or_else(|| panic!("{} is not a GL128 model", self.name))
+        self.gl128
+            .as_deref()
+            .unwrap_or_else(|| panic!("{} is not a GL128 model", self.name))
     }
 
     pub fn g_mut(&mut self) -> &mut Gl128Data {
         let name = self.name;
-        self.gl128.as_deref_mut().unwrap_or_else(|| panic!("{name} is not a GL128 model"))
+        self.gl128
+            .as_deref_mut()
+            .unwrap_or_else(|| panic!("{name} is not a GL128 model"))
     }
 
     pub fn max_area_mm(&self) -> (f64, f64) {
@@ -263,7 +299,12 @@ impl FilmModel {
     /// Resolutions where `scan(multi_exposure=true)` is accepted.
     pub fn multi_exposure_resolutions_dpi(&self) -> Vec<i64> {
         if self.is_gl128() {
-            return self.resolutions_dpi.iter().copied().filter(|&d| self.multi_pass_allowed_at(d)).collect();
+            return self
+                .resolutions_dpi
+                .iter()
+                .copied()
+                .filter(|&d| self.multi_pass_allowed_at(d))
+                .collect();
         }
         match self.kind {
             ModelKind::Sane8200i if self.supports_multi_exposure() => self.resolutions_dpi.clone(),
@@ -273,7 +314,11 @@ impl FilmModel {
 
     /// Resolutions where `scan(n_passes > 1)` is accepted (GL128).
     pub fn multi_pass_resolutions_dpi(&self) -> Vec<i64> {
-        self.resolutions_dpi.iter().copied().filter(|&d| self.multi_pass_allowed_at(d)).collect()
+        self.resolutions_dpi
+            .iter()
+            .copied()
+            .filter(|&d| self.multi_pass_allowed_at(d))
+            .collect()
     }
 
     /// Boot register map.
@@ -286,7 +331,11 @@ impl FilmModel {
         }
         if self.kind == ModelKind::Opticfilm7600iV1 {
             let mut regs = RegMap::default();
-            for group in super::replay_data::replay_data()["boot"].as_array().into_iter().flatten() {
+            for group in super::replay_data::replay_data()["boot"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
                 let g = group.as_array().expect("boot group");
                 if g.first().and_then(|v| v.as_str()) == Some("8c") {
                     continue;
@@ -324,7 +373,12 @@ impl FilmModel {
     pub fn image_line_margin(&self, resolution: i64) -> i64 {
         let dpi = self.asic_dpi_for(resolution);
         let shift = py_round((self.ld_shift_b * dpi) as f64 / self.motor_base_ydpi as f64);
-        shift + if self.oversample_for(resolution) == 1 { 5 } else { 1 }
+        shift
+            + if self.oversample_for(resolution) == 1 {
+                5
+            } else {
+                1
+            }
     }
 
     /// Whether multi-exposure and Multi-Pass may run at `resolution` (not at native 7200).
@@ -334,7 +388,10 @@ impl FilmModel {
 
     /// `LPERIOD` (`0x28`) at `resolution` for a window `span` native pixels wide.
     pub fn line_period_for(&self, resolution: i64, span: Option<i64>) -> i64 {
-        lperiod_for_window(self.asic_dpi_for(resolution), span.unwrap_or(g::FULL_FRAME_SPAN_NATIVE))
+        lperiod_for_window(
+            self.asic_dpi_for(resolution),
+            span.unwrap_or(g::FULL_FRAME_SPAN_NATIVE),
+        )
     }
 
     /// Motor ramp for feed2 / scan positioning (AHB slope windows).
@@ -354,19 +411,35 @@ impl FilmModel {
     }
 
     /// `(0x2B, 0xA5, 0xAB)` for a shading strip `span` native pixels wide.
-    pub fn shading_strip_clocks(&self, resolution: i64, dvdset: bool, span: Option<i64>) -> (i64, i64, i64) {
+    pub fn shading_strip_clocks(
+        &self,
+        resolution: i64,
+        dvdset: bool,
+        span: Option<i64>,
+    ) -> (i64, i64, i64) {
         if self.kind == ModelKind::Gl128_8300iSe && dvdset {
             let key = self.asic_dpi_for(resolution);
             let t = model_8300i_se::SHADING_WHITE_BY_ASIC_DPI;
-            let row = t.iter().find(|e| e.0 == key).or_else(|| nearest_key(t, key)).expect("8300i white clocks").1;
+            let row = t
+                .iter()
+                .find(|e| e.0 == key)
+                .or_else(|| nearest_key(t, key))
+                .expect("8300i white clocks")
+                .1;
             return (row[0], row[1], row[2]);
         }
-        shading_clocks_for_window(self.asic_dpi_for(resolution), span.unwrap_or(g::FULL_FRAME_SPAN_NATIVE), dvdset)
+        shading_clocks_for_window(
+            self.asic_dpi_for(resolution),
+            span.unwrap_or(g::FULL_FRAME_SPAN_NATIVE),
+            dvdset,
+        )
     }
 
     /// `0x1D` low bits (LINESEL) for the dark and white shading strips.
     pub fn shading_linesel_for(&self, resolution: i64) -> i64 {
-        self.g().shading_linesel_by_dpi.get_or(self.asic_dpi_for(resolution), 0)
+        self.g()
+            .shading_linesel_by_dpi
+            .get_or(self.asic_dpi_for(resolution), 0)
     }
 
     /// Scan-motor table period for the white shading strip.
@@ -398,13 +471,21 @@ impl FilmModel {
     pub fn pixel_clock_for_image(&self, resolution: i64, long_exposure: bool) -> i64 {
         let key = self.asic_dpi_for(resolution);
         let g = self.g();
-        let m = if long_exposure { &g.pixel_clock_long_by_dpi } else { &g.pixel_clock_by_dpi };
+        let m = if long_exposure {
+            &g.pixel_clock_long_by_dpi
+        } else {
+            &g.pixel_clock_by_dpi
+        };
         m.get_or(key, 0x02)
     }
 
     /// `REG_EXPOSURE` for short or long ME bracket.
     pub fn image_exposure(&self, long_exposure: bool) -> i64 {
-        if long_exposure { self.exposure_long.unwrap_or(42000) } else { self.g().exposure_short }
+        if long_exposure {
+            self.exposure_long.unwrap_or(42000)
+        } else {
+            self.g().exposure_short
+        }
     }
 
     /// Full-frame second-feed steps at `resolution`.
@@ -415,7 +496,12 @@ impl FilmModel {
             }
             let key = self.asic_dpi_for(resolution);
             let t = model_8300i_se::FEED2_BY_ASIC_DPI_8300I;
-            return t.iter().find(|e| e.0 == key).or_else(|| nearest_key(t, key)).expect("8300i feed2").1;
+            return t
+                .iter()
+                .find(|e| e.0 == key)
+                .or_else(|| nearest_key(t, key))
+                .expect("8300i feed2")
+                .1;
         }
         self.g().feed_to_scan_steps
     }
@@ -423,7 +509,9 @@ impl FilmModel {
     /// Second-feed steps for a normalized TA crop `(x1,y1,x2,y2)`.
     pub fn feed_to_scan_steps_for_area(&self, area: Option<[f64; 4]>) -> i64 {
         let g = self.g();
-        let Some(area) = area else { return g.feed_to_scan_steps };
+        let Some(area) = area else {
+            return g.feed_to_scan_steps;
+        };
         let y1 = area[1].clamp(0.0, 1.0);
         let top = g.feed_to_scan_top_steps;
         let end = g.scan_window_end_steps;
@@ -440,7 +528,11 @@ impl FilmModel {
             return Some(v);
         }
         let e = nearest_key(&table.0, feed2)?;
-        if (e.0 - feed2).abs() > 16 { None } else { Some(e.1) }
+        if (e.0 - feed2).abs() > 16 {
+            None
+        } else {
+            Some(e.1)
+        }
     }
 
     /// Steps left between `feed2` and the scan-window end.
@@ -483,12 +575,16 @@ impl FilmModel {
     /// Session-13 image `LINCNT` for `resolution` (exact or nearest PPI).
     pub fn ladder_lincnt_for(&self, resolution: i64) -> i64 {
         let t = &self.g().ladder_lincnt_by_dpi;
-        t.get(&resolution).copied().or_else(|| t.nearest(resolution)).expect("ladder table")
+        t.get(&resolution)
+            .copied()
+            .or_else(|| t.nearest(resolution))
+            .expect("ladder table")
     }
 
     /// Rounded line-distance shift (GL128 leaves); `None` where the model has no override.
     pub fn scaled_ld_shift(&self, ld: i64, asic_dpi: i64) -> Option<i64> {
-        self.is_gl128().then(|| py_round((ld * asic_dpi) as f64 / self.motor_base_ydpi as f64))
+        self.is_gl128()
+            .then(|| py_round((ld * asic_dpi) as f64 / self.motor_base_ydpi as f64))
     }
 
     /// Host column unstagger (GL128 leaves); `None` where the model has no override.
@@ -497,11 +593,20 @@ impl FilmModel {
             return None;
         }
         let key = self.asic_dpi_for(resolution);
-        Some(stagger_table(self.kind).iter().find(|e| e.0 == key).map(|e| e.1.to_vec()).unwrap_or_default())
+        Some(
+            stagger_table(self.kind)
+                .iter()
+                .find(|e| e.0 == key)
+                .map(|e| e.1.to_vec())
+                .unwrap_or_default(),
+        )
     }
 
     /// 7600i v1: infrared resolutions (others: all resolutions when IR is supported).
     pub fn infrared_resolutions(&self) -> Vec<i64> {
-        self.f.infrared_resolutions_dpi.clone().unwrap_or_else(|| self.resolutions_dpi.clone())
+        self.f
+            .infrared_resolutions_dpi
+            .clone()
+            .unwrap_or_else(|| self.resolutions_dpi.clone())
     }
 }
