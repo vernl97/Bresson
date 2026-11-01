@@ -1878,7 +1878,13 @@ impl NlpApp {
                 },
             );
             ui.add_space(6.0);
-            widgets::plain_combo(ui, &format!("picker_{caption}"), v, all, name, 150.0);
+            // The value and its menu use a smaller button font than the rest of the row.
+            ui.scope(|ui| {
+                ui.style_mut()
+                    .text_styles
+                    .insert(egui::TextStyle::Button, egui::FontId::proportional(11.5));
+                widgets::plain_combo(ui, &format!("picker_{caption}"), v, all, name, 150.0);
+            });
         });
     }
 
