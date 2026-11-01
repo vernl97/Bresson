@@ -487,6 +487,8 @@ pub struct ExportSettings {
     /// 0 = full resolution.
     pub long_edge: u32,
     pub output_dir: Option<PathBuf>,
+    /// Export sharpening; Leave As Set keeps the frame's own setting.
+    pub sharpening: Sharpening,
 }
 
 impl Default for ExportSettings {
@@ -503,6 +505,7 @@ impl Default for ExportSettings {
             name_template: "{name}{suffix}".into(),
             long_edge: 0,
             output_dir: None,
+            sharpening: Sharpening::LeaveAsSet,
         }
     }
 }
@@ -549,6 +552,7 @@ impl ExportPreset {
             placement: d.placement,
             subfolder: d.subfolder,
             output_dir: None,
+            sharpening: d.sharpening,
             ..ex.clone()
         }
     }
@@ -570,6 +574,7 @@ impl ExportPreset {
             placement: ex.placement,
             subfolder: ex.subfolder.clone(),
             output_dir: ex.output_dir.clone(),
+            sharpening: ex.sharpening,
             ..self.export.clone()
         };
     }

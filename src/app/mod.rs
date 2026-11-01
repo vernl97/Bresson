@@ -859,6 +859,16 @@ impl NlpApp {
                     );
                 }
 
+                ui.add_space(6.0);
+                save |= widgets::fl_combo(
+                    ui,
+                    "Sharpening",
+                    &mut ex.sharpening,
+                    crate::engine::settings::Sharpening::ALL,
+                    crate::engine::settings::Sharpening::label,
+                    "Applied to the exported file only. Leave As Set uses the frame's own setting.",
+                );
+
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new("Destination")
@@ -1813,7 +1823,11 @@ mod ui_tests {
         h.run_steps(3);
         shot(&mut h, &out, "g3_picks");
         assert_eq!(h.state().shown_frames(), vec![0, 2, 5]);
-        assert_eq!(h.state().sel_vec(), vec![2], "hidden frames leave the selection");
+        assert_eq!(
+            h.state().sel_vec(),
+            vec![2],
+            "hidden frames leave the selection"
+        );
         h.state_mut().grid.filter = grid::GridFilter::NeedsLook;
         h.run_steps(3);
         shot(&mut h, &out, "g4_needs_look");

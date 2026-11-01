@@ -269,23 +269,43 @@ fn pow_ext(x: f64, g: f64) -> f64 {
     }
 }
 
-/// Smooth bump on 0..1, zero at both ends and 1 at its peak `a / (a + 1)`.
+/// Smooth bump on 0..1, zero at both ends and 1 at its peak `a / (a + 2)`.
+/// Flat at 1, so a highlight bump leaves the white end's slope alone instead
+/// of folding the brightest tones together.
 fn bump(x: f64, a: f64) -> f64 {
     if x <= 0.0 || x >= 1.0 {
         return 0.0;
     }
-    let peak = a / (a + 1.0);
-    let max = peak.powf(a) * (1.0 - peak);
-    x.powf(a) * (1.0 - x) / max
+    let peak = a / (a + 2.0);
+    let max = peak.powf(a) * (1.0 - peak).powi(2);
+    x.powf(a) * (1.0 - x).powi(2) / max
 }
 
 /// Highlight bump; `range` 1..=10 widens it towards the midtones.
 fn highlight_bump(x: f64, range: f64) -> f64 {
-    bump(x, 1.0 + (11.0 - range.clamp(1.0, 10.0)) * 0.4)
+    bump(x, 2.0 + (11.0 - range.clamp(1.0, 10.0)) * 0.8)
 }
 
 fn shadow_bump(x: f64, range: f64) -> f64 {
     highlight_bump(1.0 - x, range)
+}
+
+/// Steepest slope of [`highlight_bump`] at `range`: an amount above its
+/// reciprocal would fold the tone curve.
+fn bump_steepness(range: f64) -> f64 {
+    const N: usize = 256;
+    (0..N)
+        .map(|i| {
+            let (a, b) = (i as f64 / N as f64, (i + 1) as f64 / N as f64);
+            (highlight_bump(b, range) - highlight_bump(a, range)).abs() * N as f64
+        })
+        .fold(0.0, f64::max)
+}
+
+/// A bump amount limited so the curve keeps a tenth of its slope.
+fn unfolded(amount: f64, range: f64) -> f64 {
+    let max = 0.9 / bump_steepness(range);
+    amount.clamp(-max, max)
 }
 
 /// Auto midtone gamma: moves the mean normalised median density towards
@@ -312,6 +332,7 @@ struct ChannelCurve {
     mid_gamma: f64,
     whites: f64,
     blacks: f64,
+    /// Lights / Darks bump amounts.
     highlights: f64,
     shadows: f64,
     /// Highlight / shadow colour toning amounts and ranges.
@@ -354,13 +375,19 @@ impl ChannelCurve {
             mid_gamma: 2f64.powf(f(mid) / 75.0 * 0.5),
             whites: f(s.whites) - f(s.glow),
             blacks: f(s.blacks) + f(s.fade),
-            highlights: f(s.highlights) + f(s.glow) / 1.5,
-            shadows: f(s.shadows) - f(s.fade) / 1.5,
-            tone_high: -f(high) / 75.0 * 0.12,
-            tone_shadow: -f(shadow) / 75.0 * 0.12,
+            // Lab Glow / Fade add to Lights / Darks, so keep both unfolded.
+            highlights: unfolded(0.10 * (f(s.highlights) + f(s.glow) / 1.5) / 50.0, 5.0),
+            shadows: unfolded(0.10 * (f(s.shadows) - f(s.fade) / 1.5) / 50.0, 5.0),
+            tone_high: unfolded(-f(high) / 75.0 * 0.12, f(s.high_range)),
+            tone_shadow: unfolded(-f(shadow) / 75.0 * 0.12, f(s.shadow_range)),
             high_range: f(s.high_range),
             shadow_range: f(s.shadow_range),
-            contrast: 1.0 + f(s.contrast) * 0.015,
+            // Reciprocal below 0, so −50 flattens as much as +50 steepens.
+            contrast: if s.contrast >= 0.0 {
+                1.0 + f(s.contrast) * 0.015
+            } else {
+                1.0 / (1.0 - f(s.contrast) * 0.015)
+            },
             exposure: filtration * CC - f(s.print_exposure) * std::f64::consts::LOG10_2,
         }
     }
@@ -382,8 +409,8 @@ impl ChannelCurve {
         let mut x = self.normalised(d);
         x = x * (1.0 + self.whites * 0.006) + self.blacks * 0.004 * (1.0 - x);
         x = pow_ext(x, self.gamma * self.mid_gamma);
-        x += 0.10 * self.highlights / 50.0 * highlight_bump(x, 5.0);
-        x += 0.10 * self.shadows / 50.0 * shadow_bump(x, 5.0);
+        x += self.highlights * highlight_bump(x, 5.0);
+        x += self.shadows * shadow_bump(x, 5.0);
         x += self.tone_high * highlight_bump(x, self.high_range);
         x += self.tone_shadow * shadow_bump(x, self.shadow_range);
         0.5 + (x - 0.5) * self.contrast
@@ -782,5 +809,79 @@ mod tests {
         for c in 0..3 {
             assert!(lut.lut[c].windows(2).all(|w| w[1] >= w[0]));
         }
+    }
+
+    /// Lights, Darks, Glow, Fade and toning at full travel never fold the
+    /// curve: the raw tone keeps rising, before `monotonic` would flatten it.
+    #[test]
+    fn tone_bumps_never_fold_the_curve() {
+        let l = levels();
+        for v in [-1.0f32, 1.0] {
+            for range in [1.0, 5.0, 10.0] {
+                let s = Settings {
+                    highlights: 50.0 * v,
+                    shadows: -50.0 * v,
+                    glow: 50.0 * v,
+                    fade: 50.0 * v,
+                    high_cyan: 75.0 * v,
+                    high_temp: -75.0 * v,
+                    shadow_tint: 75.0 * v,
+                    high_range: range,
+                    shadow_range: range,
+                    ..Settings::default()
+                };
+                for c in 0..3 {
+                    let cc = ChannelCurve::new(&l, &s, c);
+                    let (lo, hi) = (l[c].lo, l[c].hi);
+                    let mut prev = f64::MIN;
+                    for i in 0..=1000 {
+                        let t = cc.tone(lo + (hi - lo) * i as f64 / 1000.0);
+                        assert!(t > prev, "{v} range {range} channel {c} at {i}");
+                        prev = t;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Lights and Darks move the upper and lower midtones by about a tenth
+    /// and leave black and white where they are.
+    #[test]
+    fn lights_and_darks_move_their_midtones() {
+        let l = levels();
+        let tone = |s: &Settings, x: f64| ChannelCurve::new(&l, s, 1).tone(l[1].density(x));
+        let s0 = Settings::default();
+        let lights = Settings {
+            highlights: 50.0,
+            ..s0.clone()
+        };
+        let darks = Settings {
+            shadows: 50.0,
+            ..s0.clone()
+        };
+        let lift = |s: &Settings, x: f64| tone(s, x) - tone(&s0, x);
+        assert!((lift(&lights, 0.77) - 0.10).abs() < 0.01);
+        assert!((lift(&darks, 0.23) - 0.10).abs() < 0.01);
+        assert!(lift(&lights, 0.25).abs() < 0.01 && lift(&darks, 0.75).abs() < 0.01);
+        for s in [&lights, &darks] {
+            assert!(lift(s, 0.0).abs() < 1e-9 && lift(s, 1.0).abs() < 1e-9);
+        }
+    }
+
+    /// Contrast ±50 steepen and flatten the midtones by the same factor.
+    #[test]
+    fn contrast_is_symmetric_in_slope() {
+        let l = levels();
+        let slope = |c: f32| {
+            let s = Settings {
+                contrast: c,
+                ..Settings::default()
+            };
+            let cc = ChannelCurve::new(&l, &s, 1);
+            cc.tone(l[1].density(0.55)) - cc.tone(l[1].density(0.45))
+        };
+        let (up, flat, down) = (slope(50.0), slope(0.0), slope(-50.0));
+        assert!((up / flat - flat / down).abs() < 1e-6, "{up} {flat} {down}");
+        assert!((up / flat - 1.75).abs() < 1e-6);
     }
 }

@@ -171,7 +171,11 @@ pub fn export_frame(
     let scale = neg.width.max(neg.height) as f32 / full_long as f32;
     let levels = pipeline::levels_for(s, analysis, roll);
     let mp = (src.info.full_width * src.info.full_height) as f32 / 1e6;
-    let r = Renderer::new(s, levels.as_ref(), ex.space).with_megapixels(mp);
+    let mut sharp = s.clone();
+    if ex.sharpening != super::settings::Sharpening::LeaveAsSet {
+        sharp.sharpening = ex.sharpening;
+    }
+    let r = Renderer::new(&sharp, levels.as_ref(), ex.space).with_megapixels(mp);
     let px = r.render(&neg, scale);
     let out = out.to_path_buf();
     if let Some(p) = out.parent() {

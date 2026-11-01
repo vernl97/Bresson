@@ -756,6 +756,11 @@ impl NlpApp {
         let Some(c) = self.clipboard.clone() else {
             return;
         };
+        self.paste_edit_to(idx, &c);
+    }
+
+    /// Apply the edit `c` to frames `idx`, as one undo step.
+    pub fn paste_edit_to(&mut self, idx: Vec<usize>, c: &Settings) {
         self.record(&idx);
         for &i in &idx {
             self.frames[i].sc.settings.copy_edit_from(&c);

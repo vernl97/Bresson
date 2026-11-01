@@ -405,11 +405,11 @@ x  = normalised(d)                              # with clip:
 x  = (x − bc) / (1 − bc − wc)                   # bc = black_clip·0.006, wc = white_clip·0.006
 x  = x·(1 + whites'·0.006) + blacks'·0.004·(1 − x)
 x  = pow_ext(x, gamma · mid_gamma_c)            # power on 0..1, straight outside
-x += 0.10·highlights'/50 · highlight_bump(x, 5)
-x += 0.10·shadows'/50    · shadow_bump(x, 5)
+x += unfolded(0.10·highlights'/50, 5) · highlight_bump(x, 5)
+x += unfolded(0.10·shadows'/50, 5)    · shadow_bump(x, 5)
 x += tone_high_c   · highlight_bump(x, high_range)
 x += tone_shadow_c · shadow_bump(x, shadow_range)
-x  = 0.5 + (x − 0.5)·(1 + contrast·0.015)       # tone(d)
+x  = 0.5 + (x − 0.5)·k                          # tone(d)
 
 u  = (1 − x)·PAPER_RANGE + exposure_c           # paper log exposure
 y  = 1 − u / PAPER_RANGE                        # = x − exposure_c / 1.05
@@ -430,9 +430,15 @@ with
   than dark ones go up.
 - `mid_gamma_c = 2^(mid_c/75 · 0.5)` for the Mids colour sliders (cyan → red,
   tint → green, temp → blue). Highlight/shadow toning:
-  `tone_* = −value/75 · 0.12`, as a bump whose width the range slider sets.
-- `bump(x, a) = x^a·(1 − x)`, normalised to 1 at its peak `a/(a+1)`;
-  `highlight_bump(x, r)` uses `a = 1 + (11 − r)·0.4`, `shadow_bump` mirrors it.
+  `tone_* = unfolded(−value/75 · 0.12, range)`, as a bump whose width the
+  range slider sets.
+- `bump(x, a) = x^a·(1 − x)²`, normalised to 1 at its peak `a/(a+2)`;
+  `highlight_bump(x, r)` uses `a = 2 + (11 − r)·0.8`, `shadow_bump` mirrors it.
+  It is flat at the pinned end, so the white (black) end keeps its slope.
+  `unfolded(amount, r)` limits an amount to `0.9 / max|bump′|`, so no bump
+  can fold the curve (at least a tenth of the slope is kept).
+- **Contrast** `k = 1 + contrast·0.015` above 0 and `1 / (1 − contrast·0.015)`
+  below, so ±50 steepen and flatten by the same factor (×1.75, ×0.57).
 - **Paper**: `PAPER_RANGE = 1.05` log exposure between printed white and
   black (ISO R ≈ 105, grade 2). `CC = 0.01` log exposure.
   `exposure_c = (filtration_c + wb_c)·CC − print_exposure·log10 2`, where
@@ -560,7 +566,7 @@ optional ZIP) or JPEG with EXIF built from the film metadata.
 
 ### 8.3 Sharpening — `look::sharpen`
 
-Only on CPU renders (exports) with Sharpening = Lab or Scanner, after the
+Only on CPU renders (exports) with Sharpening = Lab or Scanner (set in the export dialog, `ExportSettings::sharpening`; Leave As Set keeps the frame's own), after the
 output conversion, on encoded values. After the Frontier's Hyper Sharpness:
 
 - Per channel, a fine band (`p − blur(radius)`) and a wider band

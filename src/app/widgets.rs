@@ -211,10 +211,68 @@ pub fn gradient_rect(ui: &Ui, rect: Rect, a: Color32, b: Color32) {
 /// Paint an RGB histogram (counts per channel, 256 bins) as additive
 /// translucent fills, so overlapping channels sum towards white.
 /// `frozen` greys the plot out: it shows the last settled state.
-pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2, frozen: bool) {
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+pub fn histogram(
+    ui: &mut Ui,
+    h: &[[u32; 256]; 3],
+    size: egui::Vec2,
+    frozen: bool,
+    clip_on: bool,
+    values: Option<[String; 5]>,
+) -> HistEvent {
+    let mut ev = HistEvent::default();
+    let id = ui.make_persistent_id("histogram");
+    let live = values.is_some() && !frozen;
+    let (rect, resp) = ui.allocate_exact_size(
+        size,
+        if live {
+            Sense::click_and_drag()
+        } else {
+            Sense::hover()
+        },
+    );
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 6.0, theme::BG);
+    // Clipping corners: shadows left, highlights right. They are buttons.
+    let corners = [
+        Rect::from_min_size(rect.left_top(), egui::vec2(16.0, 16.0)),
+        Rect::from_min_size(
+            rect.right_top() - egui::vec2(16.0, 0.0),
+            egui::vec2(16.0, 16.0),
+        ),
+    ];
+    let over_corner = ui
+        .ctx()
+        .pointer_hover_pos()
+        .is_some_and(|q| corners.iter().any(|c| c.contains(q)));
+    // The region under the pointer (or the one being dragged) gets the
+    // Lightroom treatment: lit background, name and value, drag to edit.
+    let region_at = |x: f32| {
+        let t = ((x - rect.left()) / rect.width()).clamp(0.0, 0.9999);
+        HistRegion::ALL[(t * 5.0) as usize]
+    };
+    let drag_id = id.with("region");
+    let mut region = None;
+    if live {
+        if resp.drag_started()
+            && let Some(q) = resp.interact_pointer_pos()
+        {
+            ui.data_mut(|d| d.insert_temp(drag_id, region_at(q.x)));
+        }
+        if resp.dragged() {
+            region = ui.data(|d| d.get_temp::<HistRegion>(drag_id));
+        } else if !over_corner {
+            region = resp.hover_pos().map(|q| region_at(q.x));
+        }
+    }
+    if let Some(r) = region {
+        let w = rect.width() / 5.0;
+        let band = Rect::from_min_size(
+            rect.left_top() + egui::vec2(w * r as usize as f32, 0.0),
+            egui::vec2(w, rect.height()),
+        );
+        p.rect_filled(band, 0.0, Color32::from_white_alpha(14));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
     let plot = rect.shrink2(egui::vec2(6.0, 6.0));
     let max = h
         .iter()
@@ -263,41 +321,116 @@ pub fn histogram(ui: &mut Ui, h: &[[u32; 256]; 3], size: egui::Vec2, frozen: boo
         ));
     }
     // Clipping warnings: a corner triangle in the clipped channels' colour
-    // when more than 0.1 % of the pixels sit at 0 or 255.
+    // when more than 0.1 % of the pixels sit at 0 or 255; an outline when
+    // nothing clips. Click to show the clipping overlay (J).
     let total = h[0].iter().sum::<u32>().max(1) as f32;
-    for (end, left) in [(0usize, true), (255, false)] {
+    for (k, (end, left)) in [(0usize, true), (255, false)].into_iter().enumerate() {
         let mut col = [0u8; 3];
         for c in 0..3 {
             if h[c][end] as f32 / total > 0.001 {
                 col[c] = 255;
             }
         }
-        if col == [0; 3] {
-            continue;
-        }
+        let clipped = col != [0; 3];
         let fill = if col == [255; 3] {
             Color32::WHITE
         } else {
             Color32::from_rgb(col[0].max(60), col[1].max(60), col[2].max(60))
         };
         let (x0, dx) = if left {
-            (rect.left() + 3.0, 7.0)
+            (rect.left() + 3.0, 8.0)
         } else {
-            (rect.right() - 3.0, -7.0)
+            (rect.right() - 3.0, -8.0)
         };
         let y0 = rect.top() + 3.0;
+        let tri = vec![
+            egui::pos2(x0, y0),
+            egui::pos2(x0 + dx, y0),
+            egui::pos2(x0, y0 + 8.0),
+        ];
+        let hot = ui
+            .interact(corners[k], id.with(("clip", k)), Sense::click())
+            .on_hover_text("Show clipping (J)")
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if hot.clicked() {
+            ev.clip_toggle = true;
+        }
+        let ring = if clip_on {
+            theme::ACCENT
+        } else if hot.hovered() {
+            theme::TEXT
+        } else {
+            theme::FAINT
+        };
         p.add(egui::Shape::convex_polygon(
-            vec![
-                egui::pos2(x0, y0),
-                egui::pos2(x0 + dx, y0),
-                egui::pos2(x0, y0 + 7.0),
-            ],
-            fill,
-            egui::Stroke::NONE,
+            tri,
+            if clipped { fill } else { Color32::TRANSPARENT },
+            egui::Stroke::new(if clip_on { 1.5 } else { 1.0 }, ring),
         ));
+    }
+    if let (Some(r), Some(values)) = (region, values.as_ref()) {
+        let g = p.layout_no_wrap(
+            format!("{}  {}", r.name(), values[r as usize]),
+            theme::medium(11.0),
+            theme::TEXT,
+        );
+        p.galley(
+            egui::pos2(rect.left() + 8.0, rect.bottom() - g.size().y - 5.0),
+            g,
+            theme::TEXT,
+        );
+        if resp.dragged() {
+            ev.drag = Some((r, resp.drag_delta().x));
+        }
+        if resp.double_clicked() {
+            ev.reset = Some(r);
+        }
+    }
+    ev.active = resp.dragged();
+    ev
+}
+
+/// The five tonal regions of the histogram, as in Lightroom.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HistRegion {
+    Blacks,
+    Darks,
+    Exposure,
+    Lights,
+    Whites,
+}
+
+impl HistRegion {
+    pub const ALL: [HistRegion; 5] = [
+        HistRegion::Blacks,
+        HistRegion::Darks,
+        HistRegion::Exposure,
+        HistRegion::Lights,
+        HistRegion::Whites,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            HistRegion::Blacks => "Blacks",
+            HistRegion::Darks => "Darks",
+            HistRegion::Exposure => "Exposure",
+            HistRegion::Lights => "Lights",
+            HistRegion::Whites => "Whites",
+        }
     }
 }
 
+/// What the user did in the histogram this frame.
+#[derive(Default)]
+pub struct HistEvent {
+    /// A clipping triangle was clicked.
+    pub clip_toggle: bool,
+    /// Horizontal drag (points) in a region.
+    pub drag: Option<(HistRegion, f32)>,
+    /// Double-click in a region.
+    pub reset: Option<HistRegion>,
+    /// A drag is in progress.
+    pub active: bool,
+}
 /// Plot the three channel curves (x = negative input, y = positive output).
 pub fn curves_plot(ui: &mut Ui, samples: &[[f32; 4]], size: egui::Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
@@ -362,15 +495,9 @@ pub mod grad {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Icon {
     Back,
-    Prev,
-    Next,
-    Undo,
-    Redo,
-    Compare,
+    Crop,
     RotateLeft,
     RotateRight,
-    Flip,
-    Crop,
     Lock,
     Unlock,
     Export,
@@ -379,6 +506,11 @@ pub enum Icon {
     Warn,
     More,
     Close,
+    /// View toggles of the editor's bottom bar.
+    Before,
+    Split,
+    Clipping,
+    Flag,
 }
 
 fn arc(c: egui::Pos2, r: f32, a0: f32, a1: f32, n: usize) -> Vec<egui::Pos2> {
@@ -397,62 +529,82 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let st = Stroke::new((1.6 * s * 1.25).clamp(1.2, 1.6), color);
     let q = |x: f32, y: f32| pos2(c.x + x * s, c.y + y * s);
     let line = |pts: Vec<egui::Pos2>| Shape::line(pts, st);
-    let arrow_head = |tip: egui::Pos2, dir: egui::Vec2| {
-        let d = dir.normalized() * 4.0 * s;
-        let n = vec2(-d.y, d.x);
-        line(vec![tip - d + n, tip, tip - d - n])
-    };
     match icon {
         Icon::Back => {
             p.add(line(vec![q(7.0, 0.0), q(-7.0, 0.0)]));
             p.add(line(vec![q(-1.5, -5.5), q(-7.0, 0.0), q(-1.5, 5.5)]));
         }
-        Icon::Prev => {
-            p.add(line(vec![q(3.0, -7.0), q(-4.0, 0.0), q(3.0, 7.0)]));
-        }
-        Icon::Next => {
-            p.add(line(vec![q(-3.0, -7.0), q(4.0, 0.0), q(-3.0, 7.0)]));
-        }
-        Icon::Undo | Icon::Redo => {
-            let flip = if icon == Icon::Undo { 1.0 } else { -1.0 };
-            let pts: Vec<_> = arc(
-                q(0.0, 2.0),
-                6.0 * s,
-                std::f32::consts::PI * 1.0,
-                std::f32::consts::PI * 2.0,
-                16,
-            )
-            .into_iter()
-            .map(|pt| pos2(c.x + (pt.x - c.x) * flip, pt.y))
-            .collect();
-            let tip = pts[0];
-            p.add(line(pts));
-            p.add(arrow_head(tip + vec2(0.0, 1.0 * s), vec2(0.0, 1.0)));
-        }
         Icon::RotateLeft | Icon::RotateRight => {
             let flip = if icon == Icon::RotateLeft { -1.0 } else { 1.0 };
-            let pts: Vec<_> = arc(c, 7.0 * s, -1.2, 4.0, 24)
-                .into_iter()
-                .map(|pt| pos2(c.x + (pt.x - c.x) * flip, pt.y))
-                .collect();
-            let tip = *pts.last().unwrap();
-            let prev = pts[pts.len() - 3];
+            // Circle open on the right, clockwise on screen, ending in a filled
+            // head at the upper right that points along the tangent.
+            let r = 6.5 * s;
+            let (a0, a1) = (0.6_f32, 5.55_f32);
+            let mx = |pt: egui::Pos2| pos2(c.x + (pt.x - c.x) * flip, pt.y);
+            let pts: Vec<_> = arc(c, r, a0, a1, 28).into_iter().map(mx).collect();
             p.add(line(pts));
-            p.add(arrow_head(tip, tip - prev));
-        }
-        Icon::Flip => {
-            for k in 0..5 {
-                let y0 = -8.0 + k as f32 * 3.6;
-                p.add(line(vec![q(0.0, y0), q(0.0, y0 + 1.8)]));
-            }
-            p.add(Shape::closed_line(
-                vec![q(-2.5, -6.0), q(-2.5, 6.0), q(-8.5, 0.0)],
-                st,
-            ));
+            let end = mx(pos2(c.x + r * a1.cos(), c.y + r * a1.sin()));
+            let tangent = mx(pos2(c.x - a1.sin(), c.y + a1.cos())) - mx(c);
+            let t = tangent.normalized();
+            let n = vec2(-t.y, t.x);
+            let tip = end + t * 3.2 * s;
+            let base = end - t * 1.2 * s;
             p.add(Shape::convex_polygon(
-                vec![q(2.5, -6.0), q(8.5, 0.0), q(2.5, 6.0)],
+                vec![tip, base + n * 3.4 * s, base - n * 3.4 * s],
                 color,
                 Stroke::NONE,
+            ));
+        }
+        Icon::Before => {
+            // The picture with its lower-left half filled: the other state.
+            let r = Rect::from_center_size(c, vec2(16.0 * s, 13.0 * s));
+            p.rect_stroke(r, 2.0, st, egui::StrokeKind::Middle);
+            p.add(Shape::convex_polygon(
+                vec![r.left_top(), r.left_bottom(), r.right_bottom()],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Split => {
+            let r = Rect::from_center_size(c, vec2(16.0 * s, 13.0 * s));
+            p.rect_stroke(r, 2.0, st, egui::StrokeKind::Middle);
+            p.add(Shape::convex_polygon(
+                vec![
+                    r.left_top(),
+                    pos2(r.center().x, r.top()),
+                    pos2(r.center().x, r.bottom()),
+                    r.left_bottom(),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Clipping => {
+            // The histogram's two clipping corners.
+            let r = Rect::from_center_size(c, vec2(16.0 * s, 13.0 * s));
+            p.rect_stroke(r, 2.0, st, egui::StrokeKind::Middle);
+            // Corner triangles just inside the frame, both wound clockwise.
+            let a = 5.0 * s;
+            let (tl, tr) = (
+                r.left_top() + vec2(2.0 * s, 2.0 * s),
+                r.right_top() + vec2(-2.0 * s, 2.0 * s),
+            );
+            p.add(Shape::convex_polygon(
+                vec![tl, tl + vec2(a, 0.0), tl + vec2(0.0, a)],
+                color,
+                Stroke::NONE,
+            ));
+            p.add(Shape::convex_polygon(
+                vec![tr, tr + vec2(0.0, a), tr + vec2(-a, 0.0)],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Flag => {
+            p.add(line(vec![q(-5.0, -8.0), q(-5.0, 8.0)]));
+            p.add(Shape::closed_line(
+                vec![q(-5.0, -8.0), q(7.0, -4.0), q(-5.0, 0.0)],
+                st,
             ));
         }
         Icon::Lock | Icon::Unlock => {
@@ -488,20 +640,6 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ]));
             p.add(line(vec![q(0.0, 3.0), q(0.0, -8.0)]));
             p.add(line(vec![q(-3.5, -4.5), q(0.0, -8.0), q(3.5, -4.5)]));
-        }
-        Icon::Compare => {
-            let r = Rect::from_center_size(c, vec2(15.0 * s, 13.0 * s));
-            p.rect_stroke(r, 2.0, st, egui::StrokeKind::Middle);
-            p.add(Shape::convex_polygon(
-                vec![
-                    r.left_top(),
-                    pos2(r.center().x, r.top()),
-                    pos2(r.center().x, r.bottom()),
-                    r.left_bottom(),
-                ],
-                color,
-                Stroke::NONE,
-            ));
         }
         Icon::Folder => {
             p.add(Shape::closed_line(
@@ -566,8 +704,45 @@ pub fn icon_button_tinted(
     enabled: bool,
     tint: Option<Color32>,
 ) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(
+    sized_icon_button(
+        ui,
+        icon,
+        tip,
+        selected,
+        enabled,
+        tint,
         egui::vec2(32.0, 28.0),
+        8.0,
+    )
+}
+
+/// Larger button for the tool strip.
+pub fn tool_button(ui: &mut Ui, icon: Icon, tip: &str, selected: bool) -> egui::Response {
+    sized_icon_button(
+        ui,
+        icon,
+        tip,
+        selected,
+        true,
+        None,
+        egui::vec2(38.0, 32.0),
+        6.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sized_icon_button(
+    ui: &mut Ui,
+    icon: Icon,
+    tip: &str,
+    selected: bool,
+    enabled: bool,
+    tint: Option<Color32>,
+    size: egui::Vec2,
+    pad: f32,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(
+        size,
         if enabled {
             Sense::click()
         } else {
@@ -587,7 +762,7 @@ pub fn icon_button_tinted(
         (true, None) if hot || selected => theme::TEXT,
         (true, None) => theme::MUTED,
     };
-    paint_icon(p, rect.shrink2(egui::vec2(8.0, 6.0)), icon, col);
+    paint_icon(p, rect.shrink2(egui::vec2(pad, pad - 2.0)), icon, col);
     if hot {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -703,6 +878,11 @@ pub fn fl_slider_origin(
     .0
 }
 
+/// Width of the label column of slider rows. Headings and selectors sit on
+/// the track column, which starts [`TRACK_INDENT`] from the row's left edge.
+pub const LABEL_W: f32 = 90.0;
+pub const TRACK_INDENT: f32 = LABEL_W + 7.0;
+
 /// `fl_slider_origin` that also reports whether the slider is being held
 /// (track drag or value drag): `(changed, active)`.
 #[allow(clippy::too_many_arguments)]
@@ -721,25 +901,44 @@ pub fn fl_slider_active(
     let mut active = false;
     let (lo, hi) = (*range.start(), *range.end());
     let modified = (*v - default).abs() > 1e-6;
-    ui.horizontal(|ui| {
-        let l = ui.add(
-            egui::Label::new(egui::RichText::new(label).color(if modified {
-                theme::TEXT
+    // One compact row, as in Lightroom: label, track, value.
+    const VALUE_W: f32 = 42.0;
+    let (row, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width() - 14.0, 22.0),
+        Sense::click_and_drag(),
+    );
+    let label_rect = Rect::from_min_size(row.min, egui::vec2(LABEL_W, row.height()));
+    let value_rect = Rect::from_min_max(egui::pos2(row.right() - VALUE_W, row.top()), row.max);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(label_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        |ui| {
+            let l = ui.add(
+                egui::Label::new(egui::RichText::new(label).color(if modified {
+                    theme::TEXT
+                } else {
+                    theme::MUTED
+                }))
+                .truncate()
+                .sense(Sense::click()),
+            );
+            let l = l.on_hover_text(if tip.is_empty() {
+                "Click to reset".to_string()
             } else {
-                theme::MUTED
-            }))
-            .sense(Sense::click()),
-        );
-        let l = l.on_hover_text(if tip.is_empty() {
-            "Click to reset".to_string()
-        } else {
-            format!("{tip}\n\nClick the label to reset.")
-        });
-        if l.clicked() && modified {
-            *v = default;
-            changed = true;
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                format!("{tip}\n\nClick the label to reset.")
+            });
+            if l.clicked() && modified {
+                *v = default;
+                changed = true;
+            }
+        },
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(value_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        |ui| {
             let fmt = move |x: f64, _r: std::ops::RangeInclusive<usize>| {
                 let s = format!("{:.*}", decimals, x);
                 if x > 0.0 && default == 0.0 {
@@ -749,6 +948,10 @@ pub fn fl_slider_active(
                 }
             };
             // Frameless value, editable by click (type) or horizontal drag.
+            // The box hugs its text and is as tall as the row, so values
+            // right-align and sit on the label's baseline.
+            ui.spacing_mut().interact_size = egui::vec2(0.0, 22.0);
+            ui.spacing_mut().button_padding = egui::vec2(0.0, 0.0);
             let vis = &mut ui.visuals_mut().widgets;
             for w in [&mut vis.inactive, &mut vis.hovered] {
                 w.bg_stroke = egui::Stroke::NONE;
@@ -765,14 +968,11 @@ pub fn fl_slider_active(
                 changed = true;
             }
             active |= r.dragged() || r.is_pointer_button_down_on();
-        });
-    });
-    let w = ui.available_width() - 6.0;
-    ui.add_space(-6.0);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 18.0), Sense::click_and_drag());
+        },
+    );
     let track = Rect::from_min_max(
-        egui::pos2(rect.left() + 7.0, rect.center().y - 1.0),
-        egui::pos2(rect.right() - 7.0, rect.center().y + 1.0),
+        egui::pos2(label_rect.right() + 7.0, row.center().y - 1.0),
+        egui::pos2(value_rect.left() - 5.0, row.center().y + 1.0),
     );
     let to_x = |val: f32| track.left() + track.width() * ((val - lo) / (hi - lo)).clamp(0.0, 1.0);
     if resp.double_clicked() {
@@ -780,14 +980,17 @@ pub fn fl_slider_active(
         changed = true;
     } else if resp.dragged() || resp.clicked() {
         if let Some(pos) = resp.interact_pointer_pos() {
-            let t = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
-            let mut nv = lo + t * (hi - lo);
-            if decimals == 0 {
-                nv = nv.round();
+            // Shift while dragging: relative moves at a tenth of the speed.
+            let fine = resp.dragged() && ui.input(|i| i.modifiers.shift);
+            let mut nv = if fine {
+                (*v + resp.drag_delta().x / track.width() * (hi - lo) * 0.1).clamp(lo, hi)
             } else {
-                let m = 10f32.powi(decimals as i32);
-                nv = (nv * m).round() / m;
-            }
+                let t = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
+                lo + t * (hi - lo)
+            };
+            let places = decimals + usize::from(fine);
+            let m = 10f32.powi(places as i32);
+            nv = (nv * m).round() / m;
             if (nv - *v).abs() > 1e-6 {
                 *v = nv;
                 changed = true;
@@ -814,6 +1017,15 @@ pub fn fl_slider_active(
             p.rect_filled(fill, 1.0, theme::ACCENT);
         }
     }
+    // A tick at the default value, so the neutral position is visible.
+    if default > lo && default < hi && (*v - default).abs() > (hi - lo) * 0.02 {
+        let x = to_x(default);
+        p.vline(
+            x,
+            track.center().y - 4.0..=track.center().y + 4.0,
+            egui::Stroke::new(1.0, theme::FAINT),
+        );
+    }
     let knob = egui::pos2(to_x(*v), track.center().y);
     if hot {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -824,7 +1036,6 @@ pub fn fl_slider_active(
         theme::TEXT,
         egui::Stroke::new(2.0, theme::PANEL),
     );
-    ui.add_space(4.0);
     (
         changed,
         active || resp.dragged() || resp.is_pointer_button_down_on(),
@@ -959,46 +1170,94 @@ pub fn fold_with(ui: &mut Ui, title: &str, default_open: bool) -> bool {
     fold_section(ui, title, default_open, false).0
 }
 
+/// Edge-to-edge band holding a row of tool icons, on the panel colour of the
+/// slider areas under a thin, non-collapsible header band, like Lightroom's tool strip; the next header
+/// follows flush.
+pub fn tool_band(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    const GAP: f32 = 12.0;
+    let (full, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), GAP + 42.0), Sense::hover());
+    let gap = Rect::from_min_size(full.min, egui::vec2(full.width(), GAP));
+    let rect = Rect::from_min_max(egui::pos2(full.left(), gap.bottom()), full.max);
+    let p = ui
+        .painter()
+        .with_clip_rect(bleed(full).expand2(egui::vec2(0.0, 2.0)));
+    // A thin header band that cannot be collapsed, with the same fine rule
+    // along its bottom edge as the section headers.
+    p.rect_filled(bleed(gap), 0.0, theme::BG);
+    p.hline(
+        bleed(gap).x_range(),
+        gap.bottom() - 0.5,
+        egui::Stroke::new(1.0, Color32::from_rgb(46, 46, 50)),
+    );
+    p.rect_filled(bleed(rect), 0.0, theme::PANEL);
+    // The next header follows flush, with no open-section spacing.
+    ui.add_space(-ui.spacing().item_spacing.y);
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("section_prev_open"), false));
+    let mut inner = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    inner.spacing_mut().item_spacing.x = 6.0;
+    add(&mut inner);
+}
+
 /// A sidebar section header. When `modified`, a dot after the title marks
 /// the edit and hovering the header offers Reset; returns (open, reset).
 pub fn fold_section(ui: &mut Ui, title: &str, default_open: bool, modified: bool) -> (bool, bool) {
     let id = ui.make_persistent_id(("fold", title));
     let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, default_open));
-    ui.add_space(10.0);
-    let line_y = ui.cursor().top();
-    ui.painter().hline(
-        ui.max_rect().x_range(),
-        line_y,
-        egui::Stroke::new(1.0, theme::LINE),
-    );
-    ui.add_space(8.0);
+    // Flat bands that run edge to edge, like Lightroom's panel headers. A
+    // little room after an open body; closed headers stack flush.
+    let prev_open: bool = ui
+        .data(|d| d.get_temp(egui::Id::new("section_prev_open")))
+        .unwrap_or(false);
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("section_prev_open"), open));
+    ui.add_space(if prev_open { 8.0 } else { 0.0 });
     let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::click());
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::click());
+    // Cancel the row spacing egui adds after a widget, so closed headers touch.
+    ui.add_space(-ui.spacing().item_spacing.y);
     let hot = resp.hovered();
     let p = ui.painter();
+    let band = bleed(rect);
+    p.with_clip_rect(band.expand2(egui::vec2(0.0, 2.0)))
+        .rect_filled(
+            band,
+            0.0,
+            if hot {
+                Color32::from_rgb(33, 33, 36)
+            } else {
+                theme::BG
+            },
+        );
+    // A fine rule along the bottom edge keeps stacked headers apart.
+    p.with_clip_rect(band.expand2(egui::vec2(0.0, 2.0))).hline(
+        band.x_range(),
+        band.bottom() - 0.5,
+        egui::Stroke::new(1.0, Color32::from_rgb(46, 46, 50)),
+    );
     let title_rect = p.text(
-        rect.left_center(),
-        egui::Align2::LEFT_CENTER,
+        rect.right_center() - egui::vec2(32.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
         title,
-        theme::medium(12.5),
-        if hot { theme::TEXT } else { theme::MUTED },
+        theme::medium(14.5),
+        theme::TEXT,
     );
     if modified {
         p.circle_filled(
-            egui::pos2(title_rect.right() + 7.0, rect.center().y),
+            egui::pos2(title_rect.left() - 9.0, rect.center().y),
             2.5,
             theme::ACCENT,
         );
     }
-    // Reset sits left of the chevron while the header is hovered.
+    // Reset sits at the left end while the header is hovered.
     let mut reset_rect = None;
     if modified && hot {
         let g = p.layout_no_wrap("Reset".into(), FontId::proportional(11.0), theme::MUTED);
         let r = Rect::from_min_size(
-            egui::pos2(
-                rect.right() - 24.0 - g.size().x,
-                rect.center().y - g.size().y / 2.0,
-            ),
+            egui::pos2(rect.left() + 12.0, rect.center().y - g.size().y / 2.0),
             g.size(),
         );
         let over = ui
@@ -1014,7 +1273,7 @@ pub fn fold_section(ui: &mut Ui, title: &str, default_open: bool, modified: bool
     }
     chevron(
         p,
-        egui::pos2(rect.right() - 8.0, rect.center().y),
+        egui::pos2(rect.right() - 14.0, rect.center().y),
         open,
         if hot { theme::TEXT } else { theme::FAINT },
     );
@@ -1197,4 +1456,103 @@ pub fn pill(p: &egui::Painter, center: egui::Pos2, text: &str) -> Rect {
     p.rect_filled(r, r.height() / 2.0, Color32::from_black_alpha(170));
     p.galley(r.center() - g.size() / 2.0, g, theme::TEXT);
     r
+}
+
+/// How far the sidebar's content is inset from the panel edge (left, right
+/// including the scrollbar gutter): bands and rules paint out to the edge.
+const SIDEBAR_INSET: (f32, f32) = (16.0, 18.0);
+
+/// `rect` stretched across the whole sidebar width.
+pub fn bleed(rect: Rect) -> Rect {
+    Rect::from_min_max(
+        egui::pos2(rect.left() - SIDEBAR_INSET.0, rect.top()),
+        egui::pos2(rect.right() + SIDEBAR_INSET.1, rect.bottom()),
+    )
+}
+
+/// A dark full-width rule between groups of slider rows.
+pub fn group_divider(ui: &mut Ui) {
+    ui.add_space(5.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 2.0), Sense::hover());
+    let band = bleed(rect);
+    ui.painter()
+        .with_clip_rect(band.expand(1.0))
+        .rect_filled(band, 0.0, theme::BG);
+    ui.add_space(5.0);
+}
+
+/// A header-style selector, like Lightroom's Profile row: the label at the
+/// left edge, the value as plain text with a chevron (no box) right after it.
+pub fn profile_row<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut T,
+    all: &[T],
+    name: impl Fn(T) -> &'static str,
+    tip: &str,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(10.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(80.0, 26.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let l = ui.label(egui::RichText::new(format!("{label} :")).color(theme::MUTED));
+                if !tip.is_empty() {
+                    l.on_hover_text(tip);
+                }
+            },
+        );
+        ui.add_space(6.0);
+        changed = plain_combo(ui, &format!("profile_row_{label}"), v, all, name, 150.0);
+    });
+    changed
+}
+
+/// A dropdown drawn as plain text with a chevron, without a box.
+pub fn plain_combo<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    salt: &str,
+    v: &mut T,
+    all: &[T],
+    name: impl Fn(T) -> &'static str,
+    width: f32,
+) -> bool {
+    let mut changed = false;
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        for x in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+            x.weak_bg_fill = Color32::TRANSPARENT;
+            x.bg_fill = Color32::TRANSPARENT;
+            x.bg_stroke = egui::Stroke::NONE;
+        }
+        w.inactive.fg_stroke.color = theme::TEXT;
+        ui.spacing_mut().button_padding.x = 0.0;
+        // Fit the box to its text so the chevron sits right after it.
+        let text_w = ui
+            .painter()
+            .layout_no_wrap(
+                name(*v).to_string(),
+                egui::TextStyle::Button.resolve(ui.style()),
+                theme::TEXT,
+            )
+            .size()
+            .x;
+        let width = width.min(text_w + 22.0);
+        egui::ComboBox::from_id_salt((salt.to_string(), std::any::type_name::<T>()))
+            .width(width)
+            .height(400.0)
+            .selected_text(name(*v))
+            .show_ui(ui, |ui| {
+                for &o in all {
+                    if ui.selectable_label(*v == o, name(o)).clicked() && *v != o {
+                        *v = o;
+                        changed = true;
+                    }
+                }
+            });
+    });
+    changed
 }

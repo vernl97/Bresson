@@ -1,5 +1,5 @@
-//! The roll's thumbnail grid: justified rows shaped like the frames, frame
-//! numbers, pick / reject marks, a "needs a look" check, filters, box
+//! The roll's thumbnail grid: uniform cells like Lightroom's, each with its
+//! picture centred in its own shape, frame numbers, pick / reject marks, a "needs a look" check, filters, box
 //! selection, hover actions, negatives on demand and a quick look.
 
 use std::collections::BTreeSet;
@@ -65,8 +65,12 @@ enum CellAction {
 /// visible-first loading.
 pub const GRID_VISIBLE: &str = "grid_visible";
 
-const GAP: f32 = 12.0;
-const NAME_H: f32 = 24.0;
+const GAP: f32 = 1.0;
+/// Header strip of a cell (frame number, name) and footer strip (status, actions).
+const HEADER_H: f32 = 26.0;
+const FOOTER_H: f32 = 24.0;
+/// Padding between the picture and the cell edge.
+const PICTURE_PAD: f32 = 10.0;
 /// Clipped share of the print that earns a "needs a look".
 const CLIP_WHITE: f32 = 0.03;
 const CLIP_BLACK: f32 = 0.06;
@@ -85,7 +89,7 @@ impl NlpApp {
     }
 
     /// Median mean-green density of the converted frames (four or more).
-    fn roll_density(&self) -> Option<f64> {
+    pub(super) fn roll_density(&self) -> Option<f64> {
         let mut d: Vec<f64> = self
             .frames
             .iter()
@@ -100,7 +104,7 @@ impl NlpApp {
     }
 
     /// Why frame `i` deserves a closer look (empty when it looks fine).
-    fn look_issues(&self, i: usize, roll_density: Option<f64>) -> Vec<String> {
+    pub(super) fn look_issues(&self, i: usize, roll_density: Option<f64>) -> Vec<String> {
         let f = &self.frames[i];
         let mut out = Vec::new();
         let Some(a) = f.sc.analysis.as_ref() else {
@@ -299,7 +303,14 @@ impl NlpApp {
             return;
         }
         let now = ui.input(|i| i.time);
-        let target_h = (self.thumb_size * 0.62).round();
+        // Pinch or Ctrl/Cmd + scroll over the grid resizes the thumbnails,
+        // like the slider in the top bar.
+        if ui.rect_contains_pointer(ui.max_rect()) {
+            let z = ui.input(|i| i.zoom_delta());
+            if z != 1.0 {
+                self.thumb_size = (self.thumb_size * z).clamp(110.0, 340.0);
+            }
+        }
         let mut clicked: Option<(usize, egui::Modifiers)> = None;
         let mut double: Option<usize> = None;
         let mut ctx_action: Option<(usize, CellAction)> = None;
@@ -314,7 +325,11 @@ impl NlpApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let w = ui.available_width();
-                // Justified rows: frames keep their shape, each row fills the width.
+                // Uniform square cells, as many columns as fit; the picture
+                // sits centred in its cell with its own shape.
+                let cols = ((w / self.thumb_size).floor() as usize).max(1);
+                let cell_w = (w - GAP * (cols - 1) as f32) / cols as f32;
+                let cell_h = cell_w + HEADER_H + FOOTER_H;
                 let aspect = |i: usize| {
                     let f = &self.frames[i];
                     let t = if negatives {
@@ -331,43 +346,35 @@ impl NlpApp {
                         None => 1.5,
                     }
                 };
-                let mut rows: Vec<(Vec<usize>, f32)> = Vec::new();
-                let mut row: Vec<usize> = Vec::new();
-                let mut sum = 0.0;
-                for &i in &shown {
-                    row.push(i);
-                    sum += aspect(i);
-                    let natural = sum * target_h + GAP * (row.len() - 1) as f32;
-                    if natural >= w {
-                        let h = (w - GAP * (row.len() - 1) as f32) / sum;
-                        rows.push((std::mem::take(&mut row), h));
-                        sum = 0.0;
-                    }
-                }
-                if !row.is_empty() {
-                    rows.push((row, target_h));
-                }
+                let nrows = shown.len().div_ceil(cols);
                 // Room under the last row so the selection bar never covers it.
-                let height: f32 =
-                    rows.iter().map(|r| r.1 + NAME_H + GAP).sum::<f32>() + SELECTION_BAR_ROOM;
+                let height = nrows as f32 * (cell_h + GAP) + SELECTION_BAR_ROOM;
                 let (content, bg) = ui.allocate_exact_size(
                     vec2(w, height.max(ui.available_height())),
                     Sense::click_and_drag(),
                 );
+                ui.painter().rect_filled(content, 0.0, theme::BG);
 
-                let mut y = content.top();
-                for (r, (items, h)) in rows.iter().enumerate() {
-                    let mut x = content.left();
-                    for &i in items {
-                        let iw = aspect(i) * h;
-                        let img = Rect::from_min_size(pos2(x, y), vec2(iw, *h));
-                        let cell =
-                            Rect::from_min_max(img.min, pos2(img.right(), img.bottom() + NAME_H));
-                        x += iw + GAP;
+                for (r, items) in shown.chunks(cols).enumerate() {
+                    let y = content.top() + r as f32 * (cell_h + GAP);
+                    for (c, &i) in items.iter().enumerate() {
+                        let x = content.left() + c as f32 * (cell_w + GAP);
+                        let cell = Rect::from_min_size(pos2(x, y), vec2(cell_w, cell_h));
+                        let area = Rect::from_min_max(
+                            cell.min + vec2(0.0, HEADER_H),
+                            cell.max - vec2(0.0, FOOTER_H),
+                        )
+                        .shrink(PICTURE_PAD);
+                        let a = aspect(i);
+                        let fit = vec2(
+                            area.width().min(area.height() * a),
+                            area.height().min(area.width() / a),
+                        );
+                        let img = Rect::from_center_size(area.center(), fit);
                         cells.push(Cell {
                             idx: i,
                             row: r,
-                            cx: img.center().x,
+                            cx: cell.center().x,
                         });
                         marquee_hits.push((i, cell));
                         if scroll_to == Some(i) {
@@ -379,9 +386,9 @@ impl NlpApp {
                         visible.push(i);
                         let resp = ui.interact(cell, ui.id().with(("cell", i)), Sense::click());
                         self.paint_cell(ui, i, img, cell, &resp, negatives, density, now);
-                        // Hover actions over the picture.
-                        if (resp.hovered() || ui.rect_contains_pointer(img))
-                            && let Some(a) = hover_buttons(ui, i, img, self.frames[i].sc.flag)
+                        // Hover actions in the footer strip.
+                        if (resp.hovered() || ui.rect_contains_pointer(cell))
+                            && let Some(a) = hover_buttons(ui, i, cell, self.frames[i].sc.flag)
                         {
                             hover_action = Some((i, a));
                         }
@@ -442,7 +449,6 @@ impl NlpApp {
                             item(ui, "Unconvert", "", CellAction::Unconvert, true);
                         });
                     }
-                    y += h + NAME_H + GAP;
                 }
 
                 // Box selection: drag from anywhere that isn't a button.
@@ -565,14 +571,32 @@ impl NlpApp {
         let sel = self.selected.contains(&i);
         let p = ui.painter();
         let rejected = f.sc.flag == Flag::Reject;
+        let active = sel && self.active == Some(i);
+        let fill = if active {
+            Color32::from_rgb(78, 78, 84)
+        } else if sel {
+            theme::PRESSED
+        } else if resp.hovered() {
+            theme::HOVER
+        } else {
+            theme::SURFACE
+        };
+        p.rect_filled(cell, 0.0, fill);
         let tex = if negatives {
             f.thumb_neg.as_ref().or(f.thumb.as_ref())
         } else {
             f.thumb.as_ref()
         };
+        if tex.is_some() {
+            p.rect_filled(
+                img.translate(vec2(1.0, 1.0)),
+                0.0,
+                Color32::from_black_alpha(70),
+            );
+        }
         match (tex, &f.proxy) {
             (Some(t), _) => {
-                let mut image = egui::Image::new((t.id(), t.size_vec2())).corner_radius(3.0);
+                let mut image = egui::Image::new((t.id(), t.size_vec2()));
                 if rejected {
                     image = image.tint(Color32::from_gray(80));
                 }
@@ -580,7 +604,7 @@ impl NlpApp {
             }
             (None, ProxyState::Failed(e)) => {
                 resp.clone().on_hover_text(e);
-                p.rect_filled(img, 3.0, theme::PANEL);
+                p.rect_filled(img, 0.0, theme::PANEL);
                 widgets::paint_icon(
                     p,
                     Rect::from_center_size(img.center(), vec2(24.0, 24.0)),
@@ -591,41 +615,25 @@ impl NlpApp {
             _ => {
                 // Loading shimmer.
                 let a = (((now * 2.4 + i as f64 * 0.35).sin() * 0.5 + 0.5) * 10.0) as u8 + 6;
-                p.rect_filled(img, 3.0, Color32::from_white_alpha(a));
+                p.rect_filled(img, 0.0, Color32::from_white_alpha(a));
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
-        if sel {
-            p.rect_stroke(
-                img.expand(3.0),
-                5.0,
-                egui::Stroke::new(2.0, theme::ACCENT),
-                egui::StrokeKind::Outside,
-            );
-        } else if resp.hovered() {
-            p.rect_stroke(
-                img.expand(2.0),
-                4.0,
-                egui::Stroke::new(1.0, Color32::from_white_alpha(40)),
-                egui::StrokeKind::Outside,
-            );
-        }
-
-        // Badges: flag and "needs a look" top-left, lab correction bottom-left.
-        let mut bx = img.left() + 6.0;
-        let badge = |x: f32| Rect::from_min_size(pos2(x, img.top() + 6.0), vec2(20.0, 20.0));
+        // Badges: flag top-left and "needs a look" next to it, in the cell
+        // under the header; lab correction bottom-left of the picture.
+        let mut bx = cell.left() + 6.0;
+        let badge =
+            |x: f32| Rect::from_min_size(pos2(x, cell.top() + HEADER_H + 4.0), vec2(20.0, 20.0));
         match f.sc.flag {
             Flag::Pick => {
                 let r = badge(bx);
-                p.circle_filled(r.center(), 10.0, Color32::from_black_alpha(170));
-                paint_flag(p, r.shrink(4.0), theme::OK, true);
+                paint_flag(p, r.shrink(4.0), theme::TEXT, true);
                 bx += 24.0;
             }
             Flag::Reject => {
                 let r = badge(bx);
-                p.circle_filled(r.center(), 10.0, Color32::from_black_alpha(170));
-                widgets::paint_icon(p, r.shrink(3.0), Icon::Close, theme::ERR);
+                widgets::paint_icon(p, r.shrink(3.0), Icon::Close, theme::TEXT);
                 bx += 24.0;
             }
             Flag::None => {}
@@ -633,8 +641,7 @@ impl NlpApp {
         let issues = self.look_issues(i, density);
         if !issues.is_empty() {
             let r = badge(bx);
-            p.circle_filled(r.center(), 10.0, Color32::from_black_alpha(170));
-            widgets::paint_icon(p, r.shrink(3.0), Icon::Warn, theme::WARN);
+            widgets::paint_icon(p, r.shrink(3.0), Icon::Warn, theme::TEXT);
             ui.interact(r, ui.id().with(("issues", i)), Sense::hover())
                 .on_hover_text(format!("Needs a look\n• {}", issues.join("\n• ")));
         }
@@ -652,9 +659,9 @@ impl NlpApp {
             p.galley(pill.min + vec2(5.0, 2.0), g, theme::TEXT);
         }
 
-        // Label row: frame number, name, status markers on the right.
-        let row_y = cell.bottom() - NAME_H / 2.0 + 1.0;
-        let mut x = cell.right() - 2.0;
+        // Footer: status markers on the right. Header: frame number and name.
+        let row_y = cell.bottom() - FOOTER_H / 2.0;
+        let mut x = cell.right() - 8.0;
         let converting = self.auto.in_flight.contains(&f.path) || self.auto.queue.contains(&f.path);
         let markers_right = x;
         if f.exporting {
@@ -713,23 +720,35 @@ impl NlpApp {
             ui.interact(markers, ui.id().with(("markers", i)), Sense::hover())
                 .on_hover_text(tip.join(" · "));
         }
+        let head_y = cell.top() + HEADER_H / 2.0;
+        let dim = if rejected { 0.6 } else { 1.0 };
         let num = p.layout_no_wrap(
             format!("{:02}", i + 1),
             theme::medium(11.5),
             if sel { theme::TEXT } else { theme::MUTED },
         );
-        let nx = cell.left() + 2.0;
+        let nx = cell.left() + 8.0;
         let num_w = num.size().x;
-        p.galley(pos2(nx, row_y - num.size().y / 2.0), num, theme::MUTED);
-        let name_x = nx + num_w + 6.0;
+        p.galley(
+            pos2(nx, head_y - num.size().y / 2.0),
+            num,
+            theme::MUTED.gamma_multiply(dim),
+        );
+        let name_x = nx + num_w + 8.0;
         let mut job = egui::text::LayoutJob::simple_singleline(
             f.name.clone(),
-            egui::FontId::proportional(11.0),
-            theme::FAINT,
+            egui::FontId::proportional(10.5),
+            theme::MUTED,
         );
-        job.wrap = egui::text::TextWrapping::truncate_at_width((x - name_x - 4.0).max(0.0));
+        job.wrap =
+            egui::text::TextWrapping::truncate_at_width((cell.right() - 8.0 - name_x).max(0.0));
         let g = p.layout_job(job);
-        p.galley(pos2(name_x, row_y - g.size().y / 2.0), g, theme::FAINT);
+        let gx = cell.right() - 8.0 - g.size().x;
+        p.galley(
+            pos2(gx, head_y - g.size().y / 2.0),
+            g,
+            theme::MUTED.gamma_multiply(dim),
+        );
     }
 
     /// Space over the grid: the selected frame large, arrows to move, P / X / U
@@ -1103,26 +1122,29 @@ pub fn clip_share(px: &[[f32; 3]]) -> [f32; 2] {
     [w as f32 / n, b as f32 / n]
 }
 
-/// Pick / rotate buttons over a hovered picture; the one clicked.
-fn hover_buttons(ui: &egui::Ui, i: usize, img: Rect, flag: Flag) -> Option<CellAction> {
-    if img.width() < 90.0 {
+/// Pick / rotate buttons in a hovered cell's footer; the one clicked.
+fn hover_buttons(ui: &egui::Ui, i: usize, cell: Rect, flag: Flag) -> Option<CellAction> {
+    if cell.width() < 90.0 {
         return None;
     }
     let mut out = None;
-    let size = 22.0;
-    let mut x = img.right() - 6.0 - size;
+    let size = 20.0;
+    let mut x = cell.left() + 6.0;
     let picked = flag == Flag::Pick;
     let buttons = [
-        (CellAction::Rotate(true), "Rotate right"),
         (CellAction::Rotate(false), "Rotate left"),
+        (CellAction::Rotate(true), "Rotate right"),
         (
             CellAction::Flag(if picked { Flag::None } else { Flag::Pick }),
             if picked { "Unflag (U)" } else { "Pick (P)" },
         ),
     ];
     for (k, (act, tip)) in buttons.into_iter().enumerate() {
-        let r = Rect::from_min_size(pos2(x, img.top() + 6.0), vec2(size, size));
-        x -= size + 4.0;
+        let r = Rect::from_min_size(
+            pos2(x, cell.bottom() - (FOOTER_H + size) / 2.0),
+            vec2(size, size),
+        );
+        x += size + 4.0;
         let resp = ui
             .interact(r, ui.id().with(("hover_btn", i, k)), Sense::click())
             .on_hover_text(tip);
@@ -1159,7 +1181,7 @@ fn hover_buttons(ui: &egui::Ui, i: usize, img: Rect, flag: Flag) -> Option<CellA
 }
 
 /// A small pennant flag.
-fn paint_flag(p: &egui::Painter, r: Rect, color: Color32, filled: bool) {
+pub(super) fn paint_flag(p: &egui::Painter, r: Rect, color: Color32, filled: bool) {
     let pole_x = r.left() + r.width() * 0.25;
     let st = egui::Stroke::new(1.5, color);
     p.line_segment([pos2(pole_x, r.top()), pos2(pole_x, r.bottom())], st);
