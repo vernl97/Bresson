@@ -1622,7 +1622,7 @@ mod ui_tests {
         shot(&mut h, &out, "6_editor_crop");
         {
             use egui_kittest::kittest::Queryable;
-            h.get_by_label("Auto").click();
+            h.get_by_label("Detect frame").click();
         }
         settle(&mut h, 30.0);
         shot(&mut h, &out, "7_editor_detect_frame");
@@ -1649,7 +1649,7 @@ mod ui_tests {
         shot(&mut h, &out, "11_export_dialog");
         h.key_press(egui::Key::Escape);
         h.run_steps(3);
-        h.key_press(egui::Key::Space);
+        h.key_press(egui::Key::Escape);
         settle(&mut h, 30.0);
         shot(&mut h, &out, "12_folder_lab_badge");
     }
@@ -1702,7 +1702,7 @@ mod ui_tests {
         settle(&mut h, 20.0);
         shot(&mut h, &out, "t3_editor_before");
         h.key_press(egui::Key::B);
-        h.key_press(egui::Key::Space);
+        h.key_press(egui::Key::Escape);
         settle(&mut h, 20.0);
         {
             let app = h.state_mut();
@@ -1935,19 +1935,19 @@ mod ui_tests {
         if let Some(out) = &out {
             shot(&mut h, out, "bar_picked_no_strip");
         }
-        h.get_by_label("Crop & straighten (C)").click();
+        h.key_press(egui::Key::C);
         h.run_steps(5);
         assert!(h.state().editor.crop.is_some(), "Crop opens crop mode");
         h.key_press(egui::Key::Escape);
         h.run_steps(5);
         assert!(h.state().editor.crop.is_none());
-        h.get_by_label("Next frame (→)").click();
+        h.key_press(egui::Key::ArrowRight);
         h.run_steps(5);
         assert_eq!(h.state().active, Some(1));
-        h.get_by_label("Previous frame (←)").click();
+        h.key_press(egui::Key::ArrowLeft);
         h.run_steps(5);
         assert_eq!(h.state().active, Some(0));
-        h.get_by_label("Previous frame (←)").click();
+        h.key_press(egui::Key::ArrowLeft);
         h.run_steps(5);
         assert_eq!(
             h.state().active,
@@ -2118,7 +2118,7 @@ mod ui_tests {
         settle(&mut h, 60.0);
         h.state_mut().open_editor(0);
         settle(&mut h, 60.0);
-        h.key_press(egui::Key::Space);
+        h.key_press(egui::Key::Escape);
         h.run_steps(3);
         assert!(h.state().view == View::Folder && !h.state().frames.is_empty());
     }

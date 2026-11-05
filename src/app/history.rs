@@ -21,13 +21,11 @@ pub struct History {
 
 impl History {
     /// Whether `path` has an edit to undo.
-    #[cfg(test)]
     pub fn can_undo_for(&self, path: &Path) -> bool {
         self.undo.iter().flatten().any(|(p, _)| p == path)
     }
 
     /// Whether `path` has an undone edit to redo.
-    #[cfg(test)]
     pub fn can_redo_for(&self, path: &Path) -> bool {
         self.redo.iter().flatten().any(|(p, _)| p == path)
     }

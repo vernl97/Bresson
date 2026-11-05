@@ -417,7 +417,10 @@ impl NlpApp {
                             .as_ref()
                             .map(|r| r.metadata.film_stock.clone())
                             .filter(|s| !s.trim().is_empty());
-                        if let Some(stock) = stock {
+                        // The chip is always there: with no stock yet it invites one.
+                        let empty = stock.is_none();
+                        let stock = stock.unwrap_or_else(|| "Add film stock".to_string());
+                        {
                             // A chip like the editor's, with a chevron: it opens the dialog.
                             const CHEVRON_W: f32 = 12.0;
                             let font = egui::TextStyle::Small.resolve(ui.style());
@@ -432,6 +435,8 @@ impl NlpApp {
                             let hot = resp.hovered();
                             let (fill, ink) = if hot {
                                 (theme::HOVER, theme::TEXT)
+                            } else if empty {
+                                (theme::SURFACE, theme::FAINT)
                             } else {
                                 (theme::SURFACE, theme::MUTED)
                             };
@@ -459,7 +464,11 @@ impl NlpApp {
                             }
                             if resp
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .on_hover_text("Film stock · click for roll info")
+                                .on_hover_text(if empty {
+                                    "Add a film stock · click for roll info"
+                                } else {
+                                    "Film stock · click for roll info"
+                                })
                                 .clicked()
                             {
                                 self.open_roll_dialog(&f, false);

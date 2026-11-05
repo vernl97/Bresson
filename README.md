@@ -55,12 +55,12 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
   - Right: before/after (B; ⇧B for a split view with a draggable divider), rotate, flip, crop/straighten (C), export.
 - J shows clipping: red where a channel is blown, blue where the shadows are blocked. The histogram marks clipped channels in its corners.
 - Hovering the image shows the output RGB and the negative's density above the film base.
-- Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. The lock next to the aspect ratio dropdown keeps the crop at the chosen ratio (Original by default; 1:1, 1:2, 2:3, 3:4, 4:5, 5:7, 8.5:11, 9:16); unlock it for a free-form crop. Auto finds the frame inside the film rebate and holder and crops it to the same shape. Reset Crop / Cancel (Esc) / Apply (Enter).
+- Crop mode: the bar under the picture becomes the crop bar and the sidebar stays as it is. Drag the frame edges and corners on the canvas; the aspect dropdown (Original by default; Free, 1:1, 1:2, 2:3, 3:4, 4:5, 5:7, 8.5:11, 9:16) sets the shape, and the swap button turns it between portrait and landscape. Rotate and flip sit beside it. Straighten with the ruler (centred on 0), type an angle, or draw a line along something that should be level. Detect frame finds the frame inside the film rebate and holder. Reset / Cancel (Esc) / Done (Enter).
 - A single-column sidebar, with a histogram on top (the crop tool is just under it):
   - **Histogram**: a Histogram / Curves toggle. The histogram marks clipped channels and its regions drag Blacks, Shadows, Exposure, Highlights and Whites.
   - **Basic**: the tone profile, white balance (presets, a neutral eyedropper, Temp and Tint, stored as yellow and magenta filtration), Exposure, Midtones, Contrast, Highlights, Shadows, Whites and Blacks.
   - **Colour**: colour toning for midtones, highlights and shadows, a look (LUT) with its amount, and look saturation.
-  - **Finishing** (closed until opened): Glow/Fade, White/Black point, and Burn / Dodge for large areas (the Hyper Tone local burning and dodging, off by default).
+  - **Finishing** (closed until opened): Glow/Fade and Burn / Dodge for large areas (the Hyper Tone local burning and dodging, off by default).
   - Each section header marks edits and resets just that section.
   - The bar at the bottom holds Convert while the frame needs it, otherwise Copy from last (the settings of the frame you edited before) and Reset. The top bar shows the roll, frame and film stock, with Export and the ⋯ menu in its corner: copy / paste settings, save / apply default, **Film & roll…** (film stock, ISO, developer and camera details for the EXIF and file name tokens, *Apply to roll/folder*, *Use roll analysis* and the roll process), keyboard shortcuts, Re-convert and Unconvert.
   - Sharpening (Lab or Scanner) is set in the export dialog.

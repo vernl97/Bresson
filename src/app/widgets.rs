@@ -490,11 +490,8 @@ pub mod grad {
 pub enum Icon {
     /// Four squares: the roll's grid view.
     Grid,
-    Crop,
     RotateLeft,
     RotateRight,
-    Lock,
-    Unlock,
     Eyedropper,
     Folder,
     Warn,
@@ -505,10 +502,16 @@ pub enum Icon {
     /// View toggles of the editor's bottom bar.
     Before,
     Split,
-    Clipping,
     Flag,
     /// Back to the default value: an arrow turning anticlockwise.
     Reset,
+    /// Undo and redo: the reset arrow, pointing back and forth.
+    Undo,
+    Redo,
+    /// Crop bar: portrait / landscape swap, mirror, and the level line.
+    Swap,
+    Flip,
+    Level,
 }
 
 fn arc(c: egui::Pos2, r: f32, a0: f32, a1: f32, n: usize) -> Vec<egui::Pos2> {
@@ -584,32 +587,20 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 Stroke::NONE,
             ));
         }
-        Icon::Clipping => {
-            // A frame with its two top corners filled: the clipping corners
-            // of the histogram, shadows left and highlights right.
-            let r = Rect::from_center_size(c, vec2(16.0 * s, 13.0 * s));
-            p.rect_stroke(r, 1.0, st, egui::StrokeKind::Middle);
-            let leg = 7.0 * s;
-            for (corner, dir) in [(r.left_top(), 1.0), (r.right_top(), -1.0)] {
-                p.add(Shape::convex_polygon(
-                    vec![
-                        corner,
-                        corner + vec2(dir * leg, 0.0),
-                        corner + vec2(0.0, leg),
-                    ],
-                    color,
-                    Stroke::NONE,
-                ));
-            }
-        }
-        Icon::Reset => {
+        Icon::Reset | Icon::Undo | Icon::Redo => {
+            // Undo mirrors the reset arrow to point left; redo keeps it pointing right.
+            let flip = if icon == Icon::Undo { -1.0 } else { 1.0 };
+            let at = |x: egui::Pos2| pos2(c.x + flip * (x.x - c.x), x.y);
             let r = 5.0 * s;
             let (a0, a1) = (-2.4f32, 2.2f32);
-            p.add(Shape::line(arc(c, r, a0, a1, 18), st));
-            let tip = c + r * vec2(a0.cos(), a0.sin());
+            p.add(Shape::line(
+                arc(c, r, a0, a1, 18).into_iter().map(at).collect(),
+                st,
+            ));
+            let tip = at(c + r * vec2(a0.cos(), a0.sin()));
             let h = 3.0 * s;
             p.add(Shape::line(
-                vec![tip + vec2(0.0, -h), tip, tip + vec2(h, 0.0)],
+                vec![tip + vec2(0.0, -h), tip, tip + vec2(flip * h, 0.0)],
                 st,
             ));
         }
@@ -619,28 +610,6 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 vec![q(-5.0, -8.0), q(7.0, -4.0), q(-5.0, 0.0)],
                 st,
             ));
-        }
-        Icon::Lock | Icon::Unlock => {
-            let locked = icon == Icon::Lock;
-            let body = Rect::from_min_max(q(-6.0, -1.0), q(6.0, 8.0));
-            p.rect_stroke(body, 1.5, st, egui::StrokeKind::Middle);
-            let lift = if locked { 0.0 } else { -3.0 };
-            let mut pts = arc(
-                q(0.0, -1.0 + lift),
-                4.0 * s,
-                std::f32::consts::PI,
-                std::f32::consts::TAU,
-                10,
-            );
-            if locked {
-                pts.push(q(4.0, -1.0));
-            }
-            pts.insert(0, q(-4.0, -1.0));
-            p.add(line(pts));
-        }
-        Icon::Crop => {
-            p.add(line(vec![q(-4.0, -8.0), q(-4.0, 4.0), q(8.0, 4.0)]));
-            p.add(line(vec![q(-8.0, -4.0), q(4.0, -4.0), q(4.0, 8.0)]));
         }
         Icon::Folder => {
             p.add(Shape::closed_line(
@@ -680,6 +649,42 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Close => {
             p.line_segment([q(-5.0, -5.0), q(5.0, 5.0)], st);
             p.line_segment([q(-5.0, 5.0), q(5.0, -5.0)], st);
+        }
+        Icon::Swap => {
+            // A landscape frame and a portrait one, overlapping.
+            p.rect_stroke(
+                Rect::from_min_max(q(-8.0, -2.0), q(3.0, 5.0)),
+                1.0,
+                st,
+                egui::StrokeKind::Middle,
+            );
+            p.rect_stroke(
+                Rect::from_min_max(q(-1.0, -7.0), q(6.0, 4.0)),
+                1.0,
+                st,
+                egui::StrokeKind::Middle,
+            );
+        }
+        Icon::Flip => {
+            // Two halves of a frame about a dashed mirror line.
+            for k in 0..4 {
+                let y = -7.0 + 4.0 * k as f32;
+                p.line_segment([q(0.0, y), q(0.0, y + 2.4)], st);
+            }
+            p.add(Shape::closed_line(
+                vec![q(-2.0, -5.0), q(-8.0, 6.0), q(-2.0, 6.0)],
+                st,
+            ));
+            p.add(Shape::closed_line(
+                vec![q(2.0, -5.0), q(8.0, 6.0), q(2.0, 6.0)],
+                st,
+            ));
+        }
+        Icon::Level => {
+            // A baseline and a tilted line from its end, with the angle between.
+            p.line_segment([q(-8.0, 5.0), q(8.0, 5.0)], st);
+            p.line_segment([q(-8.0, 5.0), q(7.0, -4.0)], st);
+            p.add(line(arc(q(-8.0, 5.0), 8.0 * s, -0.55, 0.0, 8)));
         }
         Icon::Reject => {
             p.circle_stroke(c, 7.0 * s, st);
@@ -779,37 +784,6 @@ fn sized_icon_button(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp.on_hover_text(tip)
-}
-
-/// An icon button that opens a tool rather than switching something on: wider,
-/// outlined and bright, so it doesn't read as one of the toggles beside it (a
-/// toggle that's on is a plain fill).
-pub fn tool_button(ui: &mut Ui, icon: Icon, tip: &str) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(44.0, 28.0), Sense::click());
-    let fill = if resp.is_pointer_button_down_on() {
-        theme::PRESSED
-    } else if resp.hovered() {
-        theme::HOVER
-    } else {
-        theme::SURFACE
-    };
-    let p = ui.painter();
-    p.rect_filled(rect, 6.0, fill);
-    p.rect_stroke(
-        rect,
-        6.0,
-        egui::Stroke::new(1.0, theme::SLIDER_TRACK),
-        egui::StrokeKind::Inside,
-    );
-    paint_icon(
-        p,
-        Rect::from_center_size(rect.center(), egui::vec2(20.0, 20.0)),
-        icon,
-        theme::TEXT,
-    );
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
-    resp.on_hover_text(tip)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The app's dropdown: a filled box with the sections' thin chevron.
@@ -1328,28 +1302,6 @@ pub fn segmented_locked<T: Copy + PartialEq>(
 /// is remembered per title.
 pub fn fold_with(ui: &mut Ui, title: &str, default_open: bool) -> bool {
     fold_section(ui, title, default_open, false).0
-}
-
-/// A section header's band and title for a panel that doesn't collapse.
-pub fn panel_header(ui: &mut Ui, title: &str) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::hover());
-    let band = bleed(rect);
-    let p = ui
-        .painter()
-        .with_clip_rect(band.expand2(egui::vec2(0.0, 2.0)));
-    p.rect_filled(band, 0.0, theme::BG);
-    p.hline(
-        band.x_range(),
-        band.bottom() - 0.5,
-        egui::Stroke::new(1.0, Color32::from_rgb(46, 46, 50)),
-    );
-    p.text(
-        rect.right_center() - egui::vec2(18.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        title,
-        theme::medium(14.5),
-        theme::TEXT,
-    );
 }
 
 /// The next section header follows flush, with no open-section spacing.

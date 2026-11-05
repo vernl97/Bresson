@@ -49,10 +49,7 @@ impl NlpApp {
                 "Editor",
                 vec![
                     ("← →".into(), "Previous / next frame"),
-                    (
-                        format!("{} {}", k(none, Key::Space), k(none, Key::Escape)),
-                        "Back to the roll",
-                    ),
+                    (k(none, Key::Escape), "Back to the roll"),
                     (k(none, Key::B), "Before / after"),
                     (k(shift, Key::B), "Split view"),
                     (k(none, Key::J), "Show clipping"),
