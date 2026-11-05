@@ -325,8 +325,6 @@ struct ChannelCurve {
     kind: ImageType,
     /// The analysed density range and neutral curve.
     levels: ChannelLevels,
-    /// Black and white clip, as fractions of the range.
-    clip: (f64, f64),
     gamma: f64,
     /// Mid-tone colour gamma of this channel.
     mid_gamma: f64,
@@ -349,8 +347,6 @@ impl ChannelCurve {
     fn new(l: &Levels, s: &Settings, c: usize) -> Self {
         let (auto_tone, _) = profile(s.tone_profile);
         let kind = s.image_type;
-        // Clip moves the black / white end into the range (− recovers).
-        let clip = (s.black_clip as f64 * 0.006, s.white_clip as f64 * 0.006);
         let auto = if auto_tone && kind == ImageType::Negative {
             auto_gamma(l)
         } else {
@@ -370,7 +366,6 @@ impl ChannelCurve {
         Self {
             kind,
             levels: l[c],
-            clip,
             gamma: auto * brightness,
             mid_gamma: 2f64.powf(f(mid) / 75.0 * 0.5),
             whites: f(s.whites) - f(s.glow),
@@ -394,20 +389,21 @@ impl ChannelCurve {
 
     /// Normalised density: 0 prints black, 1 prints white.
     fn normalised(&self, d: f64) -> f64 {
-        let x = match self.kind {
+        match self.kind {
             ImageType::Negative => self.levels.normalise(d),
             ImageType::Positive => 1.0 - self.levels.normalise(d),
             // Already positive: d is −log10 of the linear value.
-            ImageType::EditOnly => return color::srgb_encode(10f64.powf(-d) as f32) as f64,
-        };
-        let (b, w) = self.clip;
-        (x - b) / (1.0 - b - w).max(1e-3)
+            ImageType::EditOnly => color::srgb_encode(10f64.powf(-d) as f32) as f64,
+        }
     }
 
     /// Shaped tone before the paper (1 = white).
     fn tone(&self, d: f64) -> f64 {
         let mut x = self.normalised(d);
-        x = x * (1.0 + self.whites * 0.006) + self.blacks * 0.004 * (1.0 - x);
+        // A straight line pinned at black by Whites and at white by Blacks;
+        // at least a tenth of the slope is kept, so it can never invert.
+        let slope = (1.0 + self.whites * 0.006 - self.blacks * 0.004).max(0.1);
+        x = x * slope + self.blacks * 0.004;
         x = pow_ext(x, self.gamma * self.mid_gamma);
         x += self.highlights * highlight_bump(x, 5.0);
         x += self.shadows * shadow_bump(x, 5.0);
@@ -798,8 +794,8 @@ mod tests {
         let s = Settings {
             highlights: 50.0,
             shadows: -50.0,
-            whites: 50.0,
-            blacks: -50.0,
+            whites: 100.0,
+            blacks: -100.0,
             contrast: 50.0,
             high_cyan: 75.0,
             shadow_temp: -75.0,
@@ -808,6 +804,24 @@ mod tests {
         let lut = CurveLut::new(&l, &s);
         for c in 0..3 {
             assert!(lut.lut[c].windows(2).all(|w| w[1] >= w[0]));
+        }
+    }
+
+    /// Whites and Blacks pulled together at full travel, with Glow and Fade on
+    /// top, flatten the print but never invert it.
+    #[test]
+    fn whites_and_blacks_never_invert_the_curve() {
+        let l = levels();
+        let s = Settings {
+            whites: -100.0,
+            blacks: 100.0,
+            glow: 50.0,
+            fade: 50.0,
+            ..Settings::default()
+        };
+        for c in 0..3 {
+            let cc = ChannelCurve::new(&l, &s, c);
+            assert!(cc.tone(l[c].hi) > cc.tone(l[c].lo));
         }
     }
 

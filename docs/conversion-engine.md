@@ -407,9 +407,8 @@ value `srgb_encode(10^−d)`.
 For each channel, density `d` goes through:
 
 ```
-x  = normalised(d)                              # with clip:
-x  = (x − bc) / (1 − bc − wc)                   # bc = black_clip·0.006, wc = white_clip·0.006
-x  = x·(1 + whites'·0.006) + blacks'·0.004·(1 − x)
+x  = normalised(d)
+x  = x·max(1 + whites'·0.006 − blacks'·0.004, 0.1) + blacks'·0.004
 x  = pow_ext(x, gamma · mid_gamma_c)            # power on 0..1, straight outside
 x += unfolded(0.10·highlights'/50, 5) · highlight_bump(x, 5)
 x += unfolded(0.10·shadows'/50, 5)    · shadow_bump(x, 5)
@@ -427,7 +426,10 @@ with
 
 - `whites' = whites − glow`, `blacks' = blacks + fade`,
   `highlights' = highlights + glow/1.5`, `shadows' = shadows − fade/1.5`
-  (Glow / Fade are combinations of the four).
+  (Glow / Fade are combinations of the four). The line's slope keeps at least
+  a tenth, so Whites and Blacks can't invert the print. The retired White point
+  and Black point were the same kind of line; `fold_point_sliders` moves stored
+  values into Whites and Blacks when settings load, printing the same.
 - `gamma = auto × brightness`, `brightness = 2^(−brightness/50 · 0.7)`.
   **Auto midtone** (`auto_gamma`, only for Print profiles, which have the auto
   flag, and only on negatives): `ln 0.5 / ln m`, where `m` is the mean

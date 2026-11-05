@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::curve::Levels;
 use super::pipeline::{Analysis, AutoWb, RollBalance};
-use super::settings::{ExportPreset, ExportSettings, FilmMetadata, Settings};
+use super::settings::{ExportPreset, ExportSettings, FilmMetadata, Settings, fold_point_sliders};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RollData {
@@ -107,7 +107,10 @@ pub fn load(image: &Path) -> Option<Sidecar> {
 
 /// Parse a sidecar, keeping whatever part of an older one still applies.
 fn parse(s: &str) -> Option<Sidecar> {
-    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    let mut v: serde_json::Value = serde_json::from_str(s).ok()?;
+    if let Some(settings) = v.get_mut("settings") {
+        fold_point_sliders(settings);
+    }
     let field = |k: &str| v.get(k).cloned().unwrap_or(serde_json::Value::Null);
     let version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
     let current = version >= VERSION;
@@ -348,8 +351,16 @@ pub fn save_roll_info(dir: &Path, info: &RollInfo) -> Result<()> {
 pub fn load_defaults() -> Defaults {
     config_dir()
         .and_then(|d| std::fs::read_to_string(d.join("defaults.json")).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|s| parse_defaults(&s))
         .unwrap_or_default()
+}
+
+fn parse_defaults(s: &str) -> Option<Defaults> {
+    let mut v: serde_json::Value = serde_json::from_str(s).ok()?;
+    if let Some(settings) = v.get_mut("settings") {
+        fold_point_sliders(settings);
+    }
+    serde_json::from_value(v).ok()
 }
 
 pub fn save_defaults(d: &Defaults) -> Result<()> {
@@ -413,6 +424,15 @@ pub fn remove_stale_thumbs(image: &Path, keep: &Path) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stored_point_sliders_load_as_whites_and_blacks() {
+        let json = r#"{"settings": {"white_clip": 50.0, "black_clip": 0.0}}"#;
+        let frame = super::parse(json).unwrap();
+        assert!((frame.settings.whites - 71.43).abs() < 0.01);
+        let defaults = super::parse_defaults(json).unwrap();
+        assert!((defaults.settings.whites - 71.43).abs() < 0.01);
+    }
+
     use super::*;
 
     #[test]

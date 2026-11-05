@@ -265,10 +265,6 @@ pub struct Settings {
     /// below the frame's key, i.e. automatic burning and dodging.
     pub hyper_tone_highlights: f32,
     pub hyper_tone_shadows: f32,
-    /// Moves the white end into the density range (− recovers highlights).
-    pub white_clip: f32,
-    /// Moves the black end into the density range (− recovers shadows).
-    pub black_clip: f32,
 
     // ---- Color ---------------------------------------------------------------
     pub wb_mode: WbMode,
@@ -335,8 +331,6 @@ impl Default for Settings {
             fade: 0.0,
             hyper_tone_highlights: 0.0,
             hyper_tone_shadows: 0.0,
-            white_clip: 0.0,
-            black_clip: 0.0,
             wb_mode: WbMode::AutoNeutral,
             wb_temp: 0.0,
             wb_tint: 0.0,
@@ -598,6 +592,33 @@ pub struct FilmMetadata {
 
 impl FilmMetadata {}
 
+/// Folds the retired White point / Black point of stored settings JSON into
+/// Whites and Blacks. Both pairs are straight lines on the normalised tone,
+/// so the print stays exactly the same. Glow and Fade add to Whites and Blacks
+/// in the curve and are taken back out here. The result can lie beyond the
+/// sliders' travel, which is kept until the slider is moved.
+pub fn fold_point_sliders(settings: &mut serde_json::Value) {
+    let Some(o) = settings.as_object_mut() else {
+        return;
+    };
+    let mut take = |k: &str| o.remove(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let (wc, bc) = (take("white_clip"), take("black_clip"));
+    if wc == 0.0 && bc == 0.0 {
+        return;
+    }
+    let get = |k: &str| o.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let (glow, fade) = (get("glow"), get("fade"));
+    let (whites, blacks) = (get("whites") - glow, get("blacks") + fade);
+    let (b, w) = (bc * 0.006, wc * 0.006);
+    let d = (1.0 - b - w).max(1e-3);
+    // The old curve: x -> (x - b) / d, then slope * x + 0.004 * blacks.
+    let slope = 1.0 + whites * 0.006 - blacks * 0.004;
+    let new_blacks = (0.004 * blacks - slope * b / d) / 0.004;
+    let new_whites = (slope / d - 1.0 + 0.004 * new_blacks) / 0.006;
+    o.insert("whites".into(), (new_whites + glow).into());
+    o.insert("blacks".into(), (new_blacks - fade).into());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,6 +705,46 @@ mod tests {
             initial_key,
             "color_model must alter analysis_key"
         );
+    }
+
+    /// The retired point sliders print the same through Whites and Blacks.
+    #[test]
+    fn point_sliders_fold_into_whites_and_blacks() {
+        let line = |x: f64, whites: f64, blacks: f64| {
+            x * (1.0 + whites * 0.006) + blacks * 0.004 * (1.0 - x)
+        };
+        for (wc, bc, whites, blacks, glow, fade) in [
+            (50.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (-50.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (0.0, 50.0, 0.0, 0.0, 0.0, 0.0),
+            (0.0, -50.0, 0.0, 0.0, 0.0, 0.0),
+            (20.0, -30.0, 15.0, -10.0, 25.0, -40.0),
+        ] {
+            let mut v = serde_json::json!({
+                "white_clip": wc, "black_clip": bc, "whites": whites,
+                "blacks": blacks, "glow": glow, "fade": fade,
+            });
+            fold_point_sliders(&mut v);
+            assert!(v.get("white_clip").is_none() && v.get("black_clip").is_none());
+            let s: Settings = serde_json::from_value(v).unwrap();
+            for i in 0..=10 {
+                let x = i as f64 / 10.0;
+                let (b, w) = (bc * 0.006, wc * 0.006);
+                let clipped = (x - b) / (1.0 - b - w);
+                let old = line(clipped, whites - glow, blacks + fade);
+                let new = line(x, s.whites as f64 - glow, s.blacks as f64 + fade);
+                assert!((old - new).abs() < 1e-4, "{wc} {bc} at {x}: {old} {new}");
+            }
+        }
+    }
+
+    /// Settings without the retired sliders are left alone.
+    #[test]
+    fn folding_leaves_current_settings_alone() {
+        let mut v = serde_json::json!({ "whites": 12.5, "blacks": -7.0 });
+        let before = v.clone();
+        fold_point_sliders(&mut v);
+        assert_eq!(v, before);
     }
 
     #[test]
