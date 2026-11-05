@@ -8,7 +8,7 @@ use eframe::egui::{self, RichText, Sense, vec2};
 
 use super::NlpApp;
 use super::widgets::{self, theme};
-use crate::engine::settings::FilmMetadata;
+use crate::engine::settings::{FilmMetadata, Source};
 use crate::engine::sidecar::{self, RollInfo};
 
 #[derive(Default)]
@@ -30,6 +30,8 @@ pub struct RollDialog {
     pub info: RollInfo,
     /// First open of the folder (title "New roll", Skip instead of Cancel).
     pub new: bool,
+    /// The roll's scan source, when the dialog is for the open roll.
+    pub source: Option<Source>,
 }
 
 /// The film / capture fields in two groups, short fields side by side.
@@ -114,10 +116,14 @@ impl NlpApp {
             name: folder_name(dir),
             ..Default::default()
         });
+        let source = self
+            .main_source()
+            .filter(|_| self.folder.as_deref() == Some(dir));
         self.roll.dialog = Some(RollDialog {
             dir: dir.to_path_buf(),
             info,
             new,
+            source,
         });
     }
 
@@ -130,6 +136,7 @@ impl NlpApp {
                 ..Default::default()
             },
             new: true,
+            source: None,
         });
     }
 
@@ -303,6 +310,17 @@ impl NlpApp {
                     });
                 ui.add_space(4.0);
                 film_fields(ui, "roll_film", &mut d.info.metadata, false);
+                if let Some(source) = d.source.as_mut() {
+                    ui.add_space(4.0);
+                    widgets::fl_combo(
+                        ui,
+                        "Scan source",
+                        source,
+                        Source::ALL,
+                        Source::label,
+                        "Detected from the files. Changing it converts the whole roll again.",
+                    );
+                }
                 ui.add_space(4.0);
                 ui.label(RichText::new("Notes").small().color(theme::MUTED));
                 ui.add(
@@ -327,8 +345,13 @@ impl NlpApp {
             close = true;
         }
         if save {
-            let RollDialog { dir, info, .. } = d;
+            let RollDialog {
+                dir, info, source, ..
+            } = d;
             self.save_roll_info(&dir, info);
+            if let Some(source) = source.filter(|&s| Some(s) != self.main_source()) {
+                self.set_roll_source(source);
+            }
         } else if close {
             // Skipping still writes the roll so the dialog doesn't come back.
             if d.new {

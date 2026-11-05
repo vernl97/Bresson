@@ -32,6 +32,20 @@ fn source_short(s: Source) -> &'static str {
 }
 
 impl NlpApp {
+    /// The source most of the roll's frames use.
+    pub fn main_source(&self) -> Option<Source> {
+        Source::ALL
+            .iter()
+            .copied()
+            .max_by_key(|&s| {
+                self.frames
+                    .iter()
+                    .filter(|f| f.sc.settings.source == s)
+                    .count()
+            })
+            .filter(|_| !self.frames.is_empty())
+    }
+
     /// The roll's scan source, detected from the files: shows what was
     /// found and sets the source of every frame.
     pub fn source_chip(&mut self, ui: &mut egui::Ui) {
@@ -52,6 +66,11 @@ impl NlpApp {
         let Some(&(main, _)) = counts.first() else {
             return;
         };
+        // Detected and rarely changed, so it lives in Roll info. The bar only
+        // shows it when the roll is mixed, or a single file has no roll to open.
+        if counts.len() == 1 && !self.single_mode {
+            return;
+        }
         let text = match counts.len() {
             1 => source_short(main).to_string(),
             n => format!("{} +{}", source_short(main), n - 1),
@@ -330,8 +349,20 @@ impl NlpApp {
         let cmd = egui::Modifiers::COMMAND;
         let key_text = |m, k| RichText::new(widgets::shortcut(&ctx, m, k)).color(theme::FAINT);
         let (picks, needs_look) = self.filter_counts();
-        // The top bar acts on the frames on show; the selection has its own bar.
+        // Export, Convert and the contact sheet act on the selection, or else
+        // on the frames on show. Selection changes their scope, never their place.
         let shown = self.shown_frames();
+        let scope = self.export_scope();
+        let export_label = self.export_label();
+        let skipped = self.rejects_skipped();
+        let convert_targets = if self.selected.is_empty() {
+            shown.clone()
+        } else {
+            self.sel_vec()
+        };
+        let converted = convert_targets
+            .iter()
+            .all(|&i| self.frames[i].sc.is_converted());
         egui::Panel::top("folder_top")
             .exact_size(44.0)
             .frame(
@@ -378,6 +409,7 @@ impl NlpApp {
                                 self.open_roll_dialog(&f, false);
                             }
                         });
+                        // The film stock reads with the name and opens the same dialog.
                         let stock = self
                             .roll
                             .info
@@ -387,10 +419,10 @@ impl NlpApp {
                         if let Some(stock) = stock
                             && ui
                                 .add(
-                                    egui::Button::new(RichText::new(stock).small().color(theme::TEXT))
-                                        .corner_radius(10.0)
-                                        .min_size(vec2(0.0, 20.0)),
+                                    egui::Label::new(RichText::new(stock).color(theme::MUTED))
+                                        .sense(Sense::click()),
                                 )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text("Film stock · click for roll info")
                                 .clicked()
                         {
@@ -422,12 +454,32 @@ impl NlpApp {
                         }
                     }
 
-                    // Right: scanning and the menu.
+                    // Right: what goes into and out of the roll. Export holds the
+                    // far corner in every state; only its label changes.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Actions live in the action bar under the grid; up here
-                        // only scanning into the roll and the menu.
-                        let targets = shown.clone();
                         ui.spacing_mut().item_spacing.x = 6.0;
+                        if !self.frames.is_empty() {
+                            let mut tip = format!(
+                                "Export positive copies ({})",
+                                widgets::shortcut(&ctx, cmd, egui::Key::E)
+                            );
+                            if skipped > 0 {
+                                tip.push_str(&format!(
+                                    "\nLeaves out {skipped} rejected frame{}",
+                                    if skipped == 1 { "" } else { "s" }
+                                ));
+                            }
+                            if ui
+                                .add_enabled(
+                                    !scope.is_empty(),
+                                    widgets::primary(&export_label).min_size(vec2(88.0, 0.0)),
+                                )
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                self.open_export_dialog(scope.clone());
+                            }
+                        }
                         if !self.single_mode
                             && ui
                                 .add(if self.scan.open { widgets::primary("Scan") } else { widgets::ghost("Scan") })
@@ -452,6 +504,46 @@ impl NlpApp {
                             {
                                 self.selected = shown.iter().copied().collect();
                             }
+                            if ui
+                                .add_enabled(
+                                    self.selected.len() == 1,
+                                    egui::Button::new("Copy settings")
+                                        .shortcut_text(key_text(cmd, egui::Key::C)),
+                                )
+                                .on_disabled_hover_text("Select one frame to copy from")
+                                .clicked()
+                            {
+                                self.copy_settings();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.clipboard.is_some() && !self.selected.is_empty(),
+                                    egui::Button::new("Paste settings")
+                                        .shortcut_text(key_text(cmd, egui::Key::V)),
+                                )
+                                .on_disabled_hover_text("Copy a frame's settings, then select where to paste them")
+                                .clicked()
+                            {
+                                self.paste_settings();
+                            }
+                            ui.separator();
+                            if ui
+                                .add_enabled(
+                                    !convert_targets.is_empty(),
+                                    egui::Button::new(if converted { "Re-convert…" } else { "Convert…" }),
+                                )
+                                .on_hover_text("Analyse the selection, or else the frames on show, with new conversion options")
+                                .clicked()
+                            {
+                                self.open_convert_for(convert_targets.clone());
+                            }
+                            if ui
+                                .add_enabled(!scope.is_empty(), egui::Button::new("Contact sheet"))
+                                .on_hover_text("Save a JPEG contact sheet of the same frames Export would take, in the NLP folder")
+                                .clicked()
+                            {
+                                self.make_contact_sheet(scope.clone());
+                            }
                             ui.separator();
                             let mut neg = self.grid.negatives;
                             if ui
@@ -463,14 +555,6 @@ impl NlpApp {
                                 neg = !neg;
                                 self.grid.negatives = neg;
                             }
-                            if ui
-                                .button("Contact sheet")
-                                .on_hover_text("Save a JPEG contact sheet of the frames on show in the NLP folder")
-                                .clicked()
-                            {
-                                self.make_contact_sheet(targets.clone());
-                            }
-                            ui.separator();
                             if ui
                                 .add(egui::Button::new("Keyboard shortcuts").shortcut_text(RichText::new("?").color(theme::FAINT)))
                                 .clicked()
@@ -490,7 +574,7 @@ impl NlpApp {
         self.banners_ui(ui);
 
         egui::Panel::bottom("folder_status")
-            .exact_size(28.0)
+            .exact_size(34.0)
             .frame(
                 egui::Frame::new()
                     .fill(theme::PANEL)
@@ -498,26 +582,25 @@ impl NlpApp {
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let conv = self.frames.iter().filter(|f| f.sc.is_converted()).count();
-                    let status = format!("{} frames · {} converted", self.frames.len(), conv);
-                    ui.label(RichText::new(status).small().color(theme::MUTED));
-                    if self.selected.is_empty() {
-                        ui.label(
-                            RichText::new(
-                                "· Click or drag to select · Space to preview · ? for shortcuts",
-                            )
-                            .small()
-                            .color(theme::FAINT),
-                        );
+                    // Left: what's selected and what to do with it, or a hint.
+                    if !self.selected.is_empty() {
+                        self.selection_strip_ui(ui);
+                    } else if !self.frames.is_empty() {
+                        let waiting = self.frames.iter().filter(|f| !f.sc.is_converted()).count();
+                        let hint = if waiting > 0 && !self.auto.busy() {
+                            format!("{waiting} not converted · Space to preview · ? for shortcuts")
+                        } else {
+                            "Space to preview · ? for shortcuts".to_string()
+                        };
+                        ui.label(RichText::new(hint).small().color(theme::MUTED));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let tiny =
-                            |t: &str| RichText::new(t.to_owned()).small().color(theme::FAINT);
-                        ui.label(tiny("Large"));
+                            |t: &str| RichText::new(t.to_owned()).small().color(theme::MUTED);
                         widgets::mini_slider(ui, &mut self.thumb_size, 110.0..=340.0, 90.0)
                             .on_hover_text("Thumbnail size");
-                        ui.label(tiny("Small"));
+                        ui.label(tiny("Size"));
                         let (done, total) = (self.auto.convert_done, self.auto.convert_total);
                         if self.auto.busy() || done < total {
                             ui.add_space(12.0);
@@ -589,7 +672,6 @@ impl NlpApp {
                     });
                 } else {
                     self.grid(ui);
-                    self.selection_bar_ui(ui);
                     self.quick_look_ui(ui);
                 }
             });
@@ -685,12 +767,7 @@ impl NlpApp {
             self.paste_settings();
         }
         if export {
-            let idx = if self.selected.is_empty() {
-                self.shown_frames()
-            } else {
-                self.sel_vec()
-            };
-            self.open_export_dialog(idx);
+            self.open_export_dialog(self.export_scope());
         }
         if let Some(key) = super::lab_key(ctx).filter(|_| self.export_targets.is_none()) {
             let sel = self.sel_vec();
@@ -905,6 +982,13 @@ impl NlpApp {
         });
     }
 
+    /// The Convert dialog for `targets`, balancing them as a roll by default
+    /// only when they are the whole roll: a few frames make a poor roll.
+    pub fn open_convert_for(&mut self, targets: Vec<usize>) {
+        let whole = targets.len() == self.frames.len();
+        self.open_convert_dialog(targets, whole);
+    }
+
     pub fn convert_dialog_ui(&mut self, ctx: &egui::Context) {
         let Some(mut d) = self.convert_dialog.take() else {
             return;
@@ -934,6 +1018,12 @@ impl NlpApp {
                     .first()
                     .and_then(|&i| self.frames[i].path.parent().map(|p| p.to_path_buf()));
                 conversion_fields(ui, &mut d.settings, start.as_deref());
+                if count > 1 {
+                    ui.add_space(4.0);
+                    widgets::checkbox(ui, &mut d.as_roll, "Balance as a roll").on_hover_text(
+                        "Analyse the frames together for one consistent roll balance",
+                    );
+                }
                 if d.as_roll {
                     widgets::fl_combo(
                         ui,

@@ -26,14 +26,14 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
 
 **Folder View**
 - Browse a folder of RAW and TIFF files as a thumbnail grid. Select with click, ⌘/Ctrl-click, Shift-click or ⌘A; double-click (or Enter) opens the editor.
-- The top bar acts on the selection:
-  - **Convert** / **Convert as roll** (2+ frames) open a dialog with the conversion inputs: source, colour model, film base, flat field, pre-saturation, border buffer, white balance, *Auto-crop frames* and, for rolls, the roll process (Lab: each frame's own colour and density, or Darkroom: one setting for the roll).
-  - **Copy settings** / **Paste settings**: copy the edit from the selected frame and paste it onto the selection (⌘C / ⌘V).
-  - **Export**: positive copies as TIF (8/16-bit, ZIP) or JPG, in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile and EXIF.
+- Actions take the selection, or else the frames on show (with nothing selected, Export and the contact sheet leave rejected frames out):
+  - **Convert** (⋯ menu or right-click) opens a dialog with the conversion inputs: source, colour model, film base, flat field, pre-saturation, border buffer, white balance, *Auto-crop frames* and, with *Balance as a roll* on (2+ frames), the roll process (Lab: each frame's own colour and density, or Darkroom: one setting for the roll).
+  - **Copy settings** / **Paste settings** (⋯ menu or right-click): copy the edit from the selected frame and paste it onto the selection (⌘C / ⌘V).
+  - **Export** (top right): positive copies as TIF (8/16-bit, ZIP) or JPG, in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile and EXIF.
     - Presets: *Lab JPEG M/L* (3000/6000 px) and *Archive TIFF*, plus your own (*Save as…*).
     - Size: full or a long edge of 2000–6000 px.
     - File name template: `{name}`, `{suffix}`, `{n}` / `{n:03}` (position in the export), `{stock}`, `{iso}`, `{date}` (scan date). Clashing names get `-2`, `-3`, ….
-  - **Contact sheet**: the grid's "…" menu saves a JPEG of the selected frames (or all) to `NLP/<folder>_contact_sheet.jpg`: every frame landscape on black with its file name beneath.
+  - **Contact sheet**: the grid's "…" menu saves a JPEG of the same frames Export would take to `NLP/<folder>_contact_sheet.jpg`: every frame landscape on black with its file name beneath.
 - Right-click a frame for open, convert, export, detect frame, copy/paste settings and unconvert.
 - Lab correction keys act on the selected converted frames; the offsets show under each thumbnail (see below).
 
@@ -57,15 +57,14 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
 - J shows clipping: red where a channel is blown, blue where the shadows are blocked. The histogram marks clipped channels in its corners.
 - Hovering the image shows the output RGB and the negative's density above the film base.
 - Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. The lock next to the aspect ratio dropdown keeps the crop at the chosen ratio (Original by default; 1:1, 1:2, 2:3, 3:4, 4:5, 5:7, 8.5:11, 9:16); unlock it for a free-form crop. Auto finds the frame inside the film rebate and holder and crops it to the same shape. Reset Crop / Cancel (Esc) / Apply (Enter).
-- A single-column sidebar with a histogram on top:
-  - Before conversion it shows the conversion inputs (Source, Analysis). Dragging the border buffer slider outlines the analysed area on the canvas. Afterwards they fold into a one-line **Conversion** summary, headed by **Reset settings** and **Copy settings** side by side (Convert returns in their place when the frame is unconverted or its conversion settings changed).
-  - **Tone**: tone profile, Exposure, Brightness, Contrast, Lights, Darks, Whites, Blacks; *Hyper Tone* holds Burn highlights / Dodge shadows (local dodging and burning, off by default); *Glow, fade & clipping* holds Lab Glow/Fade and White/Black clip.
-  - **White balance**: presets, a neutral eyedropper and Temp/Tint (yellow and magenta filtration in CC).
-  - **Colour toning**: mids, highs and shadows.
-  - **Look**: Natural, Frontier, Crystal or Pakon with amount and saturation (skin tones keep their saturation), sharpening (Lab or Scanner; applied on export).
-  - **Film** (collapsed): film stock, ISO, developer and camera details for the EXIF and the file name tokens; *Apply to roll/folder* copies them.
-  - **Analysis** (collapsed): the print curves and each channel's analysed densities. Roll frames get *Use roll analysis* and the roll process.
-  - The ⋯ menu beside them: Re-convert, paste settings, save/apply default and unconvert.
+- A single-column sidebar, with a histogram on top and the crop tool under it:
+  - **Histogram**: a Histogram / Curves toggle. The histogram marks clipped channels and its regions drag Blacks, Darks, Exposure, Lights and Whites.
+  - **Basic**: the tone profile, white balance (presets, a neutral eyedropper, Temp/Tint in CC of yellow and magenta filtration), Exposure, Brightness, Contrast, Lights, Darks, Whites and Blacks.
+  - **Finishing**: Lab Glow/Fade, White/Black clip, and Burn / Dodge (the Hyper Tone local burning and dodging, off by default).
+  - **Colour**: colour toning for mids, highs and shadows, a LUT with its amount, and look saturation.
+  - Each section header marks edits and resets just that section.
+  - The bar at the bottom holds Convert while the frame needs it, otherwise Previous (the settings of the frame you edited before) and Reset, plus the ⋯ menu: Export, copy / paste settings, save / apply default, **Film & roll…** (film stock, ISO, developer and camera details for the EXIF and file name tokens, *Apply to roll/folder*, *Use roll analysis* and the roll process), keyboard shortcuts, Re-convert and Unconvert.
+  - Sharpening (Lab or Scanner) is set in the export dialog.
 - Film-base eyedropper for sampling the unexposed border.
 
 Settings are saved inside the `NLP/` subfolder as `<file>.nlp.json`.

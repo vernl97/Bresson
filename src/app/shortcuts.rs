@@ -59,6 +59,8 @@ impl NlpApp {
                     (k(none, Key::C), "Crop & straighten"),
                     (k(none, Key::H), "Flip horizontally"),
                     (k(none, Key::F), "Show / hide the filmstrip"),
+                    (k(none, Key::I), "Show / hide the image info"),
+                    (k(cmd, Key::E), "Export this frame"),
                     ("P X U".into(), "Pick / reject / unflag"),
                     ("+ −".into(), "Zoom in / out"),
                 ],

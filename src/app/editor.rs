@@ -199,6 +199,8 @@ pub struct Editor {
     px_size: [usize; 2],
     /// Paint clipped highlights red and blocked shadows blue (J).
     pub clip_view: bool,
+    /// Info overlay at the canvas's top left (I).
+    pub info: bool,
     clip_tex: Option<egui::TextureHandle>,
     /// Before/after split view (⇧B), the divider at `split_pos` (0..1).
     pub split: bool,
@@ -259,6 +261,7 @@ impl Default for Editor {
             px: Vec::new(),
             px_size: [0, 0],
             clip_view: false,
+            info: false,
             clip_tex: None,
             split: false,
             split_pos: 0.5,
@@ -344,7 +347,7 @@ impl Section {
             Section::Tone => "Tone",
             Section::WhiteBalance => "White balance",
             Section::Lab => "Lab correction",
-            Section::PrintCharacter => "Print character",
+            Section::PrintCharacter => "Finishing",
             Section::Colour => "Colour",
         }
     }
@@ -799,7 +802,7 @@ impl NlpApp {
                     .fill(theme::PANEL)
                     .inner_margin(egui::Margin::symmetric(10, 0)),
             )
-            .show(ui, |ui| self.toolbar(ui, i, &mut s));
+            .show(ui, |ui| self.toolbar(ui));
 
         // The toolbar may have left the editor (back) or switched frames.
         if self.view != View::Editor || self.editor_index() != Some(i) {
@@ -899,7 +902,51 @@ impl NlpApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::CANVAS))
-            .show(ui, |ui| self.canvas(ui, i));
+            .show(ui, |ui| {
+                self.canvas(ui, i);
+                self.info_overlay(ui, i);
+            });
+    }
+
+    /// The text toggled with I, at the canvas's top left: name, roll and the
+    /// frame's conversion state, as in Lightroom's info overlay.
+    fn info_overlay(&self, ui: &egui::Ui, i: usize) {
+        if !self.editor.info || self.editor.crop.is_some() {
+            return;
+        }
+        let f = &self.frames[i];
+        let s = &f.sc.settings;
+        let mut lines: Vec<String> = vec![f.name.clone()];
+        lines.extend(self.roll_name());
+        if let Some(src) = &self.editor.src {
+            let info = &src.info;
+            lines.push(format!("{} × {} px", info.full_width, info.full_height));
+        }
+        if self.editor.before {
+            lines.push("Before: without slider edits".into());
+        } else if f.sc.is_converted() {
+            if f.is_roll() {
+                lines.push("Roll balance".into());
+            }
+            lines.extend(lab::readout(s));
+            lines.push(s.tone_profile.label().to_string());
+        } else {
+            lines.push("Not converted".into());
+        }
+        let rect = ui.max_rect();
+        let mut pos = rect.left_top() + vec2(16.0, 14.0);
+        let p = ui.painter();
+        for (k, line) in lines.iter().enumerate() {
+            let (font, color) = if k == 0 {
+                (theme::medium(13.5), theme::TEXT)
+            } else {
+                (egui::FontId::proportional(11.5), theme::MUTED)
+            };
+            let g = p.layout_no_wrap(line.clone(), font, color);
+            let h = g.size().y;
+            p.galley(pos, g, color);
+            pos.y += h + 2.0;
+        }
     }
 
     /// Display scale of 100 % relative to the preview's own size.
@@ -1003,7 +1050,7 @@ impl NlpApp {
             let flag = self.frames[i].sc.flag;
             for (f, icon, tip) in [
                 (Flag::Pick, Icon::Flag, "Pick (P)"),
-                (Flag::Reject, Icon::Close, "Reject (X)"),
+                (Flag::Reject, Icon::Reject, "Reject (X)"),
             ] {
                 let on = flag == f;
                 if ib(ui, icon, tip, on) {
@@ -1112,9 +1159,9 @@ impl NlpApp {
                             vec2(11.0, 11.0),
                         );
                         match f.sc.flag {
-                            Flag::Pick => super::grid::paint_flag(p, mark, theme::TEXT, true),
+                            Flag::Pick => super::grid::paint_flag(p, mark, theme::OK, true),
                             Flag::Reject => {
-                                widgets::paint_icon(p, mark, widgets::Icon::Close, theme::TEXT)
+                                widgets::paint_icon(p, mark, widgets::Icon::Reject, theme::ERR)
                             }
                             Flag::None => {}
                         }
@@ -1128,7 +1175,7 @@ impl NlpApp {
                                 ui.painter(),
                                 mark,
                                 widgets::Icon::Warn,
-                                theme::TEXT,
+                                theme::WARN,
                             );
                         }
                         if resp.on_hover_text(&f.name).clicked() && j != i {
@@ -1177,6 +1224,8 @@ impl NlpApp {
                 cmd && inp.key_pressed(egui::Key::CloseBracket),
                 !cmd && inp.key_pressed(egui::Key::H),
                 !cmd && inp.key_pressed(egui::Key::F),
+                !cmd && inp.key_pressed(egui::Key::I),
+                cmd && !inp.modifiers.shift && inp.key_pressed(egui::Key::E),
             ]
         });
         let [
@@ -1201,6 +1250,8 @@ impl NlpApp {
             rot_right,
             flip,
             strip,
+            info,
+            export,
         ] = k;
         if copy {
             self.copy_settings();
@@ -1228,6 +1279,12 @@ impl NlpApp {
         }
         if strip {
             self.editor.filmstrip = !self.editor.filmstrip;
+        }
+        if info {
+            self.editor.info = !self.editor.info;
+        }
+        if export && self.export_targets.is_none() {
+            self.open_export_dialog(vec![i]);
         }
         if let Some(flag) = Self::flag_key(ctx) {
             self.set_flag(&[i], flag);
@@ -1331,79 +1388,20 @@ impl NlpApp {
             })
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
-        let rect = ui.max_rect();
-        // Centred title.
-        let f = &self.frames[i];
-        let sub = if self.editor.crop.is_some() {
-            "Crop & straighten".to_string()
-        } else if self.editor.before {
-            "Before: without slider edits".to_string()
-        } else if f.sc.is_converted() {
-            let mut parts: Vec<String> = Vec::new();
-            parts.extend(self.roll_name());
-            if f.is_roll() {
-                parts.push("roll balance".into());
-            }
-            parts.extend(lab::readout(s));
-            if parts.is_empty() {
-                s.tone_profile.label().to_string()
-            } else {
-                parts.join(" · ")
-            }
-        } else {
-            "Not converted".to_string()
-        };
-        let p = ui.painter();
-        p.text(
-            pos2(rect.center().x, rect.center().y - 7.0),
-            egui::Align2::CENTER_CENTER,
-            &f.name,
-            theme::medium(13.5),
-            theme::TEXT,
-        );
-        p.text(
-            pos2(rect.center().x, rect.center().y + 9.0),
-            egui::Align2::CENTER_CENTER,
-            sub,
-            egui::FontId::proportional(11.5),
-            theme::MUTED,
-        );
-        // Explain the "D+1 C0 …" readout in the subtitle.
-        if lab::readout(s).is_some() && self.editor.crop.is_none() && !self.editor.before {
-            let r = Rect::from_center_size(
-                pos2(rect.center().x, rect.center().y + 9.0),
-                vec2(240.0, 14.0),
-            );
-            ui.interact(r, ui.id().with("lab_readout"), Sense::hover())
-                .on_hover_text(super::LAB_KEYS_HELP);
-        }
-
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             let back_tip = if self.single_mode {
                 "Close image (Space)"
             } else {
-                "Back to folder (Space)"
+                "Grid view (Space)"
             };
-            if icon_button(ui, Icon::Back, back_tip, false, true).clicked() {
+            if widgets::bar_button(ui, Icon::Grid, back_tip, false, true, None).clicked() {
                 self.leave_editor();
                 return;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if widgets::icon_button_tinted(
-                    ui,
-                    Icon::Export,
-                    "Export positive copy",
-                    self.export_targets.is_some() || self.editor.export_open,
-                    true,
-                    Some(theme::ACCENT),
-                )
-                .clicked()
-                {
-                    self.open_export_dialog(vec![i]);
-                }
                 if self.editor.loading || self.jobs.busy() > 0 {
                     ui.add_space(8.0);
                     ui.add(egui::Spinner::new().size(14.0).color(theme::MUTED));
@@ -1856,7 +1854,7 @@ impl NlpApp {
             ui.spacing_mut().item_spacing.x = 0.0;
             let picking = self.editor.pick == Some(pick);
             ui.allocate_ui_with_layout(
-                vec2(widgets::TRACK_INDENT - 7.0, 30.0),
+                vec2(widgets::LABEL_W, 30.0),
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
                     if icon_button(ui, Icon::Eyedropper, tip, picking, enabled).clicked() {
@@ -2002,23 +2000,7 @@ impl NlpApp {
                 "Black point: up = matte, down = deeper",
             );
         }
-        if section(ui, Section::PrintCharacter, s, r, false) {
-            let amount = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
-                fl_slider(ui, l, v, 0.0..=100.0, 0.0, 0, tip, None)
-            };
-            amount(
-                ui,
-                "Burn highlights",
-                &mut s.hyper_tone_highlights,
-                "Holds back large bright areas (sky, window light) while keeping their detail",
-            );
-            amount(
-                ui,
-                "Dodge shadows",
-                &mut s.hyper_tone_shadows,
-                "Opens large dark areas (backlit subjects, shade) while keeping their detail",
-            );
-            widgets::group_divider(ui);
+        if section(ui, Section::PrintCharacter, s, r, true) {
             let tone = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
                 fl_slider(ui, l, v, -50.0..=50.0, 0.0, 0, tip, None)
             };
@@ -2043,6 +2025,22 @@ impl NlpApp {
                 0,
                 "Negative values recover crushed shadows",
                 None,
+            );
+            widgets::group_divider(ui);
+            let amount = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
+                fl_slider(ui, l, v, 0.0..=100.0, 0.0, 0, tip, None)
+            };
+            amount(
+                ui,
+                "Burn",
+                &mut s.hyper_tone_highlights,
+                "Holds back large bright areas (sky, window light) while keeping their detail",
+            );
+            amount(
+                ui,
+                "Dodge",
+                &mut s.hyper_tone_shadows,
+                "Opens large dark areas (backlit subjects, shade) while keeping their detail",
             );
         }
         if section(ui, Section::Colour, s, r, false) {
@@ -2165,6 +2163,18 @@ impl NlpApp {
         let cmd = egui::Modifiers::COMMAND;
         let key = |m, k| RichText::new(widgets::shortcut(&ctx, m, k)).color(theme::FAINT);
         let paste = self.clipboard.is_some();
+        if ui
+            .add(
+                egui::Button::new("Export…")
+                    .shortcut_text(key(cmd, egui::Key::E)),
+            )
+            .on_hover_text("Export a positive copy of this frame")
+            .clicked()
+        {
+            self.open_export_dialog(vec![i]);
+            ui.close();
+        }
+        ui.separator();
         if ui
             .add(egui::Button::new("Copy settings").shortcut_text(key(cmd, egui::Key::C)))
             .clicked()

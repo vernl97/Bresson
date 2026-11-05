@@ -793,6 +793,11 @@ impl NlpApp {
         let mut picked_dir: Option<PathBuf> = None;
         let mut save = false;
         let count = targets.len();
+        let skipped = if matches!(self.view, View::Folder) {
+            self.rejects_skipped()
+        } else {
+            0
+        };
         // The first target, for the file name preview.
         let first = &self.frames[targets[0]];
         let (first_path, first_meta) = (first.path.clone(), first.sc.metadata.clone());
@@ -824,6 +829,16 @@ impl NlpApp {
                         .font(theme::medium(16.0))
                         .color(theme::TEXT),
                 );
+                if skipped > 0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{skipped} rejected frame{} left out. Select a frame to export it anyway.",
+                            if skipped == 1 { "" } else { "s" }
+                        ))
+                        .small()
+                        .color(theme::MUTED),
+                    );
+                }
                 ui.add_space(16.0);
 
                 let ex = &mut self.defaults.export;
@@ -1372,7 +1387,7 @@ impl NlpApp {
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
         egui::Area::new(egui::Id::new("toasts"))
-            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -44.0])
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -96.0])
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
@@ -1791,6 +1806,42 @@ mod ui_tests {
         }
         h.run_steps(4);
         shot(&mut h, &out, "t10_source_chip");
+    }
+
+    /// With nothing selected, Export and the contact sheet leave rejects out,
+    /// and the button says so; an explicit selection is taken as it is.
+    #[test]
+    fn export_scope_leaves_out_rejects() {
+        use crate::engine::sidecar::Flag;
+        let dir = std::env::temp_dir().join(format!("nlp_export_scope_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["a.tif", "b.tif", "c.tif"] {
+            std::fs::write(dir.join(n), b"").unwrap();
+        }
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1200.0, 700.0))
+            .build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
+        h.run_steps(2);
+        assert_eq!(h.state().frames.len(), 3);
+        assert_eq!(h.state().export_label(), "Export all");
+        assert_eq!(h.state().export_scope(), vec![0, 1, 2]);
+
+        h.state_mut().set_flag(&[1], Flag::Reject);
+        assert_eq!(h.state().export_scope(), vec![0, 2]);
+        assert_eq!(h.state().rejects_skipped(), 1);
+        assert_eq!(h.state().export_label(), "Export 2");
+
+        h.state_mut().selected = [1].into_iter().collect();
+        assert_eq!(h.state().export_scope(), vec![1], "a selection is explicit");
+        assert_eq!(h.state().rejects_skipped(), 0);
+        assert_eq!(h.state().export_label(), "Export 1");
+
+        h.state_mut().selected.clear();
+        h.state_mut().set_flag(&[0], Flag::Pick);
+        h.state_mut().grid.filter = grid::GridFilter::Picks;
+        assert_eq!(h.state().export_label(), "Export picks");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Screenshots of the grid: layout, flags, filters, quick look,

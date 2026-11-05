@@ -1,6 +1,7 @@
 //! The roll's thumbnail grid: uniform cells like Lightroom's, each with its
-//! picture centred in its own shape, frame numbers, pick / reject marks, a "needs a look" check, filters, box
-//! selection, hover actions, negatives on demand and a quick look.
+//! picture centred in its own shape, frame numbers, pick / reject marks, a
+//! "needs a look" check, filters, box selection, hover actions, negatives on
+//! demand and a quick look. Also the strip of actions for the selection.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -51,7 +52,6 @@ pub struct GridState {
 enum CellAction {
     Open,
     Convert,
-    ConvertRoll,
     Export,
     Copy,
     Paste,
@@ -65,17 +65,17 @@ enum CellAction {
 /// visible-first loading.
 pub const GRID_VISIBLE: &str = "grid_visible";
 
-const GAP: f32 = 1.0;
-/// Header strip of a cell (frame number, name) and footer strip (status, actions).
+const GAP: f32 = 2.0;
+/// Header strip of a cell: frame number, status, the name while hovered.
 const HEADER_H: f32 = 26.0;
-const FOOTER_H: f32 = 24.0;
-/// Padding between the picture and the cell edge.
-const PICTURE_PAD: f32 = 10.0;
+/// Padding between the picture and the header / the cell edge.
+const PICTURE_TOP: f32 = 2.0;
+const PICTURE_PAD: f32 = 8.0;
 /// Clipped share of the print that earns a "needs a look".
 const CLIP_WHITE: f32 = 0.03;
 const CLIP_BLACK: f32 = 0.06;
-/// Space kept free under the grid for the floating selection bar.
-const SELECTION_BAR_ROOM: f32 = 64.0;
+/// Space under the last row.
+const GRID_BOTTOM: f32 = 16.0;
 /// Density (≈ 1 stop) away from the roll's median that earns one.
 const DENSITY_OUTLIER: f64 = 0.3;
 
@@ -164,6 +164,42 @@ impl NlpApp {
             .filter(|&i| !self.look_issues(i, density).is_empty())
             .count();
         (picks, look)
+    }
+
+    /// The frames Export and the contact sheet act on: the selection, or else
+    /// the frames on show without the rejected ones.
+    pub fn export_scope(&self) -> Vec<usize> {
+        if !self.selected.is_empty() {
+            return self.sel_vec();
+        }
+        self.shown_frames()
+            .into_iter()
+            .filter(|&i| self.frames[i].sc.flag != Flag::Reject)
+            .collect()
+    }
+
+    /// Rejected frames on show that [`Self::export_scope`] leaves out.
+    pub fn rejects_skipped(&self) -> usize {
+        if !self.selected.is_empty() {
+            return 0;
+        }
+        self.shown_frames()
+            .into_iter()
+            .filter(|&i| self.frames[i].sc.flag == Flag::Reject)
+            .count()
+    }
+
+    /// The Export button's label. "All" is only said when it is true.
+    pub fn export_label(&self) -> String {
+        let n = self.export_scope().len();
+        if self.selected.is_empty() {
+            match self.grid.filter {
+                GridFilter::All if self.rejects_skipped() == 0 => return "Export all".into(),
+                GridFilter::Picks => return "Export picks".into(),
+                _ => {}
+            }
+        }
+        format!("Export {n}")
     }
 
     /// Mark frames as picked, rejected or neither (as one undo-free step:
@@ -304,7 +340,7 @@ impl NlpApp {
         }
         let now = ui.input(|i| i.time);
         // Pinch or Ctrl/Cmd + scroll over the grid resizes the thumbnails,
-        // like the slider in the top bar.
+        // like the slider in the status strip.
         if ui.rect_contains_pointer(ui.max_rect()) {
             let z = ui.input(|i| i.zoom_delta());
             if z != 1.0 {
@@ -316,7 +352,7 @@ impl NlpApp {
         let mut ctx_action: Option<(usize, CellAction)> = None;
         let mut hover_action: Option<(usize, CellAction)> = None;
         let mut bg_click = false;
-        let multi = self.selected.len() >= 2;
+        let roll_frames = self.frames.iter().filter(|f| f.is_roll()).count();
         let scroll_to = self.grid.scroll_to.take();
         let mut cells: Vec<Cell> = Vec::new();
         let mut visible: Vec<usize> = Vec::new();
@@ -329,7 +365,8 @@ impl NlpApp {
                 // sits centred in its cell with its own shape.
                 let cols = ((w / self.thumb_size).floor() as usize).max(1);
                 let cell_w = (w - GAP * (cols - 1) as f32) / cols as f32;
-                let cell_h = cell_w + HEADER_H + FOOTER_H;
+                // The picture's square, plus the header and padding around it.
+                let cell_h = cell_w - 2.0 * PICTURE_PAD + HEADER_H + PICTURE_TOP + PICTURE_PAD;
                 let aspect = |i: usize| {
                     let f = &self.frames[i];
                     let t = if negatives {
@@ -347,8 +384,7 @@ impl NlpApp {
                     }
                 };
                 let nrows = shown.len().div_ceil(cols);
-                // Room under the last row so the selection bar never covers it.
-                let height = nrows as f32 * (cell_h + GAP) + SELECTION_BAR_ROOM;
+                let height = nrows as f32 * (cell_h + GAP) + GRID_BOTTOM;
                 let (content, bg) = ui.allocate_exact_size(
                     vec2(w, height.max(ui.available_height())),
                     Sense::click_and_drag(),
@@ -361,10 +397,9 @@ impl NlpApp {
                         let x = content.left() + c as f32 * (cell_w + GAP);
                         let cell = Rect::from_min_size(pos2(x, y), vec2(cell_w, cell_h));
                         let area = Rect::from_min_max(
-                            cell.min + vec2(0.0, HEADER_H),
-                            cell.max - vec2(0.0, FOOTER_H),
-                        )
-                        .shrink(PICTURE_PAD);
+                            cell.min + vec2(PICTURE_PAD, HEADER_H + PICTURE_TOP),
+                            cell.max - vec2(PICTURE_PAD, PICTURE_PAD),
+                        );
                         let a = aspect(i);
                         let fit = vec2(
                             area.width().min(area.height() * a),
@@ -385,10 +420,20 @@ impl NlpApp {
                         }
                         visible.push(i);
                         let resp = ui.interact(cell, ui.id().with(("cell", i)), Sense::click());
-                        self.paint_cell(ui, i, img, cell, &resp, negatives, density, now);
-                        // Hover actions in the footer strip.
+                        self.paint_cell(
+                            ui,
+                            i,
+                            img,
+                            cell,
+                            &resp,
+                            negatives,
+                            density,
+                            roll_frames,
+                            now,
+                        );
+                        // Hover actions over the picture's corner.
                         if (resp.hovered() || ui.rect_contains_pointer(cell))
-                            && let Some(a) = hover_buttons(ui, i, cell, self.frames[i].sc.flag)
+                            && let Some(a) = hover_buttons(ui, i, img, self.frames[i].sc.flag)
                         {
                             hover_action = Some((i, a));
                         }
@@ -398,7 +443,6 @@ impl NlpApp {
                             clicked = Some((i, ui.input(|inp| inp.modifiers)));
                         }
                         let has_clip = self.clipboard.is_some();
-                        let sel = self.selected.contains(&i);
                         let flag = self.frames[i].sc.flag;
                         resp.context_menu(|ui| {
                             let mut item = |ui: &mut egui::Ui, text: &str, key: &str, a, on| {
@@ -433,10 +477,7 @@ impl NlpApp {
                                 flag != Flag::None,
                             );
                             ui.separator();
-                            item(ui, "Convert", "", CellAction::Convert, true);
-                            if multi && sel {
-                                item(ui, "Convert as roll", "", CellAction::ConvertRoll, true);
-                            }
+                            item(ui, "Convert…", "", CellAction::Convert, true);
                             item(ui, "Export…", &keys[1], CellAction::Export, true);
                             ui.separator();
                             item(ui, "Detect frame", "", CellAction::DetectFrame, true);
@@ -527,10 +568,8 @@ impl NlpApp {
             } else {
                 vec![i]
             };
-            match act {
-                CellAction::Rotate(cw) => self.rotate_frames(&idx, cw),
-                CellAction::Flag(f) => self.set_flag(&idx, f),
-                _ => {}
+            if let CellAction::Flag(f) = act {
+                self.set_flag(&idx, f);
             }
         }
         if let Some((i, act)) = ctx_action {
@@ -541,8 +580,7 @@ impl NlpApp {
             self.active = Some(i);
             match act {
                 CellAction::Open => self.open_editor(i),
-                CellAction::Convert => self.open_convert_dialog(self.sel_vec(), false),
-                CellAction::ConvertRoll => self.open_convert_dialog(self.sel_vec(), true),
+                CellAction::Convert => self.open_convert_for(self.sel_vec()),
                 CellAction::Export => self.open_export_dialog(self.sel_vec()),
                 CellAction::Copy => self.copy_settings(),
                 CellAction::Paste => self.paste_settings(),
@@ -565,6 +603,7 @@ impl NlpApp {
         resp: &egui::Response,
         negatives: bool,
         density: Option<f64>,
+        roll_frames: usize,
         now: f64,
     ) {
         let f = &self.frames[i];
@@ -572,16 +611,14 @@ impl NlpApp {
         let p = ui.painter();
         let rejected = f.sc.flag == Flag::Reject;
         let active = sel && self.active == Some(i);
-        let fill = if active {
-            Color32::from_rgb(78, 78, 84)
-        } else if sel {
-            theme::PRESSED
-        } else if resp.hovered() {
-            theme::HOVER
-        } else {
-            theme::SURFACE
-        };
-        p.rect_filled(cell, 0.0, fill);
+        // Photos sit on the window's dark until a cell is hovered or selected,
+        // so no grey tiles compete with judging their tone.
+        let hovered = ui.rect_contains_pointer(cell);
+        if sel {
+            p.rect_filled(cell, 0.0, theme::HOVER);
+        } else if resp.hovered() || hovered {
+            p.rect_filled(cell, 0.0, theme::CANVAS);
+        }
         let tex = if negatives {
             f.thumb_neg.as_ref().or(f.thumb.as_ref())
         } else {
@@ -620,28 +657,39 @@ impl NlpApp {
                     .request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
-        // Badges: flag top-left and "needs a look" next to it, in the cell
-        // under the header; lab correction bottom-left of the picture.
-        let mut bx = cell.left() + 6.0;
-        let badge =
-            |x: f32| Rect::from_min_size(pos2(x, cell.top() + HEADER_H + 4.0), vec2(20.0, 20.0));
+        if sel {
+            // Selected frames get a soft outline, the lead frame a bright one.
+            let color = if active {
+                theme::TEXT
+            } else {
+                theme::TEXT.gamma_multiply(0.45)
+            };
+            p.rect_stroke(
+                img.expand(1.0),
+                0.0,
+                egui::Stroke::new(1.5, color),
+                egui::StrokeKind::Outside,
+            );
+        }
+        // Badges stacked in the picture's corner: the flag (the hover buttons
+        // show it while hovered), then "needs a look".
+        let badge = |y: f32| {
+            let r = Rect::from_min_size(pos2(img.left() + 4.0, img.top() + y), vec2(20.0, 20.0));
+            p.circle_filled(r.center(), 10.0, Color32::from_black_alpha(170));
+            r
+        };
         match f.sc.flag {
-            Flag::Pick => {
-                let r = badge(bx);
-                paint_flag(p, r.shrink(4.0), theme::TEXT, true);
-                bx += 24.0;
+            Flag::Pick if !hovered => paint_flag(p, badge(4.0).shrink(5.0), theme::OK, true),
+            Flag::Reject if !hovered => {
+                widgets::paint_icon(p, badge(4.0).shrink(3.0), Icon::Reject, theme::ERR)
             }
-            Flag::Reject => {
-                let r = badge(bx);
-                widgets::paint_icon(p, r.shrink(3.0), Icon::Close, theme::TEXT);
-                bx += 24.0;
-            }
-            Flag::None => {}
+            _ => {}
         }
         let issues = self.look_issues(i, density);
         if !issues.is_empty() {
-            let r = badge(bx);
-            widgets::paint_icon(p, r.shrink(3.0), Icon::Warn, theme::TEXT);
+            let y = if f.sc.flag == Flag::None { 4.0 } else { 28.0 };
+            let r = badge(y);
+            widgets::paint_icon(p, r.shrink(3.0), Icon::Warn, theme::WARN);
             ui.interact(r, ui.id().with(("issues", i)), Sense::hover())
                 .on_hover_text(format!("Needs a look\n• {}", issues.join("\n• ")));
         }
@@ -659,8 +707,8 @@ impl NlpApp {
             p.galley(pill.min + vec2(5.0, 2.0), g, theme::TEXT);
         }
 
-        // Footer: status markers on the right. Header: frame number and name.
-        let row_y = cell.bottom() - FOOTER_H / 2.0;
+        // Header: frame number, status markers on the right, the name while hovered.
+        let row_y = cell.top() + HEADER_H / 2.0;
         let mut x = cell.right() - 8.0;
         let converting = self.auto.in_flight.contains(&f.path) || self.auto.queue.contains(&f.path);
         let markers_right = x;
@@ -683,9 +731,10 @@ impl NlpApp {
                 egui::Stroke::new(1.0, theme::FAINT),
             );
             x -= 12.0;
-        } else if f.is_roll() {
+        } else if !f.is_roll() && roll_frames > 0 {
+            // Most of a roll is balanced together: only the exception is marked.
             let g = p.layout_no_wrap(
-                "Roll".into(),
+                "Solo".into(),
                 egui::FontId::proportional(10.0),
                 theme::MUTED,
             );
@@ -713,6 +762,8 @@ impl NlpApp {
             }];
             if f.is_roll() {
                 tip.push("balanced with the roll");
+            } else if f.sc.is_converted() && roll_frames > 0 {
+                tip.push("on its own, not balanced with the roll");
             }
             if f.exporting {
                 tip.push("exporting");
@@ -720,35 +771,31 @@ impl NlpApp {
             ui.interact(markers, ui.id().with(("markers", i)), Sense::hover())
                 .on_hover_text(tip.join(" · "));
         }
-        let head_y = cell.top() + HEADER_H / 2.0;
         let dim = if rejected { 0.6 } else { 1.0 };
+        let number = if sel { theme::TEXT } else { theme::MUTED };
         let num = p.layout_no_wrap(
             format!("{:02}", i + 1),
             theme::medium(11.5),
-            if sel { theme::TEXT } else { theme::MUTED },
+            number.gamma_multiply(dim),
         );
         let nx = cell.left() + 8.0;
         let num_w = num.size().x;
-        p.galley(
-            pos2(nx, head_y - num.size().y / 2.0),
-            num,
-            theme::MUTED.gamma_multiply(dim),
-        );
-        let name_x = nx + num_w + 8.0;
-        let mut job = egui::text::LayoutJob::simple_singleline(
-            f.name.clone(),
-            egui::FontId::proportional(10.5),
-            theme::MUTED,
-        );
-        job.wrap =
-            egui::text::TextWrapping::truncate_at_width((cell.right() - 8.0 - name_x).max(0.0));
-        let g = p.layout_job(job);
-        let gx = cell.right() - 8.0 - g.size().x;
-        p.galley(
-            pos2(gx, head_y - g.size().y / 2.0),
-            g,
-            theme::MUTED.gamma_multiply(dim),
-        );
+        p.galley(pos2(nx, row_y - num.size().y / 2.0), num, number);
+        if hovered {
+            let name_x = nx + num_w + 8.0;
+            let mut job = egui::text::LayoutJob::simple_singleline(
+                f.name.clone(),
+                egui::FontId::proportional(10.5),
+                theme::TEXT,
+            );
+            job.wrap = egui::text::TextWrapping::truncate_at_width((x - 6.0 - name_x).max(0.0));
+            let g = p.layout_job(job);
+            p.galley(
+                pos2(x - 6.0 - g.size().x, row_y - g.size().y / 2.0),
+                g,
+                theme::TEXT,
+            );
+        }
     }
 
     /// Space over the grid: the selected frame large, arrows to move, P / X / U
@@ -840,237 +887,70 @@ impl NlpApp {
         }
     }
 
-    /// The floating action bar over the bottom of the grid: the frames on
-    /// show (convert, export) or, while frames are selected, the selection
-    /// (cull, rotate, copy / paste, convert, export).
-    pub fn selection_bar_ui(&mut self, ui: &mut egui::Ui) {
-        if self.grid.quick_look || self.grid.marquee.is_some() {
-            return;
-        }
+    /// The selection's part of the status strip: its count and what you do
+    /// frame by frame while culling. The rest is in the ⋯ menu and on right-click.
+    pub fn selection_strip_ui(&mut self, ui: &mut egui::Ui) {
         let n = self.selected.len();
-        if n == 0 {
-            self.roll_bar_ui(ui);
-            return;
-        }
         let ctx = ui.ctx().clone();
-        let area = ui.max_rect();
         let sel = self.sel_vec();
         let cmd = egui::Modifiers::COMMAND;
         let key = |m, k| widgets::shortcut(&ctx, m, k);
         let all = |f: Flag| sel.iter().all(|&i| self.frames[i].sc.flag == f);
         let (picked, rejected) = (all(Flag::Pick), all(Flag::Reject));
-        let converted = sel.iter().all(|&i| self.frames[i].sc.is_converted());
-        let has_clip = self.clipboard.is_some();
-        let mut act: Option<BarAction> = None;
-        bar_area(&ctx, area, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(
-                    RichText::new(format!("{n} selected"))
-                        .font(theme::medium(12.5))
-                        .color(theme::TEXT),
-                );
-                divider(ui);
-                if bar_icon(
-                    ui,
-                    if picked { "Unflag (U)" } else { "Pick (P)" },
-                    picked,
-                    |p, r, c| {
-                        paint_flag(p, r.shrink(7.0), if picked { theme::OK } else { c }, picked)
-                    },
-                )
-                .clicked()
-                {
-                    act = Some(BarAction::Flag(if picked {
-                        Flag::None
-                    } else {
-                        Flag::Pick
-                    }));
-                }
-                if bar_icon(
-                    ui,
-                    if rejected { "Unflag (U)" } else { "Reject (X)" },
-                    rejected,
-                    |p, r, c| {
-                        widgets::paint_icon(
-                            p,
-                            r.shrink(6.0),
-                            Icon::Close,
-                            if rejected { theme::ERR } else { c },
-                        )
-                    },
-                )
-                .clicked()
-                {
-                    act = Some(BarAction::Flag(if rejected {
-                        Flag::None
-                    } else {
-                        Flag::Reject
-                    }));
-                }
-                divider(ui);
-                let left = format!("Rotate left ({})", key(cmd, egui::Key::OpenBracket));
-                let right = format!("Rotate right ({})", key(cmd, egui::Key::CloseBracket));
-                if bar_icon(ui, &left, false, |p, r, c| {
-                    widgets::paint_icon(p, r.shrink(5.0), Icon::RotateLeft, c)
-                })
-                .clicked()
-                {
-                    act = Some(BarAction::Rotate(false));
-                }
-                if bar_icon(ui, &right, false, |p, r, c| {
-                    widgets::paint_icon(p, r.shrink(5.0), Icon::RotateRight, c)
-                })
-                .clicked()
-                {
-                    act = Some(BarAction::Rotate(true));
-                }
-                divider(ui);
-                if ui
-                    .add_enabled(n == 1, bar_text("Copy settings"))
-                    .on_hover_text(format!(
-                        "Copy this frame's settings ({})",
-                        key(cmd, egui::Key::C)
-                    ))
-                    .on_disabled_hover_text("Select one frame to copy from")
-                    .clicked()
-                {
-                    act = Some(BarAction::Copy);
-                }
-                if ui
-                    .add_enabled(has_clip, bar_text("Paste settings"))
-                    .on_hover_text(format!(
-                        "Paste the copied settings ({})",
-                        key(cmd, egui::Key::V)
-                    ))
-                    .on_disabled_hover_text("Copy a frame's settings first")
-                    .clicked()
-                {
-                    act = Some(BarAction::Paste);
-                }
-                divider(ui);
-                if ui
-                    .add(bar_text(if converted {
-                        "Re-convert…"
-                    } else {
-                        "Convert…"
-                    }))
-                    .on_hover_text("Analyse each selected frame on its own")
-                    .clicked()
-                {
-                    act = Some(BarAction::Convert(false));
-                }
-                if n >= 2
-                    && ui
-                        .add(bar_text("As roll…"))
-                        .on_hover_text(
-                            "Convert the selection together, for one consistent roll balance",
-                        )
-                        .clicked()
-                {
-                    act = Some(BarAction::Convert(true));
-                }
-                ui.add_space(4.0);
-                if ui
-                    .add(widgets::primary(&if n == 1 {
-                        "Export".to_string()
-                    } else {
-                        format!("Export {n}")
-                    }))
-                    .on_hover_text(format!("Export the selection ({})", key(cmd, egui::Key::E)))
-                    .clicked()
-                {
-                    act = Some(BarAction::Export);
-                }
-                ui.add_space(2.0);
-                if ui
-                    .add(egui::Button::new(RichText::new("Clear").color(theme::MUTED)).frame(false))
-                    .on_hover_text("Clear the selection (Esc)")
-                    .clicked()
-                {
-                    act = Some(BarAction::Clear);
-                }
-            });
-        });
-        match act {
-            Some(BarAction::Flag(f)) => self.set_flag(&sel, f),
-            Some(BarAction::Rotate(cw)) => self.rotate_frames(&sel, cw),
-            Some(BarAction::Copy) => self.copy_settings(),
-            Some(BarAction::Paste) => self.paste_settings(),
-            Some(BarAction::Convert(roll)) => self.open_convert_dialog(sel, roll),
-            Some(BarAction::Export) => self.open_export_dialog(sel),
-            Some(BarAction::Clear) => self.selected.clear(),
-            None => {}
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(
+            RichText::new(format!("{n} selected"))
+                .font(theme::medium(12.5))
+                .color(theme::TEXT),
+        );
+        divider(ui);
+        if bar_icon(
+            ui,
+            if picked { "Unflag (U)" } else { "Pick (P)" },
+            picked,
+            |p, r, c| paint_flag(p, r.shrink(7.0), if picked { theme::OK } else { c }, picked),
+        )
+        .clicked()
+        {
+            self.set_flag(&sel, if picked { Flag::None } else { Flag::Pick });
         }
-    }
-
-    /// The action bar with nothing selected: convert or export the frames on show.
-    fn roll_bar_ui(&mut self, ui: &mut egui::Ui) {
-        let shown = self.shown_frames();
-        if shown.is_empty() {
-            return;
+        if bar_icon(
+            ui,
+            if rejected { "Unflag (U)" } else { "Reject (X)" },
+            rejected,
+            |p, r, c| {
+                let color = if rejected { theme::ERR } else { c };
+                widgets::paint_icon(p, r.shrink(5.0), Icon::Reject, color)
+            },
+        )
+        .clicked()
+        {
+            self.set_flag(&sel, if rejected { Flag::None } else { Flag::Reject });
         }
-        let ctx = ui.ctx().clone();
-        let area = ui.max_rect();
-        let t = shown.len();
-        let (scope, export) = match self.grid.filter {
-            GridFilter::All => (
-                format!("{t} frame{}", if t == 1 { "" } else { "s" }),
-                "Export all".to_string(),
-            ),
-            GridFilter::Picks => (
-                format!("{t} pick{}", if t == 1 { "" } else { "s" }),
-                "Export picks".to_string(),
-            ),
-            GridFilter::NeedsLook => (format!("{t} to look at"), format!("Export {t}")),
-        };
-        let converted = shown.iter().all(|&i| self.frames[i].sc.is_converted());
-        let export_key = widgets::shortcut(&ctx, egui::Modifiers::COMMAND, egui::Key::E);
-        let mut act: Option<BarAction> = None;
-        bar_area(&ctx, area, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(
-                    RichText::new(scope)
-                        .font(theme::medium(12.5))
-                        .color(theme::TEXT),
-                );
-                divider(ui);
-                if ui
-                    .add(bar_text(if converted {
-                        "Re-convert…"
-                    } else {
-                        "Convert…"
-                    }))
-                    .on_hover_text("Analyse each frame on its own, with new conversion options")
-                    .clicked()
-                {
-                    act = Some(BarAction::Convert(false));
-                }
-                if t >= 2
-                    && ui
-                        .add(bar_text("As roll…"))
-                        .on_hover_text(
-                            "Analyse the frames together for one consistent roll balance",
-                        )
-                        .clicked()
-                {
-                    act = Some(BarAction::Convert(true));
-                }
-                ui.add_space(4.0);
-                if ui
-                    .add(widgets::primary(&export))
-                    .on_hover_text(format!("Export positive copies ({export_key})"))
-                    .clicked()
-                {
-                    act = Some(BarAction::Export);
-                }
-            });
-        });
-        match act {
-            Some(BarAction::Convert(roll)) => self.open_convert_dialog(shown, roll),
-            Some(BarAction::Export) => self.open_export_dialog(shown),
-            _ => {}
+        divider(ui);
+        let left = format!("Rotate left ({})", key(cmd, egui::Key::OpenBracket));
+        let right = format!("Rotate right ({})", key(cmd, egui::Key::CloseBracket));
+        if bar_icon(ui, &left, false, |p, r, c| {
+            widgets::paint_icon(p, r.shrink(5.0), Icon::RotateLeft, c)
+        })
+        .clicked()
+        {
+            self.rotate_frames(&sel, false);
+        }
+        if bar_icon(ui, &right, false, |p, r, c| {
+            widgets::paint_icon(p, r.shrink(5.0), Icon::RotateRight, c)
+        })
+        .clicked()
+        {
+            self.rotate_frames(&sel, true);
+        }
+        divider(ui);
+        if ui
+            .add(egui::Button::new(RichText::new("Deselect").color(theme::MUTED)).frame(false))
+            .on_hover_text("Clear the selection (Esc)")
+            .clicked()
+        {
+            self.selected.clear();
         }
     }
 
@@ -1123,28 +1003,31 @@ pub fn clip_share(px: &[[f32; 3]]) -> [f32; 2] {
 }
 
 /// Pick / rotate buttons in a hovered cell's footer; the one clicked.
-fn hover_buttons(ui: &egui::Ui, i: usize, cell: Rect, flag: Flag) -> Option<CellAction> {
-    if cell.width() < 90.0 {
-        return None;
-    }
+fn hover_buttons(ui: &egui::Ui, i: usize, img: Rect, flag: Flag) -> Option<CellAction> {
     let mut out = None;
-    let size = 20.0;
-    let mut x = cell.left() + 6.0;
-    let picked = flag == Flag::Pick;
+    // Full size where the picture has room, smaller on the narrowest thumbnails.
+    let size = if img.width() < 90.0 { 20.0 } else { 24.0 };
+    let (picked, rejected) = (flag == Flag::Pick, flag == Flag::Reject);
     let buttons = [
-        (CellAction::Rotate(false), "Rotate left"),
-        (CellAction::Rotate(true), "Rotate right"),
         (
-            CellAction::Flag(if picked { Flag::None } else { Flag::Pick }),
+            Flag::Pick,
             if picked { "Unflag (U)" } else { "Pick (P)" },
+            picked,
+        ),
+        (
+            Flag::Reject,
+            if rejected { "Unflag (U)" } else { "Reject (X)" },
+            rejected,
         ),
     ];
-    for (k, (act, tip)) in buttons.into_iter().enumerate() {
+    for (k, (target, tip, on)) in buttons.into_iter().enumerate() {
         let r = Rect::from_min_size(
-            pos2(x, cell.bottom() - (FOOTER_H + size) / 2.0),
+            pos2(
+                img.right() - 4.0 - (size + 4.0) * (2 - k) as f32 + 4.0,
+                img.top() + 4.0,
+            ),
             vec2(size, size),
         );
-        x += size + 4.0;
         let resp = ui
             .interact(r, ui.id().with(("hover_btn", i, k)), Sense::click())
             .on_hover_text(tip);
@@ -1152,29 +1035,22 @@ fn hover_buttons(ui: &egui::Ui, i: usize, cell: Rect, flag: Flag) -> Option<Cell
         p.circle_filled(
             r.center(),
             size / 2.0,
-            Color32::from_black_alpha(if resp.hovered() { 220 } else { 160 }),
+            Color32::from_black_alpha(if resp.hovered() { 220 } else { 170 }),
         );
         let col = if resp.hovered() {
             theme::TEXT
         } else {
             theme::MUTED
         };
-        match act {
-            CellAction::Rotate(true) => {
-                widgets::paint_icon(p, r.shrink(4.0), Icon::RotateRight, col)
-            }
-            CellAction::Rotate(false) => {
-                widgets::paint_icon(p, r.shrink(4.0), Icon::RotateLeft, col)
-            }
-            _ => paint_flag(
-                p,
-                r.shrink(5.0),
-                if picked { theme::OK } else { col },
-                picked,
-            ),
+        if target == Flag::Pick {
+            let color = if on { theme::OK } else { col };
+            paint_flag(p, r.shrink(size * 0.27), color, on);
+        } else {
+            let color = if on { theme::ERR } else { col };
+            widgets::paint_icon(p, r.shrink(size * 0.17), Icon::Reject, color);
         }
         if resp.clicked() {
-            out = Some(act);
+            out = Some(CellAction::Flag(if on { Flag::None } else { target }));
         }
     }
     out
@@ -1197,26 +1073,7 @@ pub(super) fn paint_flag(p: &egui::Painter, r: Rect, color: Color32, filled: boo
     }
 }
 
-#[derive(Clone, Copy)]
-enum BarAction {
-    Flag(Flag),
-    Rotate(bool),
-    Copy,
-    Paste,
-    Convert(bool),
-    Export,
-    Clear,
-}
-
-/// Quiet text button for the selection bar.
-fn bar_text(text: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(text).color(theme::TEXT))
-        .fill(Color32::TRANSPARENT)
-        .corner_radius(6.0)
-        .min_size(vec2(0.0, 28.0))
-}
-
-/// Square icon button for the selection bar; `on` shows it pressed.
+/// Square icon button for the selection strip; `on` shows it pressed.
 fn bar_icon(
     ui: &mut egui::Ui,
     tip: &str,
@@ -1235,7 +1092,7 @@ fn bar_icon(
     resp.on_hover_text(tip)
 }
 
-/// Thin vertical rule between groups of the selection bar.
+/// Thin vertical rule between groups of the selection strip.
 fn divider(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(9.0, 18.0), Sense::hover());
     ui.painter().vline(
@@ -1243,20 +1100,4 @@ fn divider(ui: &mut egui::Ui) {
         rect.y_range(),
         egui::Stroke::new(1.0, Color32::from_white_alpha(18)),
     );
-}
-
-/// The floating frame of the action bar, centred at the bottom of `area`.
-fn bar_area(ctx: &egui::Context, area: Rect, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Area::new(egui::Id::new("action_bar"))
-        .pivot(egui::Align2::CENTER_BOTTOM)
-        .fixed_pos(pos2(area.center().x, area.bottom() - 4.0))
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(theme::SURFACE)
-                .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(14)))
-                .corner_radius(12.0)
-                .inner_margin(egui::Margin::symmetric(10, 6))
-                .shadow(ui.visuals().popup_shadow)
-                .show(ui, add);
-        });
 }

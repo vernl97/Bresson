@@ -494,18 +494,20 @@ pub mod grad {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Icon {
-    Back,
+    /// Four squares: the roll's grid view.
+    Grid,
     Crop,
     RotateLeft,
     RotateRight,
     Lock,
     Unlock,
-    Export,
     Eyedropper,
     Folder,
     Warn,
     More,
     Close,
+    /// A rejected frame: a struck circle, so it doesn't read as "close".
+    Reject,
     /// View toggles of the editor's bottom bar.
     Before,
     Split,
@@ -530,20 +532,25 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let q = |x: f32, y: f32| pos2(c.x + x * s, c.y + y * s);
     let line = |pts: Vec<egui::Pos2>| Shape::line(pts, st);
     match icon {
-        Icon::Back => {
-            p.add(line(vec![q(7.0, 0.0), q(-7.0, 0.0)]));
-            p.add(line(vec![q(-1.5, -5.5), q(-7.0, 0.0), q(-1.5, 5.5)]));
+        Icon::Grid => {
+            for (x, y) in [(-3.4, -3.4), (3.4, -3.4), (-3.4, 3.4), (3.4, 3.4)] {
+                let r = Rect::from_min_max(q(x - 2.4, y - 2.4), q(x + 2.4, y + 2.4));
+                p.rect_stroke(r, 1.0, st, egui::StrokeKind::Middle);
+            }
         }
         Icon::RotateLeft | Icon::RotateRight => {
             let flip = if icon == Icon::RotateLeft { -1.0 } else { 1.0 };
-            // Circle open on the right, clockwise on screen, ending in a filled
-            // head at the upper right that points along the tangent.
-            let r = 6.5 * s;
-            let (a0, a1) = (0.6_f32, 5.55_f32);
+            // A frame with an arrow turning over it, so it can't read as undo:
+            // clockwise on screen, ending in a head at the right.
+            let r = 7.0 * s;
+            let (a0, a1) = (-2.9_f32, -0.1_f32);
             let mx = |pt: egui::Pos2| pos2(c.x + (pt.x - c.x) * flip, pt.y);
-            let pts: Vec<_> = arc(c, r, a0, a1, 28).into_iter().map(mx).collect();
+            let frame = Rect::from_two_pos(mx(q(-7.5, 0.5)), mx(q(2.0, 8.5)));
+            p.rect_stroke(frame, 1.0, st, egui::StrokeKind::Middle);
+            let o = q(-1.0, 0.0);
+            let pts: Vec<_> = arc(o, r, a0, a1, 20).into_iter().map(mx).collect();
             p.add(line(pts));
-            let end = mx(pos2(c.x + r * a1.cos(), c.y + r * a1.sin()));
+            let end = mx(pos2(o.x + r * a1.cos(), o.y + r * a1.sin()));
             let tangent = mx(pos2(c.x - a1.sin(), c.y + a1.cos())) - mx(c);
             let t = tangent.normalized();
             let n = vec2(-t.y, t.x);
@@ -629,18 +636,6 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             p.add(line(vec![q(-4.0, -8.0), q(-4.0, 4.0), q(8.0, 4.0)]));
             p.add(line(vec![q(-8.0, -4.0), q(4.0, -4.0), q(4.0, 8.0)]));
         }
-        Icon::Export => {
-            p.add(line(vec![
-                q(-4.0, -2.0),
-                q(-7.0, -2.0),
-                q(-7.0, 8.0),
-                q(7.0, 8.0),
-                q(7.0, -2.0),
-                q(4.0, -2.0),
-            ]));
-            p.add(line(vec![q(0.0, 3.0), q(0.0, -8.0)]));
-            p.add(line(vec![q(-3.5, -4.5), q(0.0, -8.0), q(3.5, -4.5)]));
-        }
         Icon::Folder => {
             p.add(Shape::closed_line(
                 vec![
@@ -680,6 +675,10 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             p.line_segment([q(-5.0, -5.0), q(5.0, 5.0)], st);
             p.line_segment([q(-5.0, 5.0), q(5.0, -5.0)], st);
         }
+        Icon::Reject => {
+            p.circle_stroke(c, 7.0 * s, st);
+            p.line_segment([q(-4.9, -4.9), q(4.9, 4.9)], st);
+        }
     }
 }
 
@@ -713,6 +712,27 @@ pub fn icon_button_tinted(
         tint,
         egui::vec2(32.0, 28.0),
         8.0,
+    )
+}
+
+/// Larger [`icon_button_tinted`] for the editor's top bar.
+pub fn bar_button(
+    ui: &mut Ui,
+    icon: Icon,
+    tip: &str,
+    selected: bool,
+    enabled: bool,
+    tint: Option<Color32>,
+) -> egui::Response {
+    sized_icon_button(
+        ui,
+        icon,
+        tip,
+        selected,
+        enabled,
+        tint,
+        egui::vec2(40.0, 34.0),
+        7.0,
     )
 }
 
@@ -878,10 +898,11 @@ pub fn fl_slider_origin(
     .0
 }
 
-/// Width of the label column of slider rows. Headings and selectors sit on
-/// the track column, which starts [`TRACK_INDENT`] from the row's left edge.
+/// Width of the label column of slider rows.
 pub const LABEL_W: f32 = 90.0;
-pub const TRACK_INDENT: f32 = LABEL_W + 7.0;
+/// Gap between the label and the track, wide enough that a knob at the
+/// track's left end (radius 7 plus its ring) stays clear of the label.
+const TRACK_GAP: f32 = 11.0;
 
 /// `fl_slider_origin` that also reports whether the slider is being held
 /// (track drag or value drag): `(changed, active)`.
@@ -971,7 +992,7 @@ pub fn fl_slider_active(
         },
     );
     let track = Rect::from_min_max(
-        egui::pos2(label_rect.right() + 7.0, row.center().y - 1.0),
+        egui::pos2(label_rect.right() + TRACK_GAP, row.center().y - 1.0),
         egui::pos2(value_rect.left() - 5.0, row.center().y + 1.0),
     );
     let to_x = |val: f32| track.left() + track.width() * ((val - lo) / (hi - lo)).clamp(0.0, 1.0);
