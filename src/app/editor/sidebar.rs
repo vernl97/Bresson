@@ -162,7 +162,7 @@ impl NlpApp {
         ui.add_space(2.0);
     }
 
-    /// The tool strip under the histogram: Crop, and three placeholders for tools to come.
+    /// The tool strip under the histogram: Crop, Heal, and placeholders for tools to come.
     fn tool_strip(&mut self, ui: &mut egui::Ui, i: usize) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -187,7 +187,22 @@ impl NlpApp {
                     self.enter_crop(i);
                 }
             }
-            for k in 1..=3 {
+            let healing = self.editor.heal.is_some();
+            if widgets::sized_icon_button(
+                ui,
+                Icon::Heal,
+                "Spot healing: remove dust and scratches (Q)",
+                healing,
+                true,
+                None,
+                size,
+                3.0,
+            )
+            .clicked()
+            {
+                self.toggle_heal(i);
+            }
+            for k in 2..=3 {
                 widgets::sized_icon_button(
                     ui,
                     Icon::Placeholder,
@@ -212,6 +227,8 @@ impl NlpApp {
             .show(ui, |ui| {
                 self.histogram_panel(ui, i, s);
                 self.tool_strip(ui, i);
+                self.crop_panel(ui, i);
+                self.heal_panel(ui, s);
             });
         ui.add_space(8.0);
         widgets::reset_section_gap(ui);
@@ -558,7 +575,7 @@ impl NlpApp {
             );
             tone(
                 ui,
-                "Midtones",
+                "Brightness",
                 &mut s.brightness,
                 "Midtone gamma: lower = denser, higher = airy",
             );

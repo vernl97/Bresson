@@ -16,10 +16,12 @@ use crate::engine::settings::*;
 use crate::engine::sidecar::Flag;
 
 mod crop;
+mod heal;
 mod sidebar;
 
 pub(super) use crop::rotate_insets;
-use crop::CropEdit;
+use crop::{CropEdit, CropGrid};
+use heal::{HealEdit, SpotMap};
 use sidebar::Section;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,7 +45,7 @@ pub enum Pick {
     FilmBase,
 }
 
-type NegKey = (AnalysisKey, [i32; 4], i32, u8, bool, [i32; 3], bool);
+type NegKey = (AnalysisKey, [i32; 4], i32, u8, bool, [i32; 3], bool, Vec<HealSpot>);
 
 /// A requested zoom change, resolved in the canvas where the geometry is known.
 #[derive(Clone, Copy)]
@@ -108,6 +110,11 @@ pub struct Editor {
     zoom: Option<f32>,
     pan: egui::Vec2,
     pub(super) crop: Option<CropEdit>,
+    crop_grid: CropGrid,
+    /// The spot healing tool is on; it stays on from frame to frame.
+    pub(super) heal: Option<HealEdit>,
+    /// What Visualize Spots shows of the current negative.
+    spot_map: Option<SpotMap>,
     /// The Finishing section, across frames (section states reset per frame).
     finishing_open: bool,
     pub export_open: bool,
@@ -179,6 +186,9 @@ impl Default for Editor {
             zoom: None,
             pan: egui::Vec2::ZERO,
             crop: None,
+            crop_grid: CropGrid::default(),
+            heal: None,
+            spot_map: None,
             finishing_open: false,
             export_open: false,
             zoom_req: None,
@@ -219,6 +229,8 @@ impl Editor {
             self.epoch + 1,
         );
         let edits = (self.last_edit.take(), self.prev_edit.take());
+        let heal = self.heal.map(HealEdit::for_next_frame);
+        let crop_grid = self.crop_grid;
         *self = Editor {
             last_edit: edits.0,
             prev_edit: edits.1,
@@ -226,6 +238,8 @@ impl Editor {
             loading: true,
             committed: Some(settings),
             epoch,
+            heal,
+            crop_grid,
             ..Default::default()
         };
         self.color_tab = keep;
@@ -302,6 +316,7 @@ impl NlpApp {
         }
         self.editor.pick = None;
         self.editor.crop = None;
+        self.editor.heal = None;
         self.view = View::Folder;
         if self.single_mode {
             // Lone image: return to the welcome screen.
@@ -411,10 +426,20 @@ impl NlpApp {
             s.flip_h,
             base.map(|v| (v * 1e5) as i32),
             low,
+            s.heal.clone(),
         );
         if self.editor.neg_key.as_ref() != Some(&key) || self.editor.neg.is_none() {
             let neg = if low {
-                let pre_key = (key.0.clone(), key.1, 0, key.3, key.4, key.5, true);
+                let pre_key = (
+                    key.0.clone(),
+                    key.1,
+                    0,
+                    key.3,
+                    key.4,
+                    key.5,
+                    true,
+                    key.7.clone(),
+                );
                 if self.editor.neg_pre.as_ref().map(|(k, _)| k) != Some(&pre_key) {
                     let mut flat = s.clone();
                     flat.straighten = 0.0;
@@ -442,6 +467,7 @@ impl NlpApp {
             self.editor.gpu_neg = self.gpu.then(|| gpu::NegData::new(&neg, !low));
             self.editor.neg = Some(neg);
             self.editor.neg_key = Some(key);
+            self.editor.spot_map = None;
         }
         let full = self.editor.neg.as_ref().unwrap();
         let small = self.editor.neg_small.as_ref().unwrap();
@@ -597,6 +623,8 @@ impl NlpApp {
             .show(ui, |ui| {
                 if self.editor.crop.is_some() {
                     self.crop_bar(ui, i);
+                } else if self.editor.heal.is_some() {
+                    self.heal_bar(ui);
                 } else {
                     self.view_bar(ui, i);
                 }
@@ -944,6 +972,10 @@ impl NlpApp {
                 !cmd && inp.key_pressed(egui::Key::F),
                 !cmd && inp.key_pressed(egui::Key::I),
                 cmd && !inp.modifiers.shift && inp.key_pressed(egui::Key::E),
+                !cmd && inp.key_pressed(egui::Key::Q),
+                !cmd && inp.key_pressed(egui::Key::OpenBracket),
+                !cmd && inp.key_pressed(egui::Key::CloseBracket),
+                inp.key_pressed(egui::Key::Delete) || inp.key_pressed(egui::Key::Backspace),
             ]
         });
         let [
@@ -969,6 +1001,10 @@ impl NlpApp {
             strip,
             info,
             export,
+            q,
+            smaller,
+            larger,
+            delete,
         ] = k;
         if copy {
             self.copy_settings();
@@ -1050,6 +1086,19 @@ impl NlpApp {
         }
         if enter && self.editor.crop.is_some() {
             self.apply_crop(i);
+        } else if enter {
+            self.editor.heal = None;
+        }
+        if q {
+            self.toggle_heal(i);
+        }
+        if self.editor.heal.is_some() {
+            if smaller || larger {
+                self.step_heal_size(i, larger);
+            }
+            if delete {
+                self.delete_heal_spot(i);
+            }
         }
         if w {
             self.editor.pick = if self.editor.pick == Some(Pick::WhiteBalance) {
@@ -1065,6 +1114,8 @@ impl NlpApp {
                 (c.level, c.level_line) = (false, None);
             } else if self.editor.crop.is_some() {
                 self.cancel_crop();
+            } else if self.editor.heal.is_some() {
+                self.editor.heal = None;
             } else {
                 self.leave_editor();
                 return true;
@@ -1240,32 +1291,6 @@ impl NlpApp {
                         true,
                     );
                     egui::Popup::menu(&more).show(|ui| self.defaults_menu(ui, i, s));
-                    // Undo and redo this frame's edits, as the keys do (added right to left).
-                    let path = self.frames[i].path.clone();
-                    let redo_tip = format!(
-                        "Redo ({})",
-                        widgets::shortcut(
-                            &ctx,
-                            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                            egui::Key::Z
-                        )
-                    );
-                    let can_redo = self.history.can_redo_for(&path);
-                    if widgets::bar_button(ui, Icon::Redo, &redo_tip, false, can_redo, None)
-                        .clicked()
-                    {
-                        self.history_step_for(&path, false);
-                    }
-                    let undo_tip = format!(
-                        "Undo ({})",
-                        widgets::shortcut(&ctx, egui::Modifiers::COMMAND, egui::Key::Z)
-                    );
-                    let can_undo = self.history.can_undo_for(&path);
-                    if widgets::bar_button(ui, Icon::Undo, &undo_tip, false, can_undo, None)
-                        .clicked()
-                    {
-                        self.history_step_for(&path, true);
-                    }
                 }
                 if self.editor.loading || self.jobs.busy() > 0 {
                     ui.add_space(8.0);
@@ -1647,6 +1672,8 @@ impl NlpApp {
                 }
                 self.editor.pick = None;
             }
+        } else if self.editor.heal.is_some() {
+            self.heal_overlay(ui, &resp, rect, avail, i);
         } else {
             if resp.dragged() && self.editor.zoom.is_some() {
                 self.editor.zoom_anim = None;
@@ -1662,7 +1689,7 @@ impl NlpApp {
                 }
             }
         }
-        if !cropping && self.editor.pick.is_none() {
+        if !cropping && self.editor.pick.is_none() && self.editor.heal.is_none() {
             resp.context_menu(|ui| self.canvas_menu(ui, i));
         }
 

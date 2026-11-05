@@ -55,6 +55,8 @@ impl NlpApp {
                     (k(none, Key::J), "Show clipping"),
                     (k(none, Key::W), "Pick a neutral grey"),
                     (k(none, Key::C), "Crop & straighten"),
+                    (k(none, Key::Q), "Spot healing"),
+                    ("[ ]".into(), "Spot size, while healing"),
                     (k(none, Key::H), "Flip horizontally"),
                     (k(none, Key::F), "Show / hide the filmstrip"),
                     (k(none, Key::I), "Show / hide the image info"),

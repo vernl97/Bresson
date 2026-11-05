@@ -10,6 +10,7 @@ pub mod dodge;
 pub mod export;
 pub mod flat;
 pub mod frame;
+pub mod heal;
 pub mod icc;
 pub mod look;
 pub mod pipeline;

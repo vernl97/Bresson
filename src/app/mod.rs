@@ -1622,7 +1622,7 @@ mod ui_tests {
         shot(&mut h, &out, "6_editor_crop");
         {
             use egui_kittest::kittest::Queryable;
-            h.get_by_label("Detect frame").click();
+            h.get_by_label("Auto").click();
         }
         settle(&mut h, 30.0);
         shot(&mut h, &out, "7_editor_detect_frame");
@@ -2121,6 +2121,224 @@ mod ui_tests {
         h.key_press(egui::Key::Escape);
         h.run_steps(3);
         assert!(h.state().view == View::Folder && !h.state().frames.is_empty());
+    }
+
+    /// The crop panel and bar: Done and Close apply the pending crop, Esc drops it, Reset
+    /// goes back to the whole frame. With `NLP_UI_OUT` set it saves screenshots.
+    #[test]
+    fn crop_panel_applies_cancels_and_resets() {
+        use egui_kittest::kittest::Queryable;
+        let dir = std::env::temp_dir().join(format!("nlp_crop_ui_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::cli::synth_negative(&dir.join("a.tif"), 0.0).unwrap();
+        let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
+        let builder = Harness::builder().with_size(egui::vec2(1480.0, 940.0));
+        let builder = if out.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let d = dir.clone();
+        let mut h = builder.build_eframe(move |cc| NlpApp::new(cc, Some(d.clone())));
+        settle(&mut h, 30.0);
+        h.state_mut().roll.dialog = None;
+        h.state_mut().open_editor(0);
+        settle(&mut h, 30.0);
+        let i = h.state().active.unwrap();
+        let start = h.state().frames[i].sc.settings.clone();
+        let pending = [6.0, 4.0, 5.0, 8.0];
+
+        h.key_press(egui::Key::C);
+        h.run_steps(3);
+        h.state_mut().editor.set_pending_crop(pending, 2.5);
+        settle(&mut h, 10.0);
+        if let Some(out) = &out {
+            shot(&mut h, out, "crop_panel");
+        }
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        assert!(h.state().editor.crop.is_none(), "Esc leaves crop mode");
+        assert_eq!(h.state().frames[i].sc.settings.crop, start.crop, "Esc cancels");
+
+        h.key_press(egui::Key::C);
+        h.run_steps(3);
+        h.state_mut().editor.set_pending_crop(pending, 2.5);
+        h.run_steps(2);
+        h.get_by_label("Done").click();
+        h.run_steps(3);
+        let s = &h.state().frames[i].sc.settings;
+        assert!(h.state().editor.crop.is_none(), "Done leaves crop mode");
+        assert_eq!((s.crop, s.straighten), (pending, 2.5), "Done applies");
+
+        h.key_press(egui::Key::C);
+        h.run_steps(3);
+        h.get_by_label("Reset").click();
+        h.run_steps(3);
+        h.get_by_label("Close").click();
+        h.run_steps(3);
+        let s = &h.state().frames[i].sc.settings;
+        assert!(h.state().editor.crop.is_none(), "Close leaves crop mode");
+        assert_eq!((s.crop, s.straighten), ([0.0; 4], 0.0), "Reset, then Close");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The heal tool from the keyboard and the mouse: a click places a spot, a drag moves
+    /// it, undo takes it back, and a spot leaves the pixels only where it lies. With
+    /// `NLP_UI_OUT` set it saves screenshots.
+    #[test]
+    fn heal_tool_places_moves_and_removes_spots() {
+        let dir = std::env::temp_dir().join(format!("nlp_heal_ui_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.tif", "b.tif"] {
+            crate::cli::synth_negative(&dir.join(name), 0.0).unwrap();
+        }
+        let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
+        let builder = Harness::builder().with_size(egui::vec2(1480.0, 940.0));
+        let builder = if out.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let d = dir.clone();
+        let mut h = builder.build_eframe(move |cc| NlpApp::new(cc, Some(d.clone())));
+        settle(&mut h, 30.0);
+        h.state_mut().roll.dialog = None;
+        h.state_mut().open_editor(0);
+        settle(&mut h, 30.0);
+        let i = h.state().active.unwrap();
+        let spots = |h: &Harness<'_, NlpApp>| h.state().frames[i].sc.settings.heal.clone();
+        let snap = |h: &mut Harness<'_, NlpApp>, name: &str| {
+            if let Some(out) = &out {
+                shot(h, out, name);
+            }
+        };
+        let click = |h: &mut Harness<'_, NlpApp>, pos: egui::Pos2| {
+            h.hover_at(pos);
+            h.step();
+            h.drag_at(pos);
+            h.step();
+            h.drop_at(pos);
+            h.run_steps(3);
+        };
+
+        h.key_press(egui::Key::Q);
+        h.run_steps(3);
+        assert!(h.state().editor.heal.is_some(), "Q turns the tool on");
+        h.hover_at(egui::pos2(500.0, 400.0));
+        h.run_steps(3);
+        snap(&mut h, "heal_1_empty");
+
+        click(&mut h, egui::pos2(500.0, 400.0));
+        assert_eq!(spots(&h).len(), 1, "a click places a spot");
+        let first = spots(&h)[0];
+        assert_ne!(first.at, first.from, "the spot found a source");
+        settle(&mut h, 10.0);
+        snap(&mut h, "heal_2_placed");
+
+        // A drag on the spot moves it, and leaves the source where it was.
+        h.hover_at(egui::pos2(500.0, 400.0));
+        h.step();
+        h.drag_at(egui::pos2(500.0, 400.0));
+        h.step();
+        h.hover_at(egui::pos2(560.0, 380.0));
+        h.step();
+        h.hover_at(egui::pos2(620.0, 360.0));
+        h.run_steps(2);
+        assert_eq!(spots(&h)[0], first, "the drag isn't applied until released");
+        h.drop_at(egui::pos2(620.0, 360.0));
+        h.run_steps(3);
+        assert_eq!(spots(&h).len(), 1, "the drag made no new spot");
+        let moved = spots(&h)[0];
+        assert!(moved.at[0] > first.at[0], "the spot moved");
+        assert_eq!(moved.from, first.from, "its source stayed");
+
+        // Size keys change the selected spot.
+        h.key_press(egui::Key::CloseBracket);
+        h.run_steps(3);
+        assert!(spots(&h)[0].radius > moved.radius, "] grew the spot");
+
+        click(&mut h, egui::pos2(300.0, 600.0));
+        assert_eq!(spots(&h).len(), 2);
+        settle(&mut h, 10.0);
+        snap(&mut h, "heal_3_two_spots");
+
+        // The panel acts on the selected spot: Clone at once, Opacity on release.
+        click(&mut h, egui::pos2(1292.0, 269.0));
+        let last = |h: &Harness<'_, NlpApp>| *spots(h).last().unwrap();
+        assert_eq!(
+            last(&h).mode,
+            crate::engine::settings::HealMode::Clone,
+            "Clone applies to the selected spot"
+        );
+        assert_eq!(spots(&h).len(), 2, "the panel placed no spot");
+        h.hover_at(egui::pos2(1407.0, 336.0));
+        h.step();
+        h.drag_at(egui::pos2(1407.0, 336.0));
+        h.step();
+        h.hover_at(egui::pos2(1330.0, 336.0));
+        h.run_steps(2);
+        assert_eq!(last(&h).opacity, 100.0, "not applied while held");
+        h.drop_at(egui::pos2(1330.0, 336.0));
+        h.run_steps(3);
+        assert!(last(&h).opacity < 60.0, "Opacity applied on release");
+        settle(&mut h, 10.0);
+        snap(&mut h, "heal_3b_clone_opacity");
+        if let Some(edit) = h.state_mut().editor.heal.as_mut() {
+            edit.set_visualize(true);
+        }
+        h.run_steps(3);
+        snap(&mut h, "heal_4_visualize");
+        if let Some(edit) = h.state_mut().editor.heal.as_mut() {
+            edit.set_visualize(false);
+        }
+
+        // Undo restores the frame, Delete removes the selected spot.
+        let undo = |h: &mut Harness<'_, NlpApp>| {
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+            h.run_steps(3);
+        };
+        undo(&mut h);
+        assert_eq!(last(&h).opacity, 100.0, "undo took Opacity back");
+        undo(&mut h);
+        assert_eq!(
+            last(&h).mode,
+            crate::engine::settings::HealMode::Heal,
+            "undo took Clone back"
+        );
+        undo(&mut h);
+        assert_eq!(spots(&h).len(), 1, "undo took the spot back");
+        click(&mut h, egui::pos2(300.0, 600.0));
+        assert_eq!(spots(&h).len(), 2);
+        h.key_press(egui::Key::Delete);
+        h.run_steps(3);
+        assert_eq!(spots(&h).len(), 1, "Delete removed the selected spot");
+
+        // Pasting an edit leaves a frame's spots alone: dust belongs to its frame.
+        let mut other = h.state().frames[1].sc.settings.clone();
+        other.copy_edit_from(&h.state().frames[i].sc.settings);
+        assert!(other.heal.is_empty());
+
+        // The tool follows to the next frame, and Esc leaves the tool, not the editor.
+        h.key_press(egui::Key::ArrowRight);
+        h.run_steps(3);
+        assert!(h.state().editor.heal.is_some(), "the tool stayed on");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        assert!(h.state().editor.heal.is_none());
+        assert!(matches!(h.state().view, View::Editor));
+
+        // Crop and heal don't run together.
+        h.key_press(egui::Key::Q);
+        h.run_steps(2);
+        h.key_press(egui::Key::C);
+        h.run_steps(2);
+        assert!(h.state().editor.crop.is_some() && h.state().editor.heal.is_none());
+        h.key_press(egui::Key::Q);
+        h.run_steps(2);
+        assert!(h.state().editor.crop.is_none() && h.state().editor.heal.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Step until `done` holds and the Scan panel's worker is idle.

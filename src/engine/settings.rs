@@ -208,6 +208,44 @@ choice_enum!(
 /// Version of the conversion engine; part of [`AnalysisKey`].
 pub const ENGINE_VERSION: u32 = 5;
 
+/// How a spot uses its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HealMode {
+    /// A plain copy of the source, its tone and colour included.
+    Clone,
+    /// The source's texture, matched to the tone and colour around the spot.
+    #[default]
+    Heal,
+}
+
+/// One healed spot, in the source image before any geometry: `at` and `from` are
+/// normalised to its width and height, `radius` to its long edge. So a spot keeps its
+/// place through rotation and cropping, and at any decode size.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HealSpot {
+    /// The defect's centre.
+    pub at: [f32; 2],
+    /// The centre of the area copied over it.
+    pub from: [f32; 2],
+    pub radius: f32,
+    pub mode: HealMode,
+    /// 0..=100 %
+    pub opacity: f32,
+}
+
+impl Default for HealSpot {
+    fn default() -> Self {
+        Self {
+            at: [0.5; 2],
+            from: [0.5; 2],
+            radius: 0.006,
+            mode: HealMode::Heal,
+            opacity: 100.0,
+        }
+    }
+}
+
 /// Every parameter that influences how a frame is rendered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -298,6 +336,12 @@ pub struct Settings {
     /// Use the roll's aggregated analysis instead of the frame's own.
     pub use_roll: bool,
     pub roll_mode: RollMode,
+
+    // ---- Retouching ------------------------------------------------------------
+    /// Healed spots, in the order they apply. Specks are too small to matter to the
+    /// analysis, so this stays out of [`AnalysisKey`] and a spot needs no Convert.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub heal: Vec<HealSpot>,
 }
 
 impl Default for Settings {
@@ -352,6 +396,7 @@ impl Default for Settings {
             sharpening: Sharpening::LeaveAsSet,
             use_roll: false,
             roll_mode: RollMode::Lab,
+            heal: Vec::new(),
         }
     }
 }
@@ -421,6 +466,7 @@ impl Settings {
         (self.rotation, self.flip_h, self.straighten, self.crop) =
             (k.rotation, k.flip_h, k.straighten, k.crop);
         self.crop_aspect = k.crop_aspect;
+        self.heal = k.heal.clone();
         self.flat_field = k.flat_field.clone();
         (self.crosstalk, self.crosstalk_strength) = (k.crosstalk.clone(), k.crosstalk_strength);
     }

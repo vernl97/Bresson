@@ -270,7 +270,7 @@ pub fn detect_source(src: &SourceImage) -> super::settings::Source {
 }
 
 /// Build the negative's density image from linear source pixels: flat
-/// field, camera matrix, film base neutralisation, `log10`, crosstalk and
+/// field, healed spots, camera matrix, film base neutralisation, `log10`, crosstalk and
 /// calibration.
 pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Negative {
     let flat = s
@@ -278,8 +278,11 @@ pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Nega
         .as_deref()
         .and_then(super::flat::get)
         .map(|f| f.apply(&src.data, src.width, src.height));
+    let flat = flat.as_deref().unwrap_or(&src.data);
+    let healed = (!s.heal.is_empty())
+        .then(|| super::heal::apply(flat, src.width, src.height, &s.heal));
     let (d, w, h) = decode::geometry(
-        flat.as_deref().unwrap_or(&src.data),
+        healed.as_deref().unwrap_or(flat),
         src.width,
         src.height,
         s.rotation,

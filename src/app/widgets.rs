@@ -506,13 +506,16 @@ pub enum Icon {
     /// Back to the default value: an arrow turning anticlockwise.
     Reset,
     /// Undo and redo: the reset arrow, pointing back and forth.
-    Undo,
-    Redo,
     /// Crop bar: portrait / landscape swap, mirror, and the level line.
     Flip,
     Level,
     /// The crop tool: two overlapping corner brackets.
     Crop,
+    /// Spot healing: a sticking plaster.
+    Heal,
+    /// The crop's aspect lock, closed and open.
+    Lock,
+    Unlock,
     /// A stand-in glyph for tools that are not built yet.
     Placeholder,
 }
@@ -616,42 +619,6 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 st,
             ));
         }
-        Icon::Undo | Icon::Redo => {
-            // A solid curved arrow: undo points left, redo is its mirror image.
-            let flip = if icon == Icon::Redo { -1.0 } else { 1.0 };
-            let q = |x: f32, y: f32| pos2(c.x + flip * x * s, c.y + y * s);
-            p.add(Shape::convex_polygon(
-                vec![q(-7.8, -1.6), q(-0.7, -7.0), q(-0.7, 4.0)],
-                color,
-                Stroke::NONE,
-            ));
-            let bez = |a: (f32, f32), k: (f32, f32), b: (f32, f32), t: f32| {
-                let u = 1.0 - t;
-                (
-                    u * u * a.0 + 2.0 * u * t * k.0 + t * t * b.0,
-                    u * u * a.1 + 2.0 * u * t * k.1 + t * t * b.1,
-                )
-            };
-            let n = 10;
-            let outer: Vec<(f32, f32)> = (0..=n)
-                .map(|i| bez((-1.0, -4.2), (5.4, -4.4), (7.9, 7.2), i as f32 / n as f32))
-                .collect();
-            let inner: Vec<(f32, f32)> = (0..=n)
-                .map(|i| bez((-1.0, 1.6), (4.6, 1.4), (7.9, 7.2), i as f32 / n as f32))
-                .collect();
-            for i in 0..n {
-                p.add(Shape::convex_polygon(
-                    vec![
-                        q(outer[i].0, outer[i].1),
-                        q(outer[i + 1].0, outer[i + 1].1),
-                        q(inner[i + 1].0, inner[i + 1].1),
-                        q(inner[i].0, inner[i].1),
-                    ],
-                    color,
-                    Stroke::new(0.5, color),
-                ));
-            }
-        }
         Icon::Flag => {
             p.add(line(vec![q(-5.0, -8.0), q(-5.0, 8.0)]));
             p.add(Shape::closed_line(
@@ -722,6 +689,42 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Crop => {
             p.add(line(vec![q(-4.0, -9.0), q(-4.0, 4.0), q(9.0, 4.0)]));
             p.add(line(vec![q(-9.0, -4.0), q(4.0, -4.0), q(4.0, 9.0)]));
+        }
+        Icon::Heal => {
+            // A capsule lying at 45°, with its pad across the middle.
+            const R: f32 = 3.9;
+            let k = std::f32::consts::FRAC_1_SQRT_2;
+            let along = |t: f32, n: f32| q((t + n) * k, (n - t) * k);
+            let (a, b) = (along(5.4, 0.0), along(-5.4, 0.0));
+            let quarter = std::f32::consts::FRAC_PI_4;
+            let half = std::f32::consts::PI;
+            let mut outline = arc(a, R * s, -quarter - half / 2.0, -quarter + half / 2.0, 8);
+            outline.extend(arc(b, R * s, -quarter + half / 2.0, -quarter + half * 1.5, 8));
+            p.add(Shape::closed_line(outline, st));
+            p.line_segment([along(2.6, -R), along(2.6, R)], st);
+            p.line_segment([along(-2.6, -R), along(-2.6, R)], st);
+            p.circle_filled(along(0.0, -1.1), 0.75 * s, color);
+            p.circle_filled(along(0.0, 1.1), 0.75 * s, color);
+        }
+        Icon::Lock | Icon::Unlock => {
+            p.rect_stroke(
+                Rect::from_min_max(q(-5.5, -1.0), q(5.5, 7.5)),
+                1.5,
+                st,
+                egui::StrokeKind::Middle,
+            );
+            // An open shackle swings up and off its right-hand post.
+            let lift = if icon == Icon::Lock { 0.0 } else { 2.5 };
+            let mut shackle = vec![q(-3.5, -1.0 - lift)];
+            shackle.extend(arc(
+                q(0.0, -4.5 - lift),
+                3.5 * s,
+                std::f32::consts::PI,
+                std::f32::consts::TAU,
+                10,
+            ));
+            shackle.push(q(3.5, if icon == Icon::Lock { -1.0 } else { -4.5 - lift }));
+            p.add(line(shackle));
         }
         Icon::Placeholder => {
             p.rect_stroke(

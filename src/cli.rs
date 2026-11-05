@@ -247,7 +247,7 @@ fn convert(args: Vec<String>) -> Result<()> {
 
 /// Write the physically modelled ColorChecker negative (`testchart`),
 /// exposed `ev` stops over normal, as a linear-light 16-bit TIFF.
-fn synth_negative(path: &Path, ev: f64) -> Result<()> {
+pub(crate) fn synth_negative(path: &Path, ev: f64) -> Result<()> {
     let chart = crate::engine::testchart::negative(ev);
     let src = &chart.src;
     let px: Vec<[f32; 3]> = src

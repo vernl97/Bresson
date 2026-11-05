@@ -613,6 +613,12 @@ pub fn crop(
     (out, nw, nh)
 }
 
+/// Size of the rectangle [`straighten`] keeps, for the angle's cosine and sine.
+fn straightened_size(wf: f32, hf: f32, c: f32, s: f32) -> (usize, usize) {
+    let sc = (hf / (hf * c.abs() + wf * s.abs())).min(wf / (wf * c.abs() + hf * s.abs()));
+    (((wf * sc) as usize).max(1), ((hf * sc) as usize).max(1))
+}
+
 /// Fine rotation (degrees, clockwise) with bilinear sampling, cropped to the
 /// largest rectangle of the original aspect ratio that contains no border.
 pub fn straighten(
@@ -627,9 +633,7 @@ pub fn straighten(
     let th = deg.to_radians();
     let (c, s) = (th.cos(), th.sin());
     let (wf, hf) = (w as f32, h as f32);
-    let sc = (hf / (hf * c.abs() + wf * s.abs())).min(wf / (wf * c.abs() + hf * s.abs()));
-    let nw = ((wf * sc) as usize).max(1);
-    let nh = ((hf * sc) as usize).max(1);
+    let (nw, nh) = straightened_size(wf, hf, c, s);
     let (cx, cy) = ((wf - 1.0) / 2.0, (hf - 1.0) / 2.0);
     let (ox, oy) = ((nw as f32 - 1.0) / 2.0, (nh as f32 - 1.0) / 2.0);
     use rayon::prelude::*;
@@ -667,4 +671,153 @@ pub fn geometry(
     let (d, w, h) = rotate_flip(data, w, h, rotation, flip_h);
     let (d, w, h) = straighten(&d, w, h, straighten_deg);
     crop(&d, w, h, insets)
+}
+
+/// Where [`geometry`] puts a source pixel, and back. Coordinates are in pixels, a
+/// pixel's centre at its index, and geometry never resamples, so one source pixel
+/// stays one output pixel in size.
+#[derive(Debug, Clone, Copy)]
+pub struct GeometryMap {
+    src: (f32, f32),
+    rotation: u8,
+    flip_h: bool,
+    /// Size after the quarter turns.
+    turned: (f32, f32),
+    /// Cosine and sine of the fine rotation.
+    angle: Option<(f32, f32)>,
+    /// Size after straightening.
+    straight: (f32, f32),
+    offset: (f32, f32),
+    /// The size [`geometry`] returns.
+    pub out: (usize, usize),
+}
+
+impl GeometryMap {
+    pub fn new(
+        w: usize,
+        h: usize,
+        rotation: u8,
+        flip_h: bool,
+        straighten_deg: f32,
+        insets: [f32; 4],
+    ) -> Self {
+        let rotation = rotation % 4;
+        let (tw, th) = if rotation % 2 == 1 { (h, w) } else { (w, h) };
+        let angle = (straighten_deg.abs() >= 0.01 && tw >= 2 && th >= 2).then(|| {
+            let a = straighten_deg.to_radians();
+            (a.cos(), a.sin())
+        });
+        let (sw, sh) = match angle {
+            Some((c, s)) => straightened_size(tw as f32, th as f32, c, s),
+            None => (tw, th),
+        };
+        // As `crop` works them out.
+        let inset = |v: f32, size: usize| ((v.clamp(0.0, 45.0) / 100.0) * size as f32) as usize;
+        let (l, t) = (inset(insets[0], sw), inset(insets[1], sh));
+        let (r, b) = (inset(insets[2], sw), inset(insets[3], sh));
+        Self {
+            src: (w as f32, h as f32),
+            rotation,
+            flip_h,
+            turned: (tw as f32, th as f32),
+            angle,
+            straight: (sw as f32, sh as f32),
+            offset: (l as f32, t as f32),
+            out: (
+                sw.saturating_sub(l + r).max(1),
+                sh.saturating_sub(t + b).max(1),
+            ),
+        }
+    }
+
+    /// Source pixel to output pixel.
+    pub fn to_view(&self, x: f32, y: f32) -> (f32, f32) {
+        let (w, h) = self.src;
+        let (mut x, mut y) = match self.rotation {
+            1 => (h - 1.0 - y, x),
+            2 => (w - 1.0 - x, h - 1.0 - y),
+            3 => (y, w - 1.0 - x),
+            _ => (x, y),
+        };
+        if self.flip_h {
+            x = self.turned.0 - 1.0 - x;
+        }
+        if let Some((c, s)) = self.angle {
+            let (sx, sy) = (
+                x - (self.turned.0 - 1.0) / 2.0,
+                y - (self.turned.1 - 1.0) / 2.0,
+            );
+            x = (self.straight.0 - 1.0) / 2.0 + sx * c - sy * s;
+            y = (self.straight.1 - 1.0) / 2.0 + sx * s + sy * c;
+        }
+        (x - self.offset.0, y - self.offset.1)
+    }
+
+    /// Output pixel to source pixel.
+    pub fn to_source(&self, x: f32, y: f32) -> (f32, f32) {
+        let (mut x, mut y) = (x + self.offset.0, y + self.offset.1);
+        if let Some((c, s)) = self.angle {
+            let (dx, dy) = (
+                x - (self.straight.0 - 1.0) / 2.0,
+                y - (self.straight.1 - 1.0) / 2.0,
+            );
+            x = (self.turned.0 - 1.0) / 2.0 + dx * c + dy * s;
+            y = (self.turned.1 - 1.0) / 2.0 - dx * s + dy * c;
+        }
+        if self.flip_h {
+            x = self.turned.0 - 1.0 - x;
+        }
+        let (w, h) = self.src;
+        match self.rotation {
+            1 => (y, h - 1.0 - x),
+            2 => (w - 1.0 - x, h - 1.0 - y),
+            3 => (w - 1.0 - y, x),
+            _ => (x, y),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_geometry_map_finds_a_pixel_where_geometry_puts_it() {
+        let (w, h) = (90usize, 60usize);
+        for rotation in 0..4u8 {
+            for flip in [false, true] {
+                for angle in [0.0f32, 3.0, -7.5] {
+                    for insets in [[0.0; 4], [10.0, 5.0, 20.0, 15.0]] {
+                        let (sx, sy) = (40usize, 30usize);
+                        // A smooth blob, so its centre survives bilinear resampling.
+                        let mut d = vec![[0.0f32; 3]; w * h];
+                        for dy in -3..=3isize {
+                            for dx in -3..=3isize {
+                                let v = 1.0 - (dx * dx + dy * dy) as f32 / 20.0;
+                                d[(sy as isize + dy) as usize * w + (sx as isize + dx) as usize] =
+                                    [v.max(0.0); 3];
+                            }
+                        }
+                        let (out, ow, oh) = geometry(&d, w, h, rotation, flip, angle, insets);
+                        let map = GeometryMap::new(w, h, rotation, flip, angle, insets);
+                        assert_eq!(map.out, (ow, oh));
+                        let (mut mx, mut my, mut m) = (0.0f32, 0.0f32, 0.0f32);
+                        for (k, p) in out.iter().enumerate() {
+                            mx += (k % ow) as f32 * p[0];
+                            my += (k / ow) as f32 * p[0];
+                            m += p[0];
+                        }
+                        let (vx, vy) = map.to_view(sx as f32, sy as f32);
+                        let (dx, dy) = (mx / m - vx, my / m - vy);
+                        assert!(
+                            dx.abs() < 0.3 && dy.abs() < 0.3,
+                            "rot {rotation} flip {flip} angle {angle}: off by {dx},{dy}"
+                        );
+                        let (bx, by) = map.to_source(vx, vy);
+                        assert!((bx - sx as f32).abs() < 1e-3 && (by - sy as f32).abs() < 1e-3);
+                    }
+                }
+            }
+        }
+    }
 }

@@ -179,7 +179,16 @@ For every pixel, in this order:
    is sampled bilinearly and multiplied in at source resolution. (Uneven
    light is multiplicative, i.e. a spatially varying density offset the
    levels cannot absorb.)
-2. **Geometry** (`decode::geometry`): quarter turns → flip → straighten
+2. **Healed spots** (`heal.rs`, `Settings::heal`, only when there are any). Each
+   spot, in order, is seamless cloning on a disc: the source patch, whole pixels
+   away so its grain stays sharp, plus the harmonic function taking it to the
+   frame around the rim. On a disc that function is the Poisson integral of the
+   rim's log differences (`(1 − ρ²) / |u − p|²` over up to 96 rim samples just
+   outside the disc), so no solver is needed. The outer fifth of the radius
+   feathers, in log, and Opacity scales the blend. Clone mode leaves out the
+   rim's differences and copies the source as it is. Spots are stored normalised to the source before geometry,
+   so they hold through rotation and cropping and fit any decode size.
+3. **Geometry** (`decode::geometry`): quarter turns → flip → straighten
    (bilinear, cropped to the largest border‑free rectangle of the same
    aspect) → crop insets.
 3. *Linear Scan only*: values are sRGB‑encoded again (undoing the bitmap
@@ -698,7 +707,9 @@ flat field. These change the
 density image or how it is measured, so changing any of them needs
 **Convert** again. Everything else — tone, WB, filtration, print exposure,
 looks, Hyper Tone, sharpening, geometry, roll mode — only rebuilds the
-`Renderer`.
+`Renderer`. Healed spots change the density image, but too little for the
+blurred analysis buffer to notice, so they re‑prepare the negative without
+asking for a Convert.
 
 ---
 

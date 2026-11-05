@@ -20,16 +20,6 @@ pub struct History {
 }
 
 impl History {
-    /// Whether `path` has an edit to undo.
-    pub fn can_undo_for(&self, path: &Path) -> bool {
-        self.undo.iter().flatten().any(|(p, _)| p == path)
-    }
-
-    /// Whether `path` has an undone edit to redo.
-    pub fn can_redo_for(&self, path: &Path) -> bool {
-        self.redo.iter().flatten().any(|(p, _)| p == path)
-    }
-
     /// Record a step: the frames' settings before an edit. A new edit ends
     /// the redo chain of the frames it touches, and only theirs.
     pub fn push(&mut self, step: Step) {
@@ -132,6 +122,16 @@ impl NlpApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl History {
+        fn can_undo_for(&self, path: &Path) -> bool {
+            self.undo.iter().flatten().any(|(p, _)| p == path)
+        }
+
+        fn can_redo_for(&self, path: &Path) -> bool {
+            self.redo.iter().flatten().any(|(p, _)| p == path)
+        }
+    }
 
     fn step(paths: &[&str]) -> Step {
         paths
