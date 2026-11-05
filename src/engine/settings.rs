@@ -76,13 +76,13 @@ choice_enum!(
         Logarithmic => "Cinematic - Log",
         LogarithmicRich => "Cinematic - Rich",
         LogarithmicFlat => "Cinematic - Flat",
-        Standard => "LAB - Standard",
-        AllSoft => "LAB - Soft",
-        AllHard => "LAB - Hard",
-        HighlightHard => "LAB - Highlight Hard",
-        HighlightSoft => "LAB - Highlight Soft",
-        ShadowHard => "LAB - Shadow Hard",
-        ShadowSoft => "LAB - Shadow Soft",
+        Standard => "Print - Standard",
+        AllSoft => "Print - Soft",
+        AllHard => "Print - Hard",
+        HighlightHard => "Print - Highlight Hard",
+        HighlightSoft => "Print - Highlight Soft",
+        ShadowHard => "Print - Shadow Hard",
+        ShadowSoft => "Print - Shadow Soft",
         Linear => "Linear",
         LinearGamma => "Linear + Gamma",
         LinearDeep => "Linear + Deep",
@@ -276,7 +276,7 @@ pub struct Settings {
     pub wb_temp: f32,
     /// Magenta printing filtration from white balance, in CC (+ magenta).
     pub wb_tint: f32,
-    /// Lab correction (the C·M·Y keys) as printing filtration in CC:
+    /// Lab correction as printing filtration in CC:
     /// + takes away red / green / blue.
     pub filtration: [f32; 3],
     /// Mids: red <-> cyan (`cyan`), green <-> magenta (`tint`), blue <-> yellow (`temp`).
@@ -598,77 +598,6 @@ pub struct FilmMetadata {
 
 impl FilmMetadata {}
 
-/// Lab-scanner corrections: the Frontier/Noritsu D·C·M·Y keys, in fixed
-/// steps of print exposure and printing filtration.
-pub mod lab {
-    use super::Settings;
-
-    /// One density click: 1/6 EV, about 0.05 D.
-    pub const D_STEP: f32 = 1.0 / 6.0;
-    /// One colour click, in CC of filtration.
-    pub const C_STEP: f32 = 2.5;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Channel {
-        /// Print density: + is darker.
-        D,
-        C,
-        M,
-        Y,
-    }
-
-    fn value(s: &mut Settings, ch: Channel) -> (&mut f32, f32, f32) {
-        match ch {
-            // Density runs against print exposure (+ EV = lighter).
-            Channel::D => (&mut s.print_exposure, -D_STEP, 5.0),
-            Channel::C => (&mut s.filtration[0], C_STEP, 50.0),
-            Channel::M => (&mut s.filtration[1], C_STEP, 50.0),
-            Channel::Y => (&mut s.filtration[2], C_STEP, 50.0),
-        }
-    }
-
-    /// Move `ch` by `clicks` steps.
-    pub fn nudge(s: &mut Settings, ch: Channel, clicks: i32) {
-        let (v, step, max) = value(s, ch);
-        *v = (*v + step * clicks as f32).clamp(-max, max);
-    }
-
-    /// Current offsets in clicks: D, C, M, Y.
-    pub fn clicks(s: &Settings) -> [i32; 4] {
-        let mut s = s.clone();
-        [Channel::D, Channel::C, Channel::M, Channel::Y].map(|ch| {
-            let (v, step, _) = value(&mut s, ch);
-            (*v / step).round() as i32
-        })
-    }
-
-    /// Zero density and the filtration.
-    pub fn reset(s: &mut Settings) {
-        s.print_exposure = 0.0;
-        s.filtration = [0.0; 3];
-    }
-
-    /// "D+2 C−1 M0 Y+1", or `None` when every offset is zero.
-    pub fn readout(s: &Settings) -> Option<String> {
-        let c = clicks(s);
-        if c == [0; 4] {
-            return None;
-        }
-        let f = |v: i32| match v {
-            0 => "0".to_string(),
-            v if v > 0 => format!("+{v}"),
-            v => format!("−{}", -v),
-        };
-        Some(format!(
-            "D{} C{} M{} Y{}",
-            f(c[0]),
-            f(c[1]),
-            f(c[2]),
-            f(c[3])
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,26 +642,6 @@ mod tests {
         assert_eq!(mine.name, "Web");
         assert_eq!(mine.export.output_dir, None);
         assert!(mine.matches(&ex) && !l.matches(&ex));
-    }
-
-    #[test]
-    fn lab_keys_step_and_read_out() {
-        let mut s = Settings::default();
-        assert_eq!(lab::readout(&s), None);
-        lab::nudge(&mut s, lab::Channel::D, 2);
-        lab::nudge(&mut s, lab::Channel::C, -1);
-        lab::nudge(&mut s, lab::Channel::Y, 3);
-        assert!(s.print_exposure < 0.0, "denser prints are darker");
-        assert_eq!(lab::clicks(&s), [2, -1, 0, 3]);
-        assert_eq!(lab::readout(&s).unwrap(), "D+2 C−1 M0 Y+3");
-        let key = s.analysis_key();
-        lab::reset(&mut s);
-        assert_eq!(lab::readout(&s), None);
-        assert_eq!(s.analysis_key(), key);
-        for _ in 0..100 {
-            lab::nudge(&mut s, lab::Channel::M, 1);
-        }
-        assert_eq!(s.filtration[1], 50.0);
     }
 
     #[test]

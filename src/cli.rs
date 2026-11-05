@@ -20,7 +20,7 @@ USAGE:
 CONVERT OPTIONS:
   --roll               Analyse all files as one roll
   --roll-process NAME  Lab (default: density per frame) | Darkroom (one exposure)
-  --tone NAME          Tone profile, e.g. \"LAB - Standard\" (or Standard), \"Cinematic - Rich\"
+  --tone NAME          Tone profile, e.g. \"Print - Standard\" (or Standard), \"Cinematic - Rich\"
   --wb NAME            White balance (Auto-Neutral, Kodak, Fuji, ...)
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
   --border PCT         Border buffer percent (default 5)
@@ -109,7 +109,11 @@ fn convert(args: Vec<String>) -> Result<()> {
         match a.as_str() {
             "--roll" => roll = true,
             "--roll-process" => s.roll_mode = find(RollMode::ALL, RollMode::label, &val()?)?,
-            "--tone" => s.tone_profile = find(ToneProfile::ALL, ToneProfile::label, &val()?)?,
+            "--tone" => {
+                // "LAB - …" is what the Print profiles used to be called.
+                let name = val()?.to_ascii_lowercase().replace("lab - ", "print - ");
+                s.tone_profile = find(ToneProfile::ALL, ToneProfile::label, &name)?
+            }
             "--wb" => s.wb_mode = find(WbMode::ALL, WbMode::label, &val()?)?,
             "--lut" => s.lut = find(Lut::ALL, Lut::label, &val()?)?,
             "--border" => s.border_buffer = val()?.parse()?,

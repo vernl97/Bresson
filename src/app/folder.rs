@@ -251,14 +251,13 @@ impl NlpApp {
 
     /// Start screen shown when there are no projects yet.
     fn welcome_ui(&mut self, ui: &mut egui::Ui) {
-        let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG))
             .show(ui, |ui| {
                 let avail = ui.max_rect();
-                let zone_w = (avail.width() - 64.0).clamp(280.0, 560.0);
-                let zone_h = (avail.height() * 0.36).clamp(180.0, 280.0);
-                let content_h = 64.0 + 28.0 + zone_h + 18.0 + 44.0;
+                let zone_w = (avail.width() - 64.0).clamp(280.0, 520.0);
+                let zone_h = (avail.height() * 0.26).clamp(150.0, 210.0);
+                let content_h = 64.0 + 24.0 + zone_h + 16.0 + 28.0 + 12.0 + 18.0;
                 ui.add_space(((avail.height() - content_h) * 0.45).max(24.0));
                 ui.vertical_centered(|ui| {
                     ui.label(
@@ -267,17 +266,11 @@ impl NlpApp {
                             .color(theme::TEXT),
                     );
                     ui.label(RichText::new("Film negative conversion").color(theme::MUTED));
-                    ui.add_space(28.0);
+                    ui.add_space(24.0);
 
                     let (zone, resp) = ui.allocate_exact_size(vec2(zone_w, zone_h), Sense::click());
                     let p = ui.painter();
-                    let (fill, stroke, fg) = if hovering {
-                        (
-                            theme::ACCENT.gamma_multiply(0.12),
-                            egui::Stroke::new(1.5, theme::ACCENT),
-                            theme::ACCENT,
-                        )
-                    } else if resp.hovered() {
+                    let (fill, stroke, fg) = if resp.hovered() {
                         (
                             theme::PANEL,
                             egui::Stroke::new(1.0, Color32::from_white_alpha(28)),
@@ -301,13 +294,9 @@ impl NlpApp {
                     p.text(
                         c + vec2(0.0, 14.0),
                         egui::Align2::CENTER_CENTER,
-                        if hovering {
-                            "Drop to open"
-                        } else {
-                            "Drop a folder or scans here"
-                        },
+                        "Drop a folder or scans here",
                         theme::medium(15.0),
-                        if hovering { theme::ACCENT } else { theme::TEXT },
+                        theme::TEXT,
                     );
                     p.text(
                         c + vec2(0.0, 36.0),
@@ -323,17 +312,29 @@ impl NlpApp {
                         self.choose_anything();
                     }
 
-                    ui.add_space(18.0);
+                    ui.add_space(16.0);
+                    if ui
+                        .add(widgets::ghost("New roll…"))
+                        .on_hover_text("Choose or create a folder, then scan film into it")
+                        .clicked()
+                    {
+                        self.choose_new_roll();
+                    }
+                    ui.add_space(12.0);
                     ui.label(
-                        RichText::new("Camera RAW · TIFF · JPEG · PNG")
-                            .small()
-                            .color(theme::FAINT),
+                        RichText::new(
+                            "Camera RAW · TIFF · JPEG · PNG, or scan film into a new roll",
+                        )
+                        .small()
+                        .color(theme::FAINT),
                     );
                 });
             });
+        widgets::drop_overlay(ui.ctx());
     }
 
     pub fn folder_ui(&mut self, ui: &mut egui::Ui) {
+        self.open_shortcut(ui.ctx());
         // An open roll shows its (maybe still empty) grid, so its Scan button is reachable.
         let empty_roll = self.folder.is_some() && !self.single_mode && !self.roll.projects_open;
         if self.frames.is_empty() && !empty_roll {
@@ -416,17 +417,53 @@ impl NlpApp {
                             .as_ref()
                             .map(|r| r.metadata.film_stock.clone())
                             .filter(|s| !s.trim().is_empty());
-                        if let Some(stock) = stock
-                            && ui
-                                .add(
-                                    egui::Label::new(RichText::new(stock).color(theme::MUTED))
-                                        .sense(Sense::click()),
-                                )
+                        if let Some(stock) = stock {
+                            // A chip like the editor's, with a chevron: it opens the dialog.
+                            const CHEVRON_W: f32 = 12.0;
+                            let font = egui::TextStyle::Small.resolve(ui.style());
+                            let size = ui
+                                .painter()
+                                .layout_no_wrap(stock.clone(), font.clone(), theme::MUTED)
+                                .size();
+                            let (rect, resp) = ui.allocate_exact_size(
+                                size + vec2(14.0 + CHEVRON_W, 6.0),
+                                Sense::click(),
+                            );
+                            let hot = resp.hovered();
+                            let (fill, ink) = if hot {
+                                (theme::HOVER, theme::TEXT)
+                            } else {
+                                (theme::SURFACE, theme::MUTED)
+                            };
+                            ui.painter().rect_filled(rect, 5.0, fill);
+                            if hot {
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    5.0,
+                                    egui::Stroke::new(1.0, theme::PRESSED),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            let g = ui.painter().layout_no_wrap(stock, font, ink);
+                            let text_at =
+                                pos2(rect.left() + 7.0, rect.center().y - g.size().y / 2.0);
+                            ui.painter().galley(text_at, g, ink);
+                            let cc = pos2(rect.right() - CHEVRON_W / 2.0 - 2.0, rect.center().y);
+                            let (w, h) = (2.8, 1.6);
+                            for seg in [
+                                [cc + vec2(-w, -h), cc + vec2(0.0, h)],
+                                [cc + vec2(0.0, h), cc + vec2(w, -h)],
+                            ] {
+                                ui.painter()
+                                    .line_segment(seg, egui::Stroke::new(1.2, ink));
+                            }
+                            if resp
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text("Film stock · click for roll info")
                                 .clicked()
-                        {
-                            self.open_roll_dialog(&f, false);
+                            {
+                                self.open_roll_dialog(&f, false);
+                            }
                         }
                     }
                     self.source_chip(ui);
@@ -677,6 +714,19 @@ impl NlpApp {
             });
     }
 
+    /// Cmd+O, on the start screens as well as in a roll.
+    fn open_shortcut(&mut self, ctx: &egui::Context) {
+        let busy = ctx.egui_wants_keyboard_input()
+            || self.shortcuts_open
+            || self.scan.open
+            || self.export_targets.is_some()
+            || self.convert_dialog.is_some()
+            || self.roll.dialog.is_some();
+        if !busy && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
+            self.choose_anything();
+        }
+    }
+
     fn folder_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() || self.shortcuts_open {
             return;
@@ -768,19 +818,6 @@ impl NlpApp {
         }
         if export {
             self.open_export_dialog(self.export_scope());
-        }
-        if let Some(key) = super::lab_key(ctx).filter(|_| self.export_targets.is_none()) {
-            let sel = self.sel_vec();
-            let converted: Vec<usize> = sel
-                .iter()
-                .copied()
-                .filter(|&i| self.frames[i].sc.is_converted())
-                .collect();
-            self.record(&converted);
-            let n = sel.iter().filter(|&&i| self.apply_lab_key(i, key)).count();
-            if n < sel.len() {
-                self.toast("Only converted frames can be corrected", false);
-            }
         }
     }
 

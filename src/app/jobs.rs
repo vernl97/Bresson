@@ -52,6 +52,20 @@ pub enum JobResult {
         items: Vec<ConvertItem>,
         spread: f64,
     },
+    /// A roll's details for the Projects screen, ahead of its frames.
+    RollSummary {
+        dir: PathBuf,
+        exists: bool,
+        info: Option<sidecar::RollInfo>,
+        count: usize,
+        /// Unix seconds of the newest sidecar.
+        edited: Option<u64>,
+    },
+    /// A few rendered frames of a roll for the Projects screen.
+    RollCover {
+        dir: PathBuf,
+        frames: Vec<egui::ColorImage>,
+    },
     Message(String),
     /// From the scanner worker (`scanner.rs`).
     Scan(super::scanner::ScanEvent),
@@ -101,6 +115,25 @@ impl Jobs {
             ctx.request_repaint();
         });
     }
+}
+
+/// The scans a roll folder holds, in frame order.
+pub fn folder_scans(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            // `file_type` comes with the listing; `Path::is_file` is a
+            // stat per entry, slow on a network drive.
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file() || t.is_symlink()))
+                .map(|e| e.path())
+                .filter(|p| {
+                    decode::is_folder_scan(p) && !p.to_string_lossy().ends_with("-prepped.tif")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+    files
 }
 
 // ---- proxy cache -----------------------------------------------------------------

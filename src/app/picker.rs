@@ -2,6 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
+/// Confirm buttons of the Projects screen's folder choosers.
+pub const NEW_ROLL_PROMPT: &str = "Use Folder";
+pub const LOCATE_PROMPT: &str = "Locate";
+
 /// Let the user choose one or more images, or a folder. Returns the chosen
 /// paths (empty when cancelled).
 #[cfg(target_os = "macos")]
@@ -53,12 +57,7 @@ pub fn pick_folder(start: Option<&Path>, prompt: Option<&str>) -> Option<PathBuf
     panel.setCanCreateDirectories(true);
 
     let prompt_str = prompt.unwrap_or("Open");
-    let msg = if prompt_str.eq_ignore_ascii_case("choose") {
-        "Choose Output Directory"
-    } else {
-        "Open a folder of negative scans"
-    };
-    panel.setMessage(Some(&NSString::from_str(msg)));
+    panel.setMessage(Some(&NSString::from_str(folder_message(prompt))));
     panel.setPrompt(Some(&NSString::from_str(prompt_str)));
 
     if let Some(dir) = start {
@@ -80,13 +79,18 @@ pub fn pick_folder(start: Option<&Path>, prompt: Option<&str>) -> Option<PathBuf
     rfd_pick_folder(start, prompt)
 }
 
+/// The folder chooser's message, by its confirm button.
+fn folder_message(prompt: Option<&str>) -> &'static str {
+    match prompt.unwrap_or("") {
+        "Choose" => "Choose Output Directory",
+        NEW_ROLL_PROMPT => "Choose or create a folder for the new roll",
+        LOCATE_PROMPT => "Find the folder this roll moved to",
+        _ => "Open a folder of negative scans",
+    }
+}
+
 fn rfd_pick_folder(start: Option<&Path>, prompt: Option<&str>) -> Option<PathBuf> {
-    let title = if prompt.unwrap_or("").eq_ignore_ascii_case("choose") {
-        "Choose Output Directory"
-    } else {
-        "Open a folder of negative scans"
-    };
-    let mut d = rfd::FileDialog::new().set_title(title);
+    let mut d = rfd::FileDialog::new().set_title(folder_message(prompt));
     if let Some(s) = start {
         d = d.set_directory(s);
     }

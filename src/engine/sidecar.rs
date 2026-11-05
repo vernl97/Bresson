@@ -288,6 +288,30 @@ pub fn remember_project(d: &mut Defaults, dir: &Path) {
     d.projects.insert(0, dir.to_path_buf());
 }
 
+/// Take `dir` off the Projects list. Startup would re-add it from
+/// `last_folder`, so that goes too.
+pub fn forget_project(d: &mut Defaults, dir: &Path) {
+    d.projects.retain(|p| p != dir);
+    if d.last_folder.as_deref() == Some(dir) {
+        d.last_folder = None;
+    }
+}
+
+/// A roll's folder moved: `new` takes the place of `old` in the Projects list.
+pub fn relocate_project(d: &mut Defaults, old: &Path, new: &Path) {
+    if old == new {
+        return;
+    }
+    if d.projects.iter().any(|p| p == new) {
+        d.projects.retain(|p| p != old);
+    } else if let Some(p) = d.projects.iter_mut().find(|p| p.as_path() == old) {
+        *p = new.to_path_buf();
+    }
+    if d.last_folder.as_deref() == Some(old) {
+        d.last_folder = Some(new.to_path_buf());
+    }
+}
+
 /// Details for a whole roll, kept in `<folder>/NLP/roll.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -319,17 +343,6 @@ pub fn save_roll_info(dir: &Path, info: &RollInfo) -> Result<()> {
     }
     std::fs::write(&path, serde_json::to_string_pretty(info)?)?;
     Ok(())
-}
-
-/// Number of frames with a sidecar in a scan folder.
-pub fn sidecar_count(dir: &Path) -> usize {
-    std::fs::read_dir(dir.join("NLP"))
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .filter(|e| e.file_name().to_string_lossy().ends_with(".nlp.json"))
-                .count()
-        })
-        .unwrap_or(0)
 }
 
 pub fn load_defaults() -> Defaults {
@@ -401,6 +414,47 @@ pub fn remove_stale_thumbs(image: &Path, keep: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forgetting_a_project_clears_last_folder() {
+        let mut d = Defaults {
+            projects: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            last_folder: Some(PathBuf::from("/a")),
+            ..Default::default()
+        };
+        forget_project(&mut d, Path::new("/b"));
+        assert_eq!(d.projects, vec![PathBuf::from("/a")]);
+        assert_eq!(d.last_folder, Some(PathBuf::from("/a")));
+        forget_project(&mut d, Path::new("/a"));
+        assert!(d.projects.is_empty());
+        assert_eq!(d.last_folder, None);
+    }
+
+    #[test]
+    fn relocating_a_project_keeps_its_place() {
+        let mut d = Defaults {
+            projects: vec![
+                PathBuf::from("/a"),
+                PathBuf::from("/b"),
+                PathBuf::from("/c"),
+            ],
+            last_folder: Some(PathBuf::from("/b")),
+            ..Default::default()
+        };
+        relocate_project(&mut d, Path::new("/b"), Path::new("/moved"));
+        assert_eq!(
+            d.projects,
+            vec![
+                PathBuf::from("/a"),
+                PathBuf::from("/moved"),
+                PathBuf::from("/c"),
+            ]
+        );
+        assert_eq!(d.last_folder, Some(PathBuf::from("/moved")));
+        // Pointing it at a roll already listed leaves one entry.
+        relocate_project(&mut d, Path::new("/moved"), Path::new("/c"));
+        assert_eq!(d.projects, vec![PathBuf::from("/a"), PathBuf::from("/c")]);
+    }
 
     #[test]
     fn roll_info_round_trip() {

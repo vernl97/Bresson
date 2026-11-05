@@ -9,7 +9,8 @@ use std::sync::Arc;
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use super::widgets::{
-    self, Icon, fl_combo, fl_slider, fl_slider_u8, grad, icon_button, pill, segmented, theme,
+    self, Icon, fl_combo, fl_slider, fl_slider_u8, grad, icon_button, icon_button_tinted, pill,
+    segmented, theme,
 };
 use super::{NlpApp, View, gpu, to_color_image};
 use crate::engine::decode::{self, SourceImage};
@@ -328,12 +329,36 @@ enum Section {
     Basic,
     Tone,
     WhiteBalance,
-    /// No sidebar section: the lab keys act on it, and Before / Split reset it.
-    Lab,
     /// Hyper Tone, glow, fade and clipping.
     PrintCharacter,
     /// Colour toning, saturation and LUT.
     Colour,
+}
+
+/// Tint ±150 spans the same range as ±50 of magenta filtration.
+const TINT_PER_FILTRATION: f32 = 3.0;
+
+/// A chevron button in the view bar, pointing along the unit vector `dir`.
+fn bar_chevron(ui: &mut egui::Ui, dir: egui::Vec2, tip: &str) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 5.0, theme::SURFACE);
+    }
+    let m = rect.center();
+    let wing = vec2(-dir.y, dir.x) * 5.0;
+    let color = if resp.hovered() {
+        theme::TEXT
+    } else {
+        theme::MUTED
+    };
+    ui.painter().line(
+        vec![m - dir * 2.5 - wing, m + dir * 2.5, m - dir * 2.5 + wing],
+        egui::Stroke::new(1.5, color),
+    );
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    resp.on_hover_text(tip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }
 
 macro_rules! differs {
@@ -349,7 +374,6 @@ impl Section {
             Section::Basic => "Basic",
             Section::Tone => "Tone",
             Section::WhiteBalance => "White balance",
-            Section::Lab => "Lab correction",
             Section::PrintCharacter => "Finishing",
             Section::Colour => "Colour",
         }
@@ -362,7 +386,6 @@ impl Section {
             Section::Tone => differs!(s, r; tone_profile, print_exposure, brightness, contrast,
                 highlights, shadows, whites, blacks),
             Section::WhiteBalance => s.wb_mode != r.wb_mode,
-            Section::Lab => lab::readout(s).is_some(),
             Section::PrintCharacter => differs!(s, r; hyper_tone_highlights, hyper_tone_shadows,
                 glow, fade, white_clip, black_clip),
             Section::Colour => differs!(s, r; mid_cyan, mid_tint, mid_temp, high_cyan, high_tint,
@@ -380,7 +403,6 @@ impl Section {
             Section::Tone => take!(s, r; tone_profile, print_exposure, brightness, contrast,
                 highlights, shadows, whites, blacks),
             Section::WhiteBalance => take!(s, r; wb_mode, wb_temp, wb_tint),
-            Section::Lab => lab::reset(s),
             Section::PrintCharacter => take!(s, r; hyper_tone_highlights, hyper_tone_shadows,
                 glow, fade, white_clip, black_clip),
             Section::Colour => take!(s, r; mid_cyan, mid_tint, mid_temp, high_cyan, high_tint,
@@ -401,48 +423,15 @@ fn section(ui: &mut egui::Ui, sec: Section, s: &mut Settings, r: &Settings, open
 }
 
 /// Starting height of the editor's filmstrip; the user drags its top edge to resize it.
-const FILMSTRIP_H: f32 = 84.0;
+const FILMSTRIP_H: f32 = 104.0;
 /// Smallest and largest filmstrip heights the drag handle allows.
 const FILMSTRIP_H_RANGE: std::ops::RangeInclusive<f32> = 48.0..=320.0;
 /// Height of the bar under the canvas.
-const VIEW_BAR_H: f32 = 30.0;
+const VIEW_BAR_H: f32 = 36.0;
 
-/// The lab keys' current offsets, in clicks.
-fn lab_readout(ui: &mut egui::Ui, s: &Settings) {
-    let [d, c, m, y] = lab::clicks(s);
-    let (row, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
-    let cell = row.width() / 4.0;
-    let p = ui.painter();
-    for (k, (letter, v)) in [("C", c), ("M", m), ("Y", y), ("D", d)]
-        .into_iter()
-        .enumerate()
-    {
-        let value = match v {
-            0 => "0".to_string(),
-            v if v > 0 => format!("+{v}"),
-            v => format!("−{}", -v),
-        };
-        let centre = pos2(row.left() + cell * (k as f32 + 0.5), row.center().y);
-        p.text(
-            centre - vec2(3.0, 0.0),
-            egui::Align2::RIGHT_CENTER,
-            letter,
-            egui::FontId::proportional(12.0),
-            theme::MUTED,
-        );
-        p.text(
-            centre + vec2(1.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            value,
-            theme::medium(12.0),
-            if v == 0 { theme::MUTED } else { theme::TEXT },
-        );
-    }
-    resp.on_hover_text(
-        "Lab keys, in clicks. 7 8 9 add cyan, magenta, yellow; 1 2 3 remove them; \
-         4 prints darker and 6 lighter; 0 resets.",
-    );
-}
+/// The sidebar's gutter on the right, shared with its scroll bar. With the panel's
+/// margin it makes the content's right edge match its left (16 pt).
+const SCROLL_GUTTER: f32 = 10.0;
 
 /// Rotate crop insets [l, t, r, b] with the image.
 pub(crate) fn rotate_insets(c: [f32; 4], clockwise: bool) -> [f32; 4] {
@@ -538,7 +527,6 @@ impl NlpApp {
         for sec in [
             Section::Tone,
             Section::WhiteBalance,
-            Section::Lab,
             Section::PrintCharacter,
             Section::Colour,
         ] {
@@ -847,33 +835,8 @@ impl NlpApp {
         if self.view != View::Editor || self.editor_index() != Some(i) {
             return;
         }
-        egui::Panel::right("editor_sidebar")
-            .resizable(true)
-            .default_size(340.0)
-            .min_size(300.0)
-            .max_size(480.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::PANEL)
-                    .inner_margin(egui::Margin {
-                        left: 16,
-                        right: 12,
-                        top: 0,
-                        bottom: 8,
-                    }),
-            )
-            .show(ui, |ui| self.sidebar(ui, i, &mut s));
-
-        if self.editor_index() == Some(i) && self.editor.crop.is_none() {
-            self.apply_change(i, &before, s);
-        } else if self.editor_index() == Some(i) {
-            // In crop mode only geometry-independent edits apply directly.
-            let mut s2 = s;
-            s2.crop = before.crop;
-            s2.straighten = before.straighten;
-            self.apply_change(i, &before, s2);
-        }
-
+        // Laid out before the sidebar so it spans the full window width and the
+        // sidebar sits on top of it instead of running down beside it.
         if self.editor.filmstrip && self.frames.len() > 1 && self.editor.crop.is_none() {
             // Resizable from its top edge; egui keeps the chosen height for this panel id.
             egui::Panel::bottom("editor_filmstrip")
@@ -891,6 +854,7 @@ impl NlpApp {
             }
         }
 
+        // Also before the sidebar, so the bar runs as far as the filmstrip.
         if self.editor.crop.is_none() {
             egui::Panel::bottom("editor_view_bar")
                 .exact_size(VIEW_BAR_H)
@@ -904,6 +868,33 @@ impl NlpApp {
         // The view bar may have moved to another frame.
         if self.view != View::Editor || self.editor_index() != Some(i) {
             return;
+        }
+
+        egui::Panel::right("editor_sidebar")
+            .resizable(true)
+            .default_size(340.0)
+            .min_size(300.0)
+            .max_size(480.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PANEL)
+                    .inner_margin(egui::Margin {
+                        left: 16,
+                        right: 6,
+                        top: 0,
+                        bottom: 8,
+                    }),
+            )
+            .show(ui, |ui| self.sidebar(ui, i, &mut s));
+
+        if self.editor_index() == Some(i) && self.editor.crop.is_none() {
+            self.apply_change(i, &before, s);
+        } else if self.editor_index() == Some(i) {
+            // In crop mode only geometry-independent edits apply directly.
+            let mut s2 = s;
+            s2.crop = before.crop;
+            s2.straighten = before.straighten;
+            self.apply_change(i, &before, s2);
         }
 
         egui::CentralPanel::default()
@@ -934,7 +925,6 @@ impl NlpApp {
             if f.is_roll() {
                 lines.push("Roll balance".into());
             }
-            lines.extend(lab::readout(s));
             lines.push(s.tone_profile.label().to_string());
         } else {
             lines.push("Not converted".into());
@@ -966,8 +956,8 @@ impl NlpApp {
             .unwrap_or(1.0)
     }
 
-    /// The strip under the canvas: view toggles and flags on the left, zoom
-    /// presets on the right.
+    /// The strip under the canvas: crop, compare, clipping and flags on the left,
+    /// zoom and frame navigation on the right. Hidden while cropping.
     fn view_bar(&mut self, ui: &mut egui::Ui, i: usize) {
         #[derive(Clone, Copy, PartialEq)]
         enum Preset {
@@ -981,6 +971,7 @@ impl NlpApp {
             Some(z) if (z / full - 1.0).abs() < 0.01 => Preset::One,
             Some(_) => Preset::Other,
         };
+        let mut step = 0;
         ui.horizontal_centered(|ui| {
             let toggle = |ui: &mut egui::Ui, label: &str, on: bool, tip: &str| {
                 let g = ui.painter().layout_no_wrap(
@@ -989,7 +980,7 @@ impl NlpApp {
                     theme::TEXT,
                 );
                 let (rect, resp) =
-                    ui.allocate_exact_size(vec2(g.size().x + 16.0, 24.0), egui::Sense::click());
+                    ui.allocate_exact_size(vec2(g.size().x + 16.0, 28.0), egui::Sense::click());
                 if on {
                     ui.painter().rect_filled(rect, 5.0, theme::HOVER);
                 } else if resp.hovered() {
@@ -1022,7 +1013,7 @@ impl NlpApp {
                 ui.painter().rect_filled(rect, 0.0, theme::TRACK);
                 ui.add_space(6.0);
             };
-            if ib(ui, Icon::Crop, "Crop & straighten (C)", false) {
+            if widgets::tool_button(ui, Icon::Crop, "Crop & straighten (C)").clicked() {
                 self.enter_crop(i);
             }
             divider(ui);
@@ -1063,7 +1054,11 @@ impl NlpApp {
                 (Flag::Reject, Icon::Reject, "Reject (X)"),
             ] {
                 let on = flag == f;
-                if ib(ui, icon, tip, on) {
+                let tint = match f {
+                    Flag::Pick => theme::OK,
+                    _ => theme::ERR,
+                };
+                if icon_button_tinted(ui, icon, tip, on, true, on.then_some(tint)).clicked() {
                     self.set_flag(&[i], if on { Flag::None } else { f });
                 }
             }
@@ -1073,47 +1068,27 @@ impl NlpApp {
                 // Frame counter, right of the zoom presets.
                 let n = self.frames.len();
                 if n > 1 {
-                    let (rect, resp) =
-                        ui.allocate_exact_size(vec2(28.0, 24.0), egui::Sense::click());
-                    if resp.hovered() {
-                        ui.painter().rect_filled(rect, 5.0, theme::SURFACE);
-                    }
                     // Chevron points down to collapse, up to expand.
-                    let (m, w, d) = (rect.center(), 5.0, 2.5);
-                    let d = if self.editor.filmstrip { d } else { -d };
-                    ui.painter().line(
-                        vec![
-                            egui::pos2(m.x - w, m.y - d),
-                            egui::pos2(m.x, m.y + d),
-                            egui::pos2(m.x + w, m.y - d),
-                        ],
-                        egui::Stroke::new(
-                            1.5,
-                            if resp.hovered() {
-                                theme::TEXT
-                            } else {
-                                theme::MUTED
-                            },
-                        ),
-                    );
-                    let tip = if self.editor.filmstrip {
-                        "Hide filmstrip (F)"
+                    let (dir, tip) = if self.editor.filmstrip {
+                        (vec2(0.0, 1.0), "Hide filmstrip (F)")
                     } else {
-                        "Show filmstrip (F)"
+                        (vec2(0.0, -1.0), "Show filmstrip (F)")
                     };
-                    if resp
-                        .on_hover_text(tip)
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
+                    if bar_chevron(ui, dir, tip) {
                         self.editor.filmstrip = !self.editor.filmstrip;
                     }
-                    divider(ui);
+                    ui.add_space(4.0);
+                    if bar_chevron(ui, vec2(1.0, 0.0), "Next frame (→)") {
+                        step = 1;
+                    }
                     ui.label(
                         RichText::new(format!("{} / {}", i + 1, n))
                             .small()
                             .color(theme::MUTED),
                     );
+                    if bar_chevron(ui, vec2(-1.0, 0.0), "Previous frame (←)") {
+                        step = -1;
+                    }
                     divider(ui);
                 }
                 let presets = [
@@ -1128,8 +1103,18 @@ impl NlpApp {
                         });
                     }
                 }
+                // The level itself, left of the presets so they stay put.
+                if preset == Preset::Other
+                    && let Some(z) = self.editor.zoom
+                {
+                    let level = format!("{:.0}%", z / full * 100.0);
+                    toggle(ui, &level, true, "Current zoom");
+                }
             });
         });
+        if step != 0 {
+            self.goto(i, step);
+        }
     }
 
     /// Thumbnails of every frame; a click opens that frame.
@@ -1222,6 +1207,14 @@ impl NlpApp {
                                 mark,
                                 widgets::Icon::Warn,
                                 theme::WARN,
+                            );
+                        }
+                        if j == i {
+                            ui.painter().rect_stroke(
+                                rect,
+                                0.0,
+                                egui::Stroke::new(2.0, theme::ACCENT),
+                                egui::StrokeKind::Inside,
                             );
                         }
                         if resp.on_hover_text(&f.name).clicked() && j != i {
@@ -1355,13 +1348,6 @@ impl NlpApp {
             self.editor.clip_view = !self.editor.clip_view;
             self.editor.dirty = true;
         }
-        if let Some(key) = super::lab_key(ctx).filter(|_| self.editor.crop.is_none()) {
-            if self.apply_lab_key(i, key) {
-                self.editor.dirty = true;
-            } else {
-                self.toast("Convert the frame before correcting it", false);
-            }
-        }
         let path = self.frames[i].path.clone();
         if undo {
             self.history_step_for(&path, true);
@@ -1485,18 +1471,54 @@ impl NlpApp {
                         .map(|r| r.metadata.film_stock.clone())
                         .filter(|s| !s.trim().is_empty())
                 });
-            if let Some(stock) = stock
-                && ui
-                    .add(
-                        egui::Label::new(RichText::new(stock).color(theme::MUTED))
-                            .sense(Sense::click()),
-                    )
+            ui.add_space(6.0);
+            if let Some(stock) = stock {
+                let font = egui::TextStyle::Small.resolve(ui.style());
+                // A small chevron after the stock says the chip opens something.
+                const CHEVRON_W: f32 = 12.0;
+                let size = ui
+                    .painter()
+                    .layout_no_wrap(stock.clone(), font.clone(), theme::MUTED)
+                    .size();
+                let (rect, resp) =
+                    ui.allocate_exact_size(size + vec2(14.0 + CHEVRON_W, 6.0), Sense::click());
+                let hot = resp.hovered() && !cropping;
+                let (fill, ink) = if hot {
+                    (theme::HOVER, theme::TEXT)
+                } else {
+                    (theme::SURFACE, theme::MUTED)
+                };
+                ui.painter().rect_filled(rect, 5.0, fill);
+                if hot {
+                    ui.painter().rect_stroke(
+                        rect,
+                        5.0,
+                        egui::Stroke::new(1.0, theme::PRESSED),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                let g = ui.painter().layout_no_wrap(stock, font, ink);
+                let text_at = egui::pos2(rect.left() + 7.0, rect.center().y - g.size().y / 2.0);
+                ui.painter().galley(text_at, g, ink);
+                // Chevron: a small "v" at the right end of the chip.
+                let cc = egui::pos2(rect.right() - CHEVRON_W / 2.0 - 2.0, rect.center().y);
+                let (w, h) = (2.8, 1.6);
+                ui.painter().line_segment(
+                    [cc + vec2(-w, -h), cc + vec2(0.0, h)],
+                    egui::Stroke::new(1.2, ink),
+                );
+                ui.painter().line_segment(
+                    [cc + vec2(0.0, h), cc + vec2(w, -h)],
+                    egui::Stroke::new(1.2, ink),
+                );
+                if resp
                     .on_hover_text("Film stock · click for film & roll details")
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
-                && !cropping
-            {
-                self.editor.film_open = true;
+                    && !cropping
+                {
+                    self.editor.film_open = true;
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Crop & straighten has its own Done and Cancel; nothing leaves meanwhile.
@@ -1532,7 +1554,7 @@ impl NlpApp {
     // ---- sidebar ----------------------------------------------------------------
 
     /// The histogram or curves, under their toggle. Like Lightroom's, the five regions are drag
-    /// handles for Blacks, Darks, Exposure, Lights and Whites, and the corner
+    /// handles for Blacks, Shadows, Exposure, Highlights and Whites, and the corner
     /// triangles toggle the clipping view.
     fn histogram_panel(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
         ui.add_space(10.0);
@@ -1554,9 +1576,9 @@ impl NlpApp {
         }
         use widgets::HistRegion as R;
         let editable = self.frames[i].sc.is_converted() && !self.editor.before;
-        let fmt = |v: f32, ev: bool| {
-            if ev {
-                format!("{v:+.1} EV")
+        let fmt = |v: f32, stops: bool| {
+            if stops {
+                format!("{v:+.1}")
             } else {
                 format!("{v:+.0}")
             }
@@ -1570,14 +1592,10 @@ impl NlpApp {
                 fmt(s.whites, false),
             ]
         });
-        // Reserve the content width, then draw 8 px wider on each side in a
-        // child ui, so the panel does not grow to fit the overhang.
-        let (slot, _) = ui.allocate_exact_size(vec2(ui.available_width(), 96.0), Sense::hover());
-        let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(slot.expand2(vec2(8.0, 0.0))));
         let ev = widgets::histogram(
-            &mut hui,
+            ui,
             &self.editor.hist,
-            vec2(slot.width() + 16.0, 96.0),
+            vec2(ui.available_width(), 96.0),
             self.editor.hist_frozen,
             self.editor.clip_view,
             values,
@@ -1606,6 +1624,21 @@ impl NlpApp {
         ui.add_space(2.0);
     }
 
+    /// Under the histogram: why the frame needs a look, each with a close button.
+    /// A dismissed warning, and the frame's badge once none are left, stay away
+    /// until the folder is reopened.
+    fn frame_warnings(&mut self, ui: &mut egui::Ui, i: usize) {
+        let warnings = self.look_warnings(i, self.roll_density());
+        if !warnings.is_empty() {
+            ui.add_space(4.0);
+        }
+        for (id, text) in warnings {
+            if widgets::dismissable_status_line(ui, Icon::Warn, theme::WARN, &text) {
+                self.frames[i].dismissed_warnings.push(id);
+            }
+        }
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
         // Crop & straighten gets the sidebar to itself, like Lightroom.
         if self.editor.crop.is_some() {
@@ -1613,18 +1646,22 @@ impl NlpApp {
             ui.set_min_width(ui.available_width());
             // The sidebar's right margin leaves room for a scroll bar; none here.
             let mut rect = ui.available_rect_before_wrap();
-            rect.max.x -= 4.0;
+            rect.max.x -= SCROLL_GUTTER;
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 self.crop_panel(ui, i)
             });
             return;
         }
-        self.histogram_panel(ui, i, s);
-        let converted = self.frames[i].sc.is_converted();
-        if converted {
-            lab_readout(ui, s);
-        }
-        ui.add_space(6.0);
+        egui::Frame::new()
+            .inner_margin(egui::Margin {
+                right: SCROLL_GUTTER as i8,
+                ..Default::default()
+            })
+            .show(ui, |ui| {
+                self.histogram_panel(ui, i, s);
+                self.frame_warnings(ui, i);
+            });
+        ui.add_space(8.0);
         widgets::reset_section_gap(ui);
         self.film_dialog(ui, i, s);
         let needs_convert = self.needs_convert(i, s);
@@ -1634,6 +1671,7 @@ impl NlpApp {
             .exact_size(44.0)
             .frame(egui::Frame::new().inner_margin(egui::Margin {
                 top: 8,
+                right: SCROLL_GUTTER as i8,
                 ..Default::default()
             }))
             .show(ui, |ui| {
@@ -1658,14 +1696,22 @@ impl NlpApp {
                         {
                             self.paste_edit_to(vec![i], &p);
                         }
+                        // An auto WB's Temp / Tint are its result, not an edit.
+                        let mut defaults = s.clone();
+                        self.reset_edits(i, &mut defaults);
+                        if defaults.wb_mode == s.wb_mode {
+                            defaults.wb_temp = s.wb_temp;
+                            defaults.wb_tint = s.wb_tint;
+                        }
                         if ui
                             .add_enabled(
-                                self.editor.crop.is_none(),
-                                widgets::ghost("Reset").min_size(vec2(bw, 32.0)),
+                                defaults != *s,
+                                widgets::ghost("Reset frame").min_size(vec2(bw, 32.0)),
                             )
                             .on_hover_text(
                                 "Reset all edits to the defaults (Undo brings them back)",
                             )
+                            .on_disabled_hover_text("This frame has no edits to reset")
                             .clicked()
                         {
                             self.reset_edits(i, s);
@@ -1673,14 +1719,16 @@ impl NlpApp {
                     }
                 });
             });
+        // The handle stays visible while the panel has more below the fold.
+        ui.spacing_mut().scroll.dormant_handle_opacity = 0.6;
         let scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 // Section open states are remembered by id; scoping the ids to
                 // this photo makes each one open with its default state.
                 ui.push_id(self.editor.epoch, |ui| {
-                    ui.set_width(ui.available_width() - 6.0);
-                    if converted {
+                    ui.set_width(ui.available_width() - SCROLL_GUTTER);
+                    if self.frames[i].sc.is_converted() {
                         self.adjust_sections(ui, s);
                     } else {
                         ui.add_space(12.0);
@@ -1989,20 +2037,6 @@ impl NlpApp {
                 s.wb_mode,
                 WbMode::AutoNeutral | WbMode::AutoWarm | WbMode::AutoCool | WbMode::AutoMix
             );
-            let confidence = self
-                .editor_index()
-                .and_then(|i| self.frames[i].auto_wb(s))
-                .map(|w| w.confidence);
-            if auto && confidence.is_some_and(|c| c < pipeline::LOW_CONFIDENCE) {
-                widgets::status_line(
-                    ui,
-                    Icon::Warn,
-                    theme::WARN,
-                    &format!(
-                        "Few neutral tones to balance on. Pick a grey ({wb_key}) or use the roll."
-                    ),
-                );
-            }
             // An auto mode's values are its result, not an edit: nothing to mark
             // or reset. Moving either slider switches to Custom.
             let note = if auto {
@@ -2011,7 +2045,7 @@ impl NlpApp {
                 ""
             };
             let mut t = s.wb_temp;
-            if fl_slider(
+            if widgets::fl_slider_auto(
                 ui,
                 "Temp",
                 &mut t,
@@ -2020,22 +2054,26 @@ impl NlpApp {
                 1,
                 &format!("Yellow printing filtration in CC: blue ↔ yellow{note}"),
                 Some(grad::TEMP),
+                auto,
             ) {
                 s.wb_temp = t;
                 s.wb_mode = WbMode::Custom;
             }
-            let mut k = s.wb_tint;
-            if fl_slider(
+            // Tint on ±150, as in Lightroom; the setting stays filtration.
+            let mut k = s.wb_tint * TINT_PER_FILTRATION;
+            let tint_default = if auto { k } else { 0.0 };
+            if widgets::fl_slider_auto(
                 ui,
                 "Tint",
                 &mut k,
-                -50.0..=50.0,
-                if auto { s.wb_tint } else { 0.0 },
-                1,
-                &format!("Magenta printing filtration in CC: green ↔ magenta{note}"),
+                -150.0..=150.0,
+                tint_default,
+                0,
+                &format!("Green ↔ magenta{note}"),
                 Some(grad::TINT),
+                auto,
             ) {
-                s.wb_tint = k;
+                s.wb_tint = k / TINT_PER_FILTRATION;
                 s.wb_mode = WbMode::Custom;
             }
             widgets::group_divider(ui);
@@ -2061,8 +2099,8 @@ impl NlpApp {
             );
             tone(ui, "Contrast", &mut s.contrast, "Midtone contrast slope");
             widgets::group_divider(ui);
-            tone(ui, "Lights", &mut s.highlights, "Upper midtones");
-            tone(ui, "Darks", &mut s.shadows, "Lower midtones");
+            tone(ui, "Highlights", &mut s.highlights, "Upper midtones");
+            tone(ui, "Shadows", &mut s.shadows, "Lower midtones");
             tone(
                 ui,
                 "Whites",
@@ -2076,13 +2114,14 @@ impl NlpApp {
                 "The deepest tones: up = matte, down = deeper",
             );
         }
-        if section(ui, Section::Colour, s, r, true) {
+        // Closed by default, like Finishing; the user opens it when wanted.
+        if section(ui, Section::Colour, s, r, false) {
             segmented(
                 ui,
                 &mut self.editor.color_tab,
                 &[
-                    (ColorTab::Mids, "Mids"),
-                    (ColorTab::Highs, "Highs"),
+                    (ColorTab::Mids, "Midtones"),
+                    (ColorTab::Highs, "Highlights"),
                     (ColorTab::Shadows, "Shadows"),
                 ],
             );
@@ -2104,32 +2143,32 @@ impl NlpApp {
             };
             fl_slider(
                 ui,
-                "Red ↔ Cyan",
+                "Cyan",
                 c,
                 -75.0..=75.0,
                 0.0,
                 0,
-                "",
+                "Red ↔ cyan in these tones",
                 Some(grad::RED_CYAN),
             );
             fl_slider(
                 ui,
-                "Green ↔ Magenta",
+                "Magenta",
                 m,
                 -75.0..=75.0,
                 0.0,
                 0,
-                "",
+                "Green ↔ magenta in these tones",
                 Some(grad::GREEN_MAGENTA),
             );
             fl_slider(
                 ui,
-                "Blue ↔ Yellow",
+                "Yellow",
                 y,
                 -75.0..=75.0,
                 0.0,
                 0,
-                "",
+                "Blue ↔ yellow in these tones",
                 Some(grad::BLUE_YELLOW),
             );
             if let Some(r) = range {
@@ -2145,15 +2184,16 @@ impl NlpApp {
                 );
             }
             widgets::group_divider(ui);
-            fl_combo(ui, "LUT", &mut s.lut, Lut::ALL, Lut::label, "");
-            fl_slider(
+            widgets::combo_row(ui, "Look", &mut s.lut, Lut::ALL, Lut::label, 0.0);
+            widgets::fl_slider_unit(
                 ui,
                 "Amount",
                 &mut s.lut_strength,
                 0.0..=200.0,
                 100.0,
                 0,
-                "LUT strength in percent",
+                "%",
+                "Strength of the look",
                 None,
             );
             fl_slider_u8(
@@ -2182,8 +2222,8 @@ impl NlpApp {
             let tone = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
                 fl_slider(ui, l, v, -50.0..=50.0, 0.0, 0, tip, None)
             };
-            tone(ui, "Lab glow", &mut s.glow, "Silky compressed highlights");
-            tone(ui, "Lab fade", &mut s.fade, "Open, compressed deep shadows");
+            tone(ui, "Glow", &mut s.glow, "Silky compressed highlights");
+            tone(ui, "Fade", &mut s.fade, "Open, compressed deep shadows");
             fl_slider(
                 ui,
                 "White point",
@@ -3146,14 +3186,11 @@ mod crop_lock_tests {
         assert!(!Section::Colour.modified(&s, &r));
         s.lut_strength = 60.0;
         s.brightness = 12.0;
-        lab::nudge(&mut s, lab::Channel::C, 2);
         assert!(Section::Colour.modified(&s, &r));
-        assert!(Section::Tone.modified(&s, &r) && Section::Lab.modified(&s, &r));
+        assert!(Section::Tone.modified(&s, &r));
         Section::Colour.reset(&mut s, &r);
         assert!(!Section::Colour.modified(&s, &r));
         assert_eq!(s.brightness, 12.0, "other sections keep their edits");
-        Section::Lab.reset(&mut s, &r);
-        assert_eq!(s.filtration, [0.0; 3]);
         assert!(Section::Tone.modified(&s, &r));
     }
 

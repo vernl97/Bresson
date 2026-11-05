@@ -16,7 +16,7 @@ pub mod theme {
     /// Toolbars and the sidebar.
     pub const PANEL: Color32 = Color32::from_rgb(35, 35, 38);
     /// Neutral surround for judging the image.
-    pub const CANVAS: Color32 = Color32::from_rgb(42, 42, 45);
+    pub const CANVAS: Color32 = Color32::from_rgb(43, 43, 43);
     /// Inputs, buttons, selected states.
     pub const SURFACE: Color32 = Color32::from_rgb(47, 47, 51);
     pub const HOVER: Color32 = Color32::from_rgb(56, 56, 61);
@@ -190,15 +190,34 @@ pub fn ghost<'a>(text: &str) -> egui::Button<'a> {
         .min_size(egui::vec2(0.0, 28.0))
 }
 
-/// Small muted icon + text line (status messages).
-pub fn status_line(ui: &mut Ui, icon: Icon, color: Color32, text: &str) -> egui::Response {
+/// Small muted icon + text line with a close button at the row's end; true when it's clicked.
+pub fn dismissable_status_line(ui: &mut Ui, icon: Icon, color: Color32, text: &str) -> bool {
+    const CLOSE: f32 = 18.0;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
         paint_icon(ui.painter(), r, icon, color);
-        ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::MUTED)).wrap());
+        let w = ui.available_width() - CLOSE - 6.0;
+        ui.allocate_ui(egui::vec2(w, 14.0), |ui| {
+            ui.set_min_width(w);
+            ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::MUTED)).wrap());
+        });
+        let close = sized_icon_button(
+            ui,
+            Icon::Close,
+            "Dismiss",
+            false,
+            true,
+            None,
+            egui::vec2(CLOSE, CLOSE),
+            4.0,
+        );
+        close.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Dismiss warning")
+        });
+        close.clicked()
     })
-    .response
+    .inner
 }
 
 pub fn gradient_rect(ui: &Ui, rect: Rect, a: Color32, b: Color32) {
@@ -415,9 +434,9 @@ impl HistRegion {
     pub fn name(self) -> &'static str {
         match self {
             HistRegion::Blacks => "Blacks",
-            HistRegion::Darks => "Darks",
+            HistRegion::Darks => "Shadows",
             HistRegion::Exposure => "Exposure",
-            HistRegion::Lights => "Lights",
+            HistRegion::Lights => "Highlights",
             HistRegion::Whites => "Whites",
         }
     }
@@ -595,15 +614,21 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ));
         }
         Icon::Clipping => {
-            // A histogram piled up against both ends: tones clipped.
-            let base = c.y + 6.5 * s;
-            for (k, h) in [13.0, 4.0, 6.0, 4.0, 13.0].into_iter().enumerate() {
-                let x = c.x + (k as f32 - 2.0) * 3.5 * s;
-                p.rect_filled(
-                    Rect::from_min_max(pos2(x - 1.1 * s, base - h * s), pos2(x + 1.1 * s, base)),
-                    0.5,
+            // A frame with its two top corners filled: the clipping corners
+            // of the histogram, shadows left and highlights right.
+            let r = Rect::from_center_size(c, vec2(16.0 * s, 13.0 * s));
+            p.rect_stroke(r, 1.0, st, egui::StrokeKind::Middle);
+            let leg = 7.0 * s;
+            for (corner, dir) in [(r.left_top(), 1.0), (r.right_top(), -1.0)] {
+                p.add(Shape::convex_polygon(
+                    vec![
+                        corner,
+                        corner + vec2(dir * leg, 0.0),
+                        corner + vec2(0.0, leg),
+                    ],
                     color,
-                );
+                    Stroke::NONE,
+                ));
             }
         }
         Icon::Reset => {
@@ -785,6 +810,37 @@ fn sized_icon_button(
     resp.on_hover_text(tip)
 }
 
+/// An icon button that opens a tool rather than switching something on: wider,
+/// outlined and bright, so it doesn't read as one of the toggles beside it (a
+/// toggle that's on is a plain fill).
+pub fn tool_button(ui: &mut Ui, icon: Icon, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(44.0, 28.0), Sense::click());
+    let fill = if resp.is_pointer_button_down_on() {
+        theme::PRESSED
+    } else if resp.hovered() {
+        theme::HOVER
+    } else {
+        theme::SURFACE
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 6.0, fill);
+    p.rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(1.0, theme::SLIDER_TRACK),
+        egui::StrokeKind::Inside,
+    );
+    paint_icon(
+        p,
+        Rect::from_center_size(rect.center(), egui::vec2(20.0, 20.0)),
+        icon,
+        theme::TEXT,
+    );
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    resp.on_hover_text(tip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// The app's dropdown: a filled box with the sections' thin chevron.
 pub fn combo(id: impl std::hash::Hash + std::fmt::Debug) -> egui::ComboBox {
     egui::ComboBox::from_id_salt(id).icon(|ui, rect, visuals, _open| {
@@ -901,8 +957,28 @@ pub fn fl_slider_origin(
     .0
 }
 
+/// `fl_slider` whose value comes from an automatic mode while `auto`: a small
+/// "auto" beside the label says so, where an edit's dot would be.
+#[allow(clippy::too_many_arguments)]
+pub fn fl_slider_auto(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    decimals: usize,
+    tip: &str,
+    gradient: Option<(Color32, Color32)>,
+    auto: bool,
+) -> bool {
+    slider_row(
+        ui, label, v, range, default, None, decimals, "", tip, gradient, auto,
+    )
+    .0
+}
+
 /// Width of the label column of slider rows.
-pub const LABEL_W: f32 = 90.0;
+pub const LABEL_W: f32 = 76.0;
 /// Gap between the label and the track, wide enough that a knob at the
 /// track's left end (radius 7 plus its ring) stays clear of the label.
 const TRACK_GAP: f32 = 11.0;
@@ -921,6 +997,25 @@ pub fn fl_slider_active(
     tip: &str,
     gradient: Option<(Color32, Color32)>,
 ) -> (bool, bool) {
+    slider_row(
+        ui, label, v, range, default, origin, decimals, "", tip, gradient, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn slider_row(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    origin: Option<f32>,
+    decimals: usize,
+    unit: &str,
+    tip: &str,
+    gradient: Option<(Color32, Color32)>,
+    auto: bool,
+) -> (bool, bool) {
     let mut changed = false;
     let mut active = false;
     let (lo, hi) = (*range.start(), *range.end());
@@ -928,7 +1023,7 @@ pub fn fl_slider_active(
     // One compact row, as in Lightroom: label, track, value.
     const VALUE_W: f32 = 42.0;
     let (row, resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width() - 14.0, 24.0),
+        egui::vec2(ui.available_width(), 24.0),
         Sense::click_and_drag(),
     );
     let label_rect = Rect::from_min_size(row.min, egui::vec2(LABEL_W, row.height()));
@@ -962,6 +1057,15 @@ pub fn fl_slider_active(
             },
         )
         .inner;
+    if auto && !modified {
+        ui.painter().text(
+            egui::pos2(label_left - 6.0, row.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "auto",
+            FontId::proportional(10.5),
+            theme::MUTED,
+        );
+    }
     // A dot left of the label marks the edit; hovering the row turns it into
     // a reset button, like the section headers.
     if modified {
@@ -1000,6 +1104,9 @@ pub fn fl_slider_active(
             // Bipolar values show their sign, whatever the slider resets to.
             let signed = default == 0.0 || gradient.is_some();
             let fmt = move |x: f64, _r: std::ops::RangeInclusive<usize>| {
+                // Whatever rounds to nothing is plain zero: no "+0.0" or "-0.0".
+                let m = 10f64.powi(decimals as i32);
+                let x = (x * m).round() / m + 0.0;
                 let s = format!("{:.*}", decimals, x);
                 if x > 0.0 && signed {
                     format!("+{s}")
@@ -1022,7 +1129,8 @@ pub fn fl_slider_active(
             let dv = egui::DragValue::new(v)
                 .speed((hi - lo) as f64 / 400.0)
                 .max_decimals(decimals)
-                .custom_formatter(fmt);
+                .custom_formatter(fmt)
+                .suffix(unit);
             let r = ui.add(dv.update_while_editing(false));
             if r.changed() {
                 changed = true;
@@ -1061,8 +1169,10 @@ pub fn fl_slider_active(
     let p = ui.painter();
     match gradient {
         Some((a, b)) => {
-            let a = a.gamma_multiply(0.85);
-            let b = b.gamma_multiply(0.85);
+            // Quiet at rest, so the tracks don't compete with the picture.
+            let strength = if hot { 0.9 } else { 0.6 };
+            let a = a.gamma_multiply(strength);
+            let b = b.gamma_multiply(strength);
             gradient_rect(ui, track.expand2(egui::vec2(0.0, 0.5)), a, b)
         }
         None => {
@@ -1113,6 +1223,25 @@ pub fn fl_slider(
     gradient: Option<(Color32, Color32)>,
 ) -> bool {
     fl_slider_origin(ui, label, v, range, default, None, decimals, tip, gradient)
+}
+
+/// [`fl_slider`] whose value carries a unit, such as `"%"`.
+#[allow(clippy::too_many_arguments)]
+pub fn fl_slider_unit(
+    ui: &mut Ui,
+    label: &str,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    decimals: usize,
+    unit: &str,
+    tip: &str,
+    gradient: Option<(Color32, Color32)>,
+) -> bool {
+    slider_row(
+        ui, label, v, range, default, None, decimals, unit, tip, gradient, false,
+    )
+    .0
 }
 
 pub fn fl_slider_u8(
@@ -1244,7 +1373,7 @@ pub fn panel_header(ui: &mut Ui, title: &str) {
         egui::Stroke::new(1.0, Color32::from_rgb(46, 46, 50)),
     );
     p.text(
-        rect.right_center() - egui::vec2(32.0, 0.0),
+        rect.right_center() - egui::vec2(18.0, 0.0),
         egui::Align2::RIGHT_CENTER,
         title,
         theme::medium(14.5),
@@ -1311,7 +1440,7 @@ pub fn fold_section(ui: &mut Ui, title: &str, default_open: bool, modified: bool
         egui::Stroke::new(1.0, Color32::from_rgb(46, 46, 50)),
     );
     let title_rect = p.text(
-        rect.right_center() - egui::vec2(32.0, 0.0),
+        rect.right_center() - egui::vec2(18.0, 0.0),
         egui::Align2::RIGHT_CENTER,
         title,
         theme::medium(14.5),
@@ -1345,7 +1474,7 @@ pub fn fold_section(ui: &mut Ui, title: &str, default_open: bool, modified: bool
     }
     chevron(
         p,
-        egui::pos2(rect.right() - 14.0, rect.center().y),
+        egui::pos2(rect.right() - 4.0, rect.center().y),
         open,
         if hot { theme::TEXT } else { theme::MUTED },
     );
@@ -1418,14 +1547,53 @@ pub fn mini_slider(
     resp
 }
 
+/// A path with the home folder written as `~`.
+pub fn short_path(path: &str) -> String {
+    let home = dirs::home_dir().map(|h| h.display().to_string());
+    match home.as_deref().and_then(|h| path.strip_prefix(h)) {
+        Some(rest) if rest.starts_with('/') || rest.is_empty() => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+/// While files are dragged over the window: an accent outline and what letting
+/// go does. Drops are handled in `NlpApp::logic`.
+pub fn drop_overlay(ctx: &egui::Context) {
+    if ctx.input(|i| i.raw.hovered_files.is_empty()) {
+        return;
+    }
+    let p = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("drop_overlay"),
+    ));
+    let r = ctx.content_rect().shrink(10.0);
+    p.rect(
+        r,
+        12.0,
+        theme::BG.gamma_multiply(0.82),
+        egui::Stroke::new(1.5, theme::ACCENT),
+        egui::StrokeKind::Inside,
+    );
+    let c = r.center();
+    paint_icon(
+        &p,
+        Rect::from_center_size(c - egui::vec2(0.0, 22.0), egui::vec2(34.0, 34.0)),
+        Icon::Folder,
+        theme::ACCENT,
+    );
+    p.text(
+        c + egui::vec2(0.0, 16.0),
+        egui::Align2::CENTER_CENTER,
+        "Drop to open",
+        theme::medium(15.0),
+        theme::ACCENT,
+    );
+}
+
 /// Small faint path that keeps its end when it doesn't fit ("…/roll/Positives"),
 /// with the home folder shown as `~` and the full path on hover.
 pub fn path_label(ui: &mut Ui, path: &str) -> egui::Response {
-    let home = dirs::home_dir().map(|h| h.display().to_string());
-    let short = match home.as_deref().and_then(|h| path.strip_prefix(h)) {
-        Some(rest) if rest.starts_with('/') || rest.is_empty() => format!("~{rest}"),
-        _ => path.to_string(),
-    };
+    let short = short_path(path);
     let font = FontId::proportional(11.0);
     let max_w = ui.available_width();
     let fits = |t: &str| {
@@ -1532,7 +1700,7 @@ pub fn pill(p: &egui::Painter, center: egui::Pos2, text: &str) -> Rect {
 
 /// How far the sidebar's content is inset from the panel edge (left, right
 /// including the scrollbar gutter): bands and rules paint out to the edge.
-const SIDEBAR_INSET: (f32, f32) = (16.0, 18.0);
+const SIDEBAR_INSET: (f32, f32) = (16.0, 16.0);
 
 /// `rect` stretched across the whole sidebar width.
 pub fn bleed(rect: Rect) -> Rect {
@@ -1573,7 +1741,7 @@ pub fn combo_row<T: Copy + PartialEq>(
         );
         ui.add_space(TRACK_GAP);
         combo(("combo_row", label, std::any::type_name::<T>()))
-            .width((ui.available_width() - 14.0 - trailing).max(60.0))
+            .width((ui.available_width() - trailing).max(60.0))
             .height(400.0)
             .selected_text(name(*v))
             .show_ui(ui, |ui| {

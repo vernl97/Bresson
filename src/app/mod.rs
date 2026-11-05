@@ -25,50 +25,12 @@ use crate::engine::decode::{self, SourceImage};
 use crate::engine::pipeline::{self, AutoWb, Renderer};
 use crate::engine::settings::{
     CropAspect, ExportFormat, ExportPreset, ExportSettings, OutputSpace, Placement, Settings,
-    WbMode, lab,
+    WbMode,
 };
 use crate::engine::sidecar::{self, Defaults, Sidecar};
 use jobs::{JobResult, Jobs};
 
 pub const THUMB_SIZE: usize = 360;
-
-/// The [`lab_key`] legend, shown wherever lab corrections appear.
-pub const LAB_KEYS_HELP: &str =
-    "Lab keys: 7 8 9 add C M Y · 1 2 3 remove · 4 / 6 darker / lighter · 0 reset";
-
-/// A Frontier/Noritsu-style correction key.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LabKey {
-    Nudge(lab::Channel, i32),
-    Reset,
-}
-
-/// The lab correction key pressed this frame, on the number row or numpad:
-/// 7 8 9 add C M Y, 1 2 3 take it away, 4 / 6 print darker / lighter
-/// (density + / −), 0 resets. Keep [`LAB_KEYS_HELP`] in sync.
-pub fn lab_key(ctx: &egui::Context) -> Option<LabKey> {
-    use egui::Key;
-    use lab::Channel::*;
-    ctx.input(|i| {
-        if i.modifiers.command || i.modifiers.alt || i.modifiers.ctrl {
-            return None;
-        }
-        let keys = [
-            (Key::Num7, LabKey::Nudge(C, 1)),
-            (Key::Num8, LabKey::Nudge(M, 1)),
-            (Key::Num9, LabKey::Nudge(Y, 1)),
-            (Key::Num1, LabKey::Nudge(C, -1)),
-            (Key::Num2, LabKey::Nudge(M, -1)),
-            (Key::Num3, LabKey::Nudge(Y, -1)),
-            (Key::Num4, LabKey::Nudge(D, 1)),
-            (Key::Num6, LabKey::Nudge(D, -1)),
-            (Key::Num0, LabKey::Reset),
-        ];
-        keys.into_iter()
-            .find(|(k, _)| i.key_pressed(*k))
-            .map(|(_, l)| l)
-    })
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
@@ -104,6 +66,9 @@ pub struct Frame {
     pub thumb_neg: Option<egui::TextureHandle>,
     /// Share of the rendered thumbnail clipped to white and to black.
     pub clip: Option<[f32; 2]>,
+    /// Warnings closed in the editor, which no longer count towards the frame's
+    /// "needs a look" badge, until the folder is reopened.
+    pub dismissed_warnings: Vec<&'static str>,
 }
 
 impl Frame {
@@ -308,20 +273,7 @@ impl NlpApp {
     // ---- library --------------------------------------------------------------
 
     pub fn open_folder(&mut self, dir: &Path) {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-            .map(|rd| {
-                // `file_type` comes with the listing; `Path::is_file` is a
-                // stat per entry, slow on a network drive.
-                rd.filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_ok_and(|t| t.is_file() || t.is_symlink()))
-                    .map(|e| e.path())
-                    .filter(|p| {
-                        decode::is_folder_scan(p) && !p.to_string_lossy().ends_with("-prepped.tif")
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        files.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+        let files = jobs::folder_scans(dir);
         self.load_frames(files, dir);
         self.single_mode = false;
         self.defaults.last_folder = Some(dir.to_path_buf());
@@ -413,6 +365,7 @@ impl NlpApp {
             auto_convert,
             thumb_neg: None,
             clip: None,
+            dismissed_warnings: Vec::new(),
         }
     }
 
@@ -440,6 +393,7 @@ impl NlpApp {
         let _ = std::fs::create_dir_all(dir.join("NLP"));
         self.roll.info = sidecar::load_roll_info(dir);
         self.roll.banner = None;
+        self.roll.covers.clear();
         self.frames = files.into_iter().map(|path| self.new_frame(path)).collect();
         self.folder = Some(dir.to_path_buf());
         self.selected.clear();
@@ -538,21 +492,6 @@ impl NlpApp {
 
     pub fn index_of(&self, p: &Path) -> Option<usize> {
         self.frames.iter().position(|f| f.path == p)
-    }
-
-    /// Apply this frame's lab correction key (`lab_key`) to frame `i`.
-    /// Returns false when the frame isn't converted.
-    pub fn apply_lab_key(&mut self, i: usize, key: LabKey) -> bool {
-        if !self.frames[i].sc.is_converted() {
-            return false;
-        }
-        let s = &mut self.frames[i].sc.settings;
-        match key {
-            LabKey::Nudge(ch, n) => lab::nudge(s, ch, n),
-            LabKey::Reset => lab::reset(s),
-        }
-        self.mark_changed(i);
-        true
     }
 
     pub fn mark_changed(&mut self, i: usize) {
@@ -1168,6 +1107,17 @@ impl NlpApp {
                         self.exposure_prompt = Some((items, spread));
                     }
                 }
+                JobResult::RollSummary {
+                    dir,
+                    exists,
+                    info,
+                    count,
+                    edited,
+                } => self.roll.set_summary(&dir, exists, info, count, edited),
+                JobResult::RollCover { dir, frames } => {
+                    let ctx = self.jobs.ctx().clone();
+                    self.roll.set_frames(&ctx, &dir, frames);
+                }
                 JobResult::Thumb { path, thumb } => {
                     let (Some(i), Some(thumb)) = (self.index_of(&path), thumb) else {
                         continue;
@@ -1569,6 +1519,7 @@ mod tests {
             auto_convert: false,
             thumb_neg: None,
             clip: None,
+            dismissed_warnings: Vec::new(),
         };
 
         let dummy_src = SourceImage {
@@ -1687,17 +1638,8 @@ mod ui_tests {
         shot(&mut h, &out, "7_editor_detect_frame");
         h.key_press(egui::Key::Enter);
         settle(&mut h, 30.0);
-        for k in [
-            egui::Key::Num4,
-            egui::Key::Num4,
-            egui::Key::Num7,
-            egui::Key::Num9,
-        ] {
-            h.key_press(k);
-            h.run_steps(2);
-        }
         settle(&mut h, 30.0);
-        shot(&mut h, &out, "8_editor_lab_keys");
+        shot(&mut h, &out, "8_editor_adjusted");
         h.key_press(egui::Key::J);
         settle(&mut h, 30.0);
         h.hover_at(egui::pos2(520.0, 460.0));
@@ -1915,6 +1857,11 @@ mod ui_tests {
         h.run_steps(2);
         assert!(!h.state().grid.quick_look);
         assert_eq!(h.state().frames[3].sc.flag, Flag::Reject);
+        // The smallest tiles: the header still has to hold number, flags and warning.
+        h.state_mut().thumb_size = 110.0;
+        h.hover_at(egui::pos2(200.0, 120.0));
+        h.run_steps(4);
+        shot(&mut h, &out, "g8_smallest");
     }
 
     /// Regression: hovering the sidebars must not make them grow.
@@ -1945,6 +1892,80 @@ mod ui_tests {
         eprintln!("sidebar {before} -> {cropping} -> {after}");
         assert_eq!(before, cropping, "entering crop mode resized the sidebar");
         assert_eq!(before, after, "leaving crop mode resized the sidebar");
+    }
+
+    #[test]
+    #[ignore]
+    fn editor_warnings_can_be_dismissed() {
+        use egui_kittest::kittest::Queryable;
+        let dir = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
+        let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1480.0, 940.0))
+            .build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
+        settle(&mut h, 60.0);
+        h.state_mut().open_editor(0);
+        settle(&mut h, 60.0);
+        h.state_mut().frames[0].clip = Some([0.2, 0.2]);
+        h.run_steps(5);
+        if let Some(out) = &out {
+            shot(&mut h, out, "warnings");
+        }
+        while h.query_all_by_label("Dismiss warning").next().is_some() {
+            h.query_all_by_label("Dismiss warning")
+                .next()
+                .unwrap()
+                .click();
+            h.run_steps(5);
+        }
+        if let Some(out) = &out {
+            shot(&mut h, out, "warnings_dismissed");
+        }
+        let f = &h.state().frames[0];
+        assert!(f.dismissed_warnings.contains(&"clip_white"));
+        assert!(f.dismissed_warnings.contains(&"clip_black"));
+        // With no warnings left, the frame's badge goes too.
+        let density = h.state().roll_density();
+        assert!(h.state().look_issues(0, density).is_empty());
+    }
+
+    #[test]
+    #[ignore]
+    fn view_bar_moves_between_frames() {
+        use egui_kittest::kittest::Queryable;
+        let dir = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
+        let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1480.0, 940.0))
+            .build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
+        settle(&mut h, 60.0);
+        h.state_mut().open_editor(0);
+        settle(&mut h, 60.0);
+        h.key_press(egui::Key::P);
+        h.key_press(egui::Key::F);
+        h.run_steps(5);
+        if let Some(out) = &out {
+            shot(&mut h, out, "bar_picked_no_strip");
+        }
+        h.get_by_label("Crop & straighten (C)").click();
+        h.run_steps(5);
+        assert!(h.state().editor.crop.is_some(), "Crop opens crop mode");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(5);
+        assert!(h.state().editor.crop.is_none());
+        h.get_by_label("Next frame (→)").click();
+        h.run_steps(5);
+        assert_eq!(h.state().active, Some(1));
+        h.get_by_label("Previous frame (←)").click();
+        h.run_steps(5);
+        assert_eq!(h.state().active, Some(0));
+        h.get_by_label("Previous frame (←)").click();
+        h.run_steps(5);
+        assert_eq!(
+            h.state().active,
+            Some(h.state().frames.len() - 1),
+            "wraps around"
+        );
     }
 
     #[test]
@@ -2026,6 +2047,38 @@ mod ui_tests {
             h.state().frames[0].sc.settings.tone_profile,
             crate::engine::settings::ToneProfile::LogarithmicRich
         );
+    }
+
+    /// The Rolls screen on real rolls (`NLP_UI_TEST_DIR`, read only), a roll
+    /// with no thumbnails yet, and a missing folder.
+    #[test]
+    #[ignore]
+    fn rolls_screen() {
+        let out = PathBuf::from(std::env::var("NLP_UI_OUT").expect("NLP_UI_OUT"));
+        let scans = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
+        let empty = std::env::temp_dir().join(format!("nlp_rolls_{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(empty.join("scan_001.dng"), b"not read").unwrap();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .wgpu()
+            .build_eframe(|cc| NlpApp::new(cc, None));
+        h.state_mut().defaults.projects = vec![
+            scans,
+            empty.clone(),
+            PathBuf::from("/Volumes/Archive/Lisbon roll"),
+        ];
+        h.state_mut().show_projects();
+        for _ in 0..200 {
+            h.run_steps(3);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if h.state().jobs.busy() == 0 && !h.state().roll.covers.is_empty() {
+                break;
+            }
+        }
+        h.run_steps(3);
+        shot(&mut h, &out, "0_rolls");
+        let _ = std::fs::remove_dir_all(&empty);
     }
 
     #[test]

@@ -350,7 +350,8 @@ CC). The candidates stored in `AutoWb`:
 Static film‑character presets (`presets::film_character`, magenta/yellow in
 CC): Standard 3/5.5, Kodak 2/5.5, Fuji 1/5.5, Cine‑D 3/5.5, Cine‑T 2/7.5,
 None 0/0. `wb_for_mode` writes the chosen pair into `wb_temp` / `wb_tint`;
-from then on WB is ordinary printing filtration (6.2).
+from then on WB is ordinary printing filtration (6.2). The editor shows `wb_tint`
+×3 on Lightroom's ±150; the stored value stays CC.
 
 ### 5.5 Skin‑keyed midtone — `skin.rs`
 
@@ -421,9 +422,9 @@ with
 
 - `whites' = whites − glow`, `blacks' = blacks + fade`,
   `highlights' = highlights + glow/1.5`, `shadows' = shadows − fade/1.5`
-  (Lab Glow / Lab Fade are combinations of the four).
+  (Glow / Fade are combinations of the four).
 - `gamma = auto × brightness`, `brightness = 2^(−brightness/50 · 0.7)`.
-  **Auto midtone** (`auto_gamma`, only for LAB profiles, which have the auto
+  **Auto midtone** (`auto_gamma`, only for Print profiles, which have the auto
   flag, and only on negatives): `ln 0.5 / ln m`, where `m` is the mean
   normalised `mid` of the three channels, clamped to 0.8..1.6 — the frame's
   key prints at the middle, with bright frames allowed to come down further
@@ -445,17 +446,16 @@ with
   `wb = [0, wb_tint, wb_temp]`. So:
   - **Print exposure** is in stops: +1 EV removes 0.301 log E (a print
     ≈ 29 % of the paper range lighter).
-  - **WB and the C·M·Y keys are subtractive filtration**: +Y (temp) adds
+  - **WB and the C·M·Y filtration are subtractive**: +Y (temp) adds
     blue‑channel exposure, i.e. less blue, warmer; +M (tint) takes green;
-    +C takes red. The lab keys (`settings::lab`) step density by 1/6 EV and
-    colour by 2.5 CC, within ±5 EV / ±50 CC.
+    +C takes red.
 
 ### 6.3 Tone profiles
 
 `profile()` holds the plugin's 14 tone profiles as **21 knots** each over
 normalised density 0..1 (measured: the plugin's printed grey on the modelled
 ColorChecker at −1, 0, +1 EV, regressed against this engine's normalised
-density). The LAB profiles carry the auto‑midtone flag; Cinematic and Linear
+density). The Print profiles carry the auto‑midtone flag; Cinematic and Linear
 ones do not.
 
 `tone_curve` is a monotone Fritsch–Carlson cubic through the knots. Below 0

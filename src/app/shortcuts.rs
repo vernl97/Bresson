@@ -26,10 +26,11 @@ impl NlpApp {
         let cmd = Modifiers::COMMAND;
         let shift = Modifiers::SHIFT;
         let none = Modifiers::NONE;
-        let groups: [(&str, Vec<(String, &str)>); 4] = [
+        let groups: [(&str, Vec<(String, &str)>); 3] = [
             (
                 "Roll",
                 vec![
+                    (k(cmd, Key::O), "Open a folder or scans"),
                     ("← → ↑ ↓".into(), "Move the selection (⇧ extends it)"),
                     (k(cmd, Key::A), "Select all"),
                     (k(none, Key::Escape), "Clear the selection"),
@@ -65,16 +66,6 @@ impl NlpApp {
                     ("+ −".into(), "Zoom in / out"),
                     ("Double-click".into(), "Reset a slider (or click its label)"),
                     ("Shift-drag".into(), "Move a slider finely"),
-                ],
-            ),
-            (
-                "Lab keys (number row or numpad)",
-                vec![
-                    ("7 8 9".into(), "Add cyan, magenta, yellow"),
-                    ("1 2 3".into(), "Remove cyan, magenta, yellow"),
-                    ("4".into(), "Print darker (density +)"),
-                    ("6".into(), "Print lighter (density −)"),
-                    ("0".into(), "Reset the correction"),
                 ],
             ),
             (
