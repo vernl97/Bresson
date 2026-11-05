@@ -57,13 +57,13 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
 - J shows clipping: red where a channel is blown, blue where the shadows are blocked. The histogram marks clipped channels in its corners.
 - Hovering the image shows the output RGB and the negative's density above the film base.
 - Crop mode: drag the frame edges and corners on the canvas, or use the straighten dial. The lock next to the aspect ratio dropdown keeps the crop at the chosen ratio (Original by default; 1:1, 1:2, 2:3, 3:4, 4:5, 5:7, 8.5:11, 9:16); unlock it for a free-form crop. Auto finds the frame inside the film rebate and holder and crops it to the same shape. Reset Crop / Cancel (Esc) / Apply (Enter).
-- A single-column sidebar, with a histogram on top and the crop tool under it:
+- A single-column sidebar, with a histogram on top and the lab keys' readout under it (the crop tool is in the bar under the picture):
   - **Histogram**: a Histogram / Curves toggle. The histogram marks clipped channels and its regions drag Blacks, Darks, Exposure, Lights and Whites.
-  - **Basic**: the tone profile, white balance (presets, a neutral eyedropper, Temp/Tint in CC of yellow and magenta filtration), Exposure, Brightness, Contrast, Lights, Darks, Whites and Blacks.
-  - **Finishing**: Lab Glow/Fade, White/Black clip, and Burn / Dodge (the Hyper Tone local burning and dodging, off by default).
+  - **Basic**: the tone profile, white balance (presets, a neutral eyedropper, Temp/Tint in CC of yellow and magenta filtration), Exposure, Midtones, Contrast, Lights, Darks, Whites and Blacks.
   - **Colour**: colour toning for mids, highs and shadows, a LUT with its amount, and look saturation.
+  - **Finishing** (closed until opened): Lab Glow/Fade, White/Black point, and Burn / Dodge for large areas (the Hyper Tone local burning and dodging, off by default).
   - Each section header marks edits and resets just that section.
-  - The bar at the bottom holds Convert while the frame needs it, otherwise Previous (the settings of the frame you edited before) and Reset, plus the ⋯ menu: Export, copy / paste settings, save / apply default, **Film & roll…** (film stock, ISO, developer and camera details for the EXIF and file name tokens, *Apply to roll/folder*, *Use roll analysis* and the roll process), keyboard shortcuts, Re-convert and Unconvert.
+  - The bar at the bottom holds Convert while the frame needs it, otherwise Copy from last (the settings of the frame you edited before) and Reset. The top bar shows the roll, frame and film stock, with Export and the ⋯ menu in its corner: copy / paste settings, save / apply default, **Film & roll…** (film stock, ISO, developer and camera details for the EXIF and file name tokens, *Apply to roll/folder*, *Use roll analysis* and the roll process), keyboard shortcuts, Re-convert and Unconvert.
   - Sharpening (Lab or Scanner) is set in the export dialog.
 - Film-base eyedropper for sampling the unexposed border.
 

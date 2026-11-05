@@ -63,6 +63,8 @@ impl NlpApp {
                     (k(cmd, Key::E), "Export this frame"),
                     ("P X U".into(), "Pick / reject / unflag"),
                     ("+ −".into(), "Zoom in / out"),
+                    ("Double-click".into(), "Reset a slider (or click its label)"),
+                    ("Shift-drag".into(), "Move a slider finely"),
                 ],
             ),
             (

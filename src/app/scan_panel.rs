@@ -362,7 +362,7 @@ impl NlpApp {
         };
         let mut picked = None;
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("scan_scanner")
+            widgets::combo("scan_scanner")
                 .width(230.0)
                 .selected_text(text)
                 .show_ui(ui, |ui| {
@@ -407,7 +407,7 @@ impl NlpApp {
             if info.sources.len() > 1 {
                 ui.label(RichText::new("Source").color(theme::MUTED));
                 let current = info.source.clone().unwrap_or_default();
-                egui::ComboBox::from_id_salt("scan_source").selected_text(&current).show_ui(ui, |ui| {
+                widgets::combo("scan_source").selected_text(&current).show_ui(ui, |ui| {
                     for s in &info.sources {
                         if ui.selectable_label(*s == current, s).clicked() && *s != current {
                             new_source = Some(s.clone());
@@ -417,7 +417,7 @@ impl NlpApp {
                 ui.end_row();
             }
             ui.label(RichText::new("Resolution").color(theme::MUTED));
-            egui::ComboBox::from_id_salt("scan_dpi").selected_text(format!("{} dpi", d.dpi)).show_ui(ui, |ui| {
+            widgets::combo("scan_dpi").selected_text(format!("{} dpi", d.dpi)).show_ui(ui, |ui| {
                 for v in dpis {
                     ui.selectable_value(&mut d.dpi, *v, format!("{v} dpi"));
                 }

@@ -27,7 +27,11 @@ pub mod theme {
     pub const MUTED: Color32 = Color32::from_rgb(142, 142, 147);
     pub const FAINT: Color32 = Color32::from_rgb(90, 90, 96);
     pub const TRACK: Color32 = Color32::from_rgb(64, 64, 70);
+    /// Slider tracks: 3:1 against the panel, as WCAG asks of controls.
+    pub const SLIDER_TRACK: Color32 = Color32::from_rgb(108, 108, 112);
     pub const ACCENT: Color32 = Color32::from_rgb(76, 141, 255);
+    /// The accent behind white text: 4.7:1, where `ACCENT` only reaches 3.2:1.
+    pub const ACCENT_FILL: Color32 = Color32::from_rgb(47, 111, 224);
     pub const OK: Color32 = Color32::from_rgb(98, 186, 120);
     pub const WARN: Color32 = Color32::from_rgb(222, 168, 72);
     pub const ERR: Color32 = Color32::from_rgb(236, 96, 84);
@@ -174,7 +178,7 @@ pub fn primary<'a>(text: &str) -> egui::Button<'a> {
             .font(theme::medium(13.0))
             .color(Color32::WHITE),
     )
-    .fill(theme::ACCENT)
+    .fill(theme::ACCENT_FILL)
     .corner_radius(6.0)
     .min_size(egui::vec2(0.0, 28.0))
 }
@@ -513,6 +517,8 @@ pub enum Icon {
     Split,
     Clipping,
     Flag,
+    /// Back to the default value: an arrow turning anticlockwise.
+    Reset,
 }
 
 fn arc(c: egui::Pos2, r: f32, a0: f32, a1: f32, n: usize) -> Vec<egui::Pos2> {
@@ -563,13 +569,15 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ));
         }
         Icon::Before => {
-            // The picture with its lower-left half filled: the other state.
+            // A picture with an arrow pointing back: the earlier state.
             let r = Rect::from_center_size(c, vec2(16.0 * s, 13.0 * s));
             p.rect_stroke(r, 2.0, st, egui::StrokeKind::Middle);
-            p.add(Shape::convex_polygon(
-                vec![r.left_top(), r.left_bottom(), r.right_bottom()],
-                color,
-                Stroke::NONE,
+            let (tip, end) = (c - vec2(4.0 * s, 0.0), c + vec2(4.5 * s, 0.0));
+            p.line_segment([tip, end], st);
+            let h = 3.0 * s;
+            p.add(Shape::line(
+                vec![tip + vec2(h, -h), tip, tip + vec2(h, h)],
+                st,
             ));
         }
         Icon::Split => {
@@ -587,24 +595,26 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             ));
         }
         Icon::Clipping => {
-            // The histogram's two clipping corners.
-            let r = Rect::from_center_size(c, vec2(16.0 * s, 13.0 * s));
-            p.rect_stroke(r, 2.0, st, egui::StrokeKind::Middle);
-            // Corner triangles just inside the frame, both wound clockwise.
-            let a = 5.0 * s;
-            let (tl, tr) = (
-                r.left_top() + vec2(2.0 * s, 2.0 * s),
-                r.right_top() + vec2(-2.0 * s, 2.0 * s),
-            );
-            p.add(Shape::convex_polygon(
-                vec![tl, tl + vec2(a, 0.0), tl + vec2(0.0, a)],
-                color,
-                Stroke::NONE,
-            ));
-            p.add(Shape::convex_polygon(
-                vec![tr, tr + vec2(0.0, a), tr + vec2(-a, 0.0)],
-                color,
-                Stroke::NONE,
+            // A histogram piled up against both ends: tones clipped.
+            let base = c.y + 6.5 * s;
+            for (k, h) in [13.0, 4.0, 6.0, 4.0, 13.0].into_iter().enumerate() {
+                let x = c.x + (k as f32 - 2.0) * 3.5 * s;
+                p.rect_filled(
+                    Rect::from_min_max(pos2(x - 1.1 * s, base - h * s), pos2(x + 1.1 * s, base)),
+                    0.5,
+                    color,
+                );
+            }
+        }
+        Icon::Reset => {
+            let r = 5.0 * s;
+            let (a0, a1) = (-2.4f32, 2.2f32);
+            p.add(Shape::line(arc(c, r, a0, a1, 18), st));
+            let tip = c + r * vec2(a0.cos(), a0.sin());
+            let h = 3.0 * s;
+            p.add(Shape::line(
+                vec![tip + vec2(0.0, -h), tip, tip + vec2(h, 0.0)],
+                st,
             ));
         }
         Icon::Flag => {
@@ -736,20 +746,6 @@ pub fn bar_button(
     )
 }
 
-/// Larger button for the tool strip.
-pub fn tool_button(ui: &mut Ui, icon: Icon, tip: &str, selected: bool) -> egui::Response {
-    sized_icon_button(
-        ui,
-        icon,
-        tip,
-        selected,
-        true,
-        None,
-        egui::vec2(38.0, 32.0),
-        6.0,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn sized_icon_button(
     ui: &mut Ui,
@@ -789,6 +785,13 @@ fn sized_icon_button(
     resp.on_hover_text(tip)
 }
 
+/// The app's dropdown: a filled box with the sections' thin chevron.
+pub fn combo(id: impl std::hash::Hash + std::fmt::Debug) -> egui::ComboBox {
+    egui::ComboBox::from_id_salt(id).icon(|ui, rect, visuals, _open| {
+        chevron(ui.painter(), rect.center(), true, visuals.fg_stroke.color);
+    })
+}
+
 /// Label-above dropdown, full width.
 pub fn fl_combo<T: Copy + PartialEq>(
     ui: &mut Ui,
@@ -805,7 +808,7 @@ pub fn fl_combo<T: Copy + PartialEq>(
             l.on_hover_text(tip);
         }
     }
-    egui::ComboBox::from_id_salt(("fl_combo", label, std::any::type_name::<T>(), ui.id()))
+    combo(("fl_combo", label, std::any::type_name::<T>(), ui.id()))
         .width((ui.available_width() - 4.0).max(60.0))
         .height(400.0)
         .selected_text(name(*v))
@@ -925,44 +928,80 @@ pub fn fl_slider_active(
     // One compact row, as in Lightroom: label, track, value.
     const VALUE_W: f32 = 42.0;
     let (row, resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width() - 14.0, 22.0),
+        egui::vec2(ui.available_width() - 14.0, 24.0),
         Sense::click_and_drag(),
     );
     let label_rect = Rect::from_min_size(row.min, egui::vec2(LABEL_W, row.height()));
     let value_rect = Rect::from_min_max(egui::pos2(row.right() - VALUE_W, row.top()), row.max);
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(label_rect)
-            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-        |ui| {
-            let l = ui.add(
-                egui::Label::new(egui::RichText::new(label).color(if modified {
-                    theme::TEXT
+    let label_left = ui
+        .scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(label_rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                let l = ui.add(
+                    egui::Label::new(egui::RichText::new(label).color(if modified {
+                        theme::TEXT
+                    } else {
+                        theme::MUTED
+                    }))
+                    .truncate()
+                    .sense(Sense::click()),
+                );
+                let left = l.rect.left();
+                let l = l.on_hover_text(if tip.is_empty() {
+                    "Click to reset".to_string()
                 } else {
-                    theme::MUTED
-                }))
-                .truncate()
-                .sense(Sense::click()),
-            );
-            let l = l.on_hover_text(if tip.is_empty() {
-                "Click to reset".to_string()
+                    format!("{tip}\n\nClick the label to reset.")
+                });
+                if l.clicked() && modified {
+                    *v = default;
+                    changed = true;
+                }
+                left
+            },
+        )
+        .inner;
+    // A dot left of the label marks the edit; hovering the row turns it into
+    // a reset button, like the section headers.
+    if modified {
+        let c = egui::pos2(label_left - 9.0, row.center().y);
+        let hit = Rect::from_center_size(c, egui::vec2(16.0, row.height()));
+        let p = ui.painter().with_clip_rect(bleed(row));
+        if ui.rect_contains_pointer(row.union(hit)) {
+            let r = ui
+                .interact(hit, ui.id().with((label, "reset")), Sense::click())
+                .on_hover_text("Reset")
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            let color = if r.hovered() {
+                theme::TEXT
             } else {
-                format!("{tip}\n\nClick the label to reset.")
-            });
-            if l.clicked() && modified {
+                theme::MUTED
+            };
+            paint_icon(
+                &p,
+                Rect::from_center_size(c, egui::vec2(12.0, 12.0)),
+                Icon::Reset,
+                color,
+            );
+            if r.clicked() {
                 *v = default;
                 changed = true;
             }
-        },
-    );
+        } else {
+            p.circle_filled(c, 2.5, theme::ACCENT);
+        }
+    }
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(value_rect)
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
         |ui| {
+            // Bipolar values show their sign, whatever the slider resets to.
+            let signed = default == 0.0 || gradient.is_some();
             let fmt = move |x: f64, _r: std::ops::RangeInclusive<usize>| {
                 let s = format!("{:.*}", decimals, x);
-                if x > 0.0 && default == 0.0 {
+                if x > 0.0 && signed {
                     format!("+{s}")
                 } else {
                     s
@@ -971,7 +1010,7 @@ pub fn fl_slider_active(
             // Frameless value, editable by click (type) or horizontal drag.
             // The box hugs its text and is as tall as the row, so values
             // right-align and sit on the label's baseline.
-            ui.spacing_mut().interact_size = egui::vec2(0.0, 22.0);
+            ui.spacing_mut().interact_size = egui::vec2(0.0, 24.0);
             ui.spacing_mut().button_padding = egui::vec2(0.0, 0.0);
             let vis = &mut ui.visuals_mut().widgets;
             for w in [&mut vis.inactive, &mut vis.hovered] {
@@ -1027,7 +1066,7 @@ pub fn fl_slider_active(
             gradient_rect(ui, track.expand2(egui::vec2(0.0, 0.5)), a, b)
         }
         None => {
-            p.rect_filled(track, 1.0, theme::TRACK);
+            p.rect_filled(track, 1.0, theme::SLIDER_TRACK);
             let fill_base = origin.unwrap_or(default);
             let z = to_x(fill_base.clamp(lo, hi));
             let k = to_x(*v);
@@ -1191,37 +1230,49 @@ pub fn fold_with(ui: &mut Ui, title: &str, default_open: bool) -> bool {
     fold_section(ui, title, default_open, false).0
 }
 
-/// Edge-to-edge band holding a row of tool icons, on the panel colour of the
-/// slider areas under a thin, non-collapsible header band, like Lightroom's tool strip; the next header
-/// follows flush.
-pub fn tool_band(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    const GAP: f32 = 12.0;
-    let (full, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), GAP + 42.0), Sense::hover());
-    let gap = Rect::from_min_size(full.min, egui::vec2(full.width(), GAP));
-    let rect = Rect::from_min_max(egui::pos2(full.left(), gap.bottom()), full.max);
+/// A section header's band and title for a panel that doesn't collapse.
+pub fn panel_header(ui: &mut Ui, title: &str) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::hover());
+    let band = bleed(rect);
     let p = ui
         .painter()
-        .with_clip_rect(bleed(full).expand2(egui::vec2(0.0, 2.0)));
-    // A thin header band that cannot be collapsed, with the same fine rule
-    // along its bottom edge as the section headers.
-    p.rect_filled(bleed(gap), 0.0, theme::BG);
+        .with_clip_rect(band.expand2(egui::vec2(0.0, 2.0)));
+    p.rect_filled(band, 0.0, theme::BG);
     p.hline(
-        bleed(gap).x_range(),
-        gap.bottom() - 0.5,
+        band.x_range(),
+        band.bottom() - 0.5,
         egui::Stroke::new(1.0, Color32::from_rgb(46, 46, 50)),
     );
-    p.rect_filled(bleed(rect), 0.0, theme::PANEL);
-    // The next header follows flush, with no open-section spacing.
-    ui.add_space(-ui.spacing().item_spacing.y);
-    ui.data_mut(|d| d.insert_temp(egui::Id::new("section_prev_open"), false));
-    let mut inner = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    p.text(
+        rect.right_center() - egui::vec2(32.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        title,
+        theme::medium(14.5),
+        theme::TEXT,
     );
-    inner.spacing_mut().item_spacing.x = 6.0;
-    add(&mut inner);
+}
+
+/// The next section header follows flush, with no open-section spacing.
+pub fn reset_section_gap(ui: &mut Ui) {
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("section_prev_open"), false));
+}
+
+/// Fades the bottom of `rect` into the panel, to show that it scrolls on.
+pub fn scroll_fade(ui: &Ui, rect: Rect) {
+    const H: f32 = 28.0;
+    let r = Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - H), rect.max);
+    let mut mesh = egui::Mesh::default();
+    for (pos, col) in [
+        (r.left_top(), Color32::TRANSPARENT),
+        (r.right_top(), Color32::TRANSPARENT),
+        (r.right_bottom(), theme::PANEL),
+        (r.left_bottom(), theme::PANEL),
+    ] {
+        mesh.colored_vertex(pos, col);
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
 }
 
 /// A sidebar section header. When `modified`, a dot after the title marks
@@ -1296,7 +1347,7 @@ pub fn fold_section(ui: &mut Ui, title: &str, default_open: bool, modified: bool
         p,
         egui::pos2(rect.right() - 14.0, rect.center().y),
         open,
-        if hot { theme::TEXT } else { theme::FAINT },
+        if hot { theme::TEXT } else { theme::MUTED },
     );
     let mut reset = false;
     if resp.clicked() {
@@ -1349,7 +1400,7 @@ pub fn mini_slider(
     let hot = resp.hovered() || resp.dragged();
     let p = ui.painter();
     let x = track.left() + track.width() * ((*v - lo) / (hi - lo)).clamp(0.0, 1.0);
-    p.rect_filled(track, 1.0, theme::TRACK);
+    p.rect_filled(track, 1.0, theme::SLIDER_TRACK);
     p.rect_filled(
         Rect::from_min_max(track.left_top(), egui::pos2(x, track.bottom())),
         1.0,
@@ -1502,68 +1553,27 @@ pub fn group_divider(ui: &mut Ui) {
     ui.add_space(5.0);
 }
 
-/// A header-style selector, like Lightroom's Profile row: the label at the
-/// left edge, the value as plain text with a chevron (no box) right after it.
-pub fn profile_row<T: Copy + PartialEq>(
+/// A dropdown in a slider's columns: the label right-aligned in the label
+/// column, the box from the track to `trailing` short of the row's end.
+pub fn combo_row<T: Copy + PartialEq>(
     ui: &mut Ui,
     label: &str,
     v: &mut T,
     all: &[T],
     name: impl Fn(T) -> &'static str,
-    tip: &str,
+    trailing: f32,
 ) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        ui.add_space(10.0);
         ui.allocate_ui_with_layout(
-            egui::vec2(80.0, 26.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                let l = ui.label(egui::RichText::new(format!("{label} :")).color(theme::MUTED));
-                if !tip.is_empty() {
-                    l.on_hover_text(tip);
-                }
-            },
+            egui::vec2(LABEL_W, 26.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| ui.label(egui::RichText::new(label).color(theme::MUTED)),
         );
-        ui.add_space(6.0);
-        changed = plain_combo(ui, &format!("profile_row_{label}"), v, all, name, 150.0);
-    });
-    changed
-}
-
-/// A dropdown drawn as plain text with a chevron, without a box.
-pub fn plain_combo<T: Copy + PartialEq>(
-    ui: &mut Ui,
-    salt: &str,
-    v: &mut T,
-    all: &[T],
-    name: impl Fn(T) -> &'static str,
-    width: f32,
-) -> bool {
-    let mut changed = false;
-    ui.scope(|ui| {
-        let w = &mut ui.visuals_mut().widgets;
-        for x in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
-            x.weak_bg_fill = Color32::TRANSPARENT;
-            x.bg_fill = Color32::TRANSPARENT;
-            x.bg_stroke = egui::Stroke::NONE;
-        }
-        w.inactive.fg_stroke.color = theme::TEXT;
-        ui.spacing_mut().button_padding.x = 0.0;
-        // Fit the box to its text so the chevron sits right after it.
-        let text_w = ui
-            .painter()
-            .layout_no_wrap(
-                name(*v).to_string(),
-                egui::TextStyle::Button.resolve(ui.style()),
-                theme::TEXT,
-            )
-            .size()
-            .x;
-        let width = width.min(text_w + 22.0);
-        egui::ComboBox::from_id_salt((salt.to_string(), std::any::type_name::<T>()))
-            .width(width)
+        ui.add_space(TRACK_GAP);
+        combo(("combo_row", label, std::any::type_name::<T>()))
+            .width((ui.available_width() - 14.0 - trailing).max(60.0))
             .height(400.0)
             .selected_text(name(*v))
             .show_ui(ui, |ui| {
@@ -1576,4 +1586,45 @@ pub fn plain_combo<T: Copy + PartialEq>(
             });
     });
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    /// The dot beside an edited slider's label becomes a reset button on hover.
+    #[test]
+    fn edited_slider_resets_from_the_dot_beside_its_label() {
+        let mut h = Harness::new_ui_state(
+            |ui, v: &mut f32| {
+                ui.add_space(0.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(40.0);
+                    ui.vertical(|ui| {
+                        fl_slider(ui, "Exposure", v, -5.0..=5.0, 0.0, 1, "", None);
+                    });
+                });
+            },
+            2.0f32,
+        );
+        h.run();
+        let label = h.get_by_label("Exposure").rect();
+        let dot = egui::pos2(
+            label.min.x as f32 - 9.0,
+            (label.min.y + label.max.y) as f32 / 2.0,
+        );
+        h.event(egui::Event::PointerMoved(dot));
+        h.run();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: dot,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.run();
+        }
+        assert_eq!(*h.state(), 0.0);
+    }
 }

@@ -897,7 +897,7 @@ impl NlpApp {
                 };
                 let custom = custom_dir.is_some();
                 ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("export_dest")
+                    widgets::combo("export_dest")
                         .width(if !custom && ex.placement == Placement::Subfolder {
                             220.0
                         } else {
@@ -956,7 +956,7 @@ impl NlpApp {
                     let current = presets.iter().position(|p| p.matches(ex));
                     ui.label(egui::RichText::new("Preset").small().color(theme::MUTED));
                     ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_salt("export_preset")
+                        widgets::combo("export_preset")
                             .width(ui.available_width() - 120.0)
                             .selected_text(
                                 current
@@ -1033,7 +1033,7 @@ impl NlpApp {
                             6000 => "6000 px (lab L)".to_string(),
                             v => format!("{v} px"),
                         };
-                        egui::ComboBox::from_id_salt("export_size")
+                        widgets::combo("export_size")
                             .width(ui.available_width() - 4.0)
                             .selected_text(size_name(ex.long_edge))
                             .show_ui(ui, |ui| {
@@ -1918,6 +1918,35 @@ mod ui_tests {
     }
 
     /// Regression: hovering the sidebars must not make them grow.
+    /// Crop mode swaps the sidebar's content, never its width.
+    #[test]
+    #[ignore]
+    fn crop_keeps_the_sidebar_width() {
+        let dir = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1480.0, 940.0))
+            .build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
+        settle(&mut h, 60.0);
+        h.state_mut().open_editor(0);
+        settle(&mut h, 60.0);
+        let width = |h: &Harness<'_, NlpApp>| {
+            egui::containers::panel::PanelState::load(&h.ctx, egui::Id::new("editor_sidebar"))
+                .map(|s| s.size().x)
+                .expect("editor sidebar")
+        };
+        let before = width(&h);
+        let i = h.state().active.unwrap();
+        h.state_mut().enter_crop(i);
+        h.run_steps(30);
+        let cropping = width(&h);
+        h.key_press(egui::Key::Escape);
+        h.run_steps(5);
+        let after = width(&h);
+        eprintln!("sidebar {before} -> {cropping} -> {after}");
+        assert_eq!(before, cropping, "entering crop mode resized the sidebar");
+        assert_eq!(before, after, "leaving crop mode resized the sidebar");
+    }
+
     #[test]
     #[ignore]
     fn sidebars_do_not_grow() {
