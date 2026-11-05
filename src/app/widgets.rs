@@ -24,7 +24,8 @@ pub mod theme {
     /// Hairlines (white at ~7 %).
     pub const LINE: Color32 = Color32::from_rgba_premultiplied(18, 18, 18, 18);
     pub const TEXT: Color32 = Color32::from_rgb(232, 232, 234);
-    pub const MUTED: Color32 = Color32::from_rgb(142, 142, 147);
+    /// 4.8:1 on the canvas grey, the lightest ground it sits on at rest.
+    pub const MUTED: Color32 = Color32::from_rgb(150, 150, 155);
     pub const FAINT: Color32 = Color32::from_rgb(90, 90, 96);
     pub const TRACK: Color32 = Color32::from_rgb(64, 64, 70);
     /// Slider tracks: 3:1 against the panel, as WCAG asks of controls.
@@ -188,36 +189,6 @@ pub fn ghost<'a>(text: &str) -> egui::Button<'a> {
     egui::Button::new(egui::RichText::new(text).color(theme::TEXT))
         .corner_radius(6.0)
         .min_size(egui::vec2(0.0, 28.0))
-}
-
-/// Small muted icon + text line with a close button at the row's end; true when it's clicked.
-pub fn dismissable_status_line(ui: &mut Ui, icon: Icon, color: Color32, text: &str) -> bool {
-    const CLOSE: f32 = 18.0;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-        paint_icon(ui.painter(), r, icon, color);
-        let w = ui.available_width() - CLOSE - 6.0;
-        ui.allocate_ui(egui::vec2(w, 14.0), |ui| {
-            ui.set_min_width(w);
-            ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::MUTED)).wrap());
-        });
-        let close = sized_icon_button(
-            ui,
-            Icon::Close,
-            "Dismiss",
-            false,
-            true,
-            None,
-            egui::vec2(CLOSE, CLOSE),
-            4.0,
-        );
-        close.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Dismiss warning")
-        });
-        close.clicked()
-    })
-    .inner
 }
 
 pub fn gradient_rect(ui: &Ui, rect: Rect, a: Color32, b: Color32) {

@@ -64,11 +64,6 @@ pub struct Frame {
     pub auto_convert: bool,
     /// The thumbnail as the scanned negative (unconverted), made on demand.
     pub thumb_neg: Option<egui::TextureHandle>,
-    /// Share of the rendered thumbnail clipped to white and to black.
-    pub clip: Option<[f32; 2]>,
-    /// Warnings closed in the editor, which no longer count towards the frame's
-    /// "needs a look" badge, until the folder is reopened.
-    pub dismissed_warnings: Vec<&'static str>,
 }
 
 impl Frame {
@@ -364,8 +359,6 @@ impl NlpApp {
             source_auto,
             auto_convert,
             thumb_neg: None,
-            clip: None,
-            dismissed_warnings: Vec::new(),
         }
     }
 
@@ -1281,7 +1274,6 @@ impl NlpApp {
             let levels = pipeline::levels_for(s, f.sc.analysis.as_ref(), f.sc.roll.as_ref());
             let r = Renderer::new(s, levels.as_ref(), OutputSpace::Srgb);
             let px = r.render(&neg, 0.0);
-            f.clip = Some(grid::clip_share(&px));
             f.thumb_neg = None;
             let img = to_color_image(&px, neg.width, neg.height);
             match &mut f.thumb {
@@ -1518,8 +1510,6 @@ mod tests {
             source_auto: false,
             auto_convert: false,
             thumb_neg: None,
-            clip: None,
-            dismissed_warnings: Vec::new(),
         };
 
         let dummy_src = SourceImage {
@@ -1783,6 +1773,36 @@ mod ui_tests {
         h.state_mut().set_flag(&[0], Flag::Pick);
         h.state_mut().grid.filter = grid::GridFilter::Picks;
         assert_eq!(h.state().export_label(), "Export picks");
+
+        // Frames 0 picked, 1 rejected, 2 undecided.
+        assert_eq!(h.state().filter_counts(), (1, 1, 1));
+        h.state_mut().grid.filter = grid::GridFilter::Rejected;
+        assert_eq!(h.state().shown_frames(), vec![1]);
+        assert_eq!(
+            h.state().export_label(),
+            "Export",
+            "rejects don't export by default"
+        );
+        h.state_mut().grid.filter = grid::GridFilter::Unflagged;
+        assert_eq!(h.state().shown_frames(), vec![2]);
+        assert_eq!(h.state().export_label(), "Export 1");
+
+        // Culling from the keyboard moves on when the filter hides the frame,
+        // and stops with nothing left.
+        h.state_mut().set_flag(&[0, 1], Flag::None);
+        h.state_mut().selected = [0].into_iter().collect();
+        h.state_mut().flag_selection(Flag::Pick);
+        assert_eq!(h.state().sel_vec(), vec![1]);
+        h.state_mut().flag_selection(Flag::Reject);
+        assert_eq!(h.state().sel_vec(), vec![2]);
+        h.state_mut().flag_selection(Flag::Pick);
+        assert!(h.state().selected.is_empty());
+        assert_eq!(h.state().active, None);
+        // Where the frame stays on show, the selection stays too.
+        h.state_mut().grid.filter = grid::GridFilter::All;
+        h.state_mut().selected = [1].into_iter().collect();
+        h.state_mut().flag_selection(Flag::None);
+        assert_eq!(h.state().sel_vec(), vec![1]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1821,9 +1841,12 @@ mod ui_tests {
             vec![2],
             "hidden frames leave the selection"
         );
-        h.state_mut().grid.filter = grid::GridFilter::NeedsLook;
+        h.state_mut().grid.filter = grid::GridFilter::Rejected;
         h.run_steps(3);
-        shot(&mut h, &out, "g4_needs_look");
+        shot(&mut h, &out, "g3_rejected");
+        h.state_mut().grid.filter = grid::GridFilter::Unflagged;
+        h.run_steps(3);
+        shot(&mut h, &out, "g3_unflagged");
         h.state_mut().grid.filter = grid::GridFilter::All;
         h.state_mut().grid.negatives = true;
         settle(&mut h, 20.0);
@@ -1892,41 +1915,6 @@ mod ui_tests {
         eprintln!("sidebar {before} -> {cropping} -> {after}");
         assert_eq!(before, cropping, "entering crop mode resized the sidebar");
         assert_eq!(before, after, "leaving crop mode resized the sidebar");
-    }
-
-    #[test]
-    #[ignore]
-    fn editor_warnings_can_be_dismissed() {
-        use egui_kittest::kittest::Queryable;
-        let dir = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
-        let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
-        let mut h = Harness::builder()
-            .with_size(egui::vec2(1480.0, 940.0))
-            .build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
-        settle(&mut h, 60.0);
-        h.state_mut().open_editor(0);
-        settle(&mut h, 60.0);
-        h.state_mut().frames[0].clip = Some([0.2, 0.2]);
-        h.run_steps(5);
-        if let Some(out) = &out {
-            shot(&mut h, out, "warnings");
-        }
-        while h.query_all_by_label("Dismiss warning").next().is_some() {
-            h.query_all_by_label("Dismiss warning")
-                .next()
-                .unwrap()
-                .click();
-            h.run_steps(5);
-        }
-        if let Some(out) = &out {
-            shot(&mut h, out, "warnings_dismissed");
-        }
-        let f = &h.state().frames[0];
-        assert!(f.dismissed_warnings.contains(&"clip_white"));
-        assert!(f.dismissed_warnings.contains(&"clip_black"));
-        // With no warnings left, the frame's badge goes too.
-        let density = h.state().roll_density();
-        assert!(h.state().look_issues(0, density).is_empty());
     }
 
     #[test]

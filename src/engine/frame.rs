@@ -172,11 +172,69 @@ const ROLL_FRAMES: usize = 3;
 /// How far (percent) a frame's detected side may lie from the roll's before
 /// the detection counts as implausible.
 const ROLL_DEVIATION: f32 = 10.0;
+/// How far (percent) past the median a side still counts towards
+/// [`RollGeometry::widest`]; wider is a stray detection.
+const WIDEST_OVER_MEDIAN: f32 = 4.0;
 
-/// The geometry frames of one roll share: a scanner holds every frame in the
-/// same place, so the median of the frames' sides and angle. `None` with
-/// fewer than [`ROLL_FRAMES`] frames.
-pub fn roll_geometry(frames: &[Detected]) -> Option<Detected> {
+/// The geometry frames of one roll share.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RollGeometry {
+    /// The median of the frames' sides and angle.
+    pub median: Detected,
+    /// Each side's widest plausible inset. Film can lie either way round in
+    /// the holder, so the wide rebate of the sprocket edge may be on either
+    /// side, and only the widest inset is sure to clear it.
+    pub widest: [f32; 4],
+}
+
+/// The geometry of a roll's frames, by shape: portrait and landscape frames
+/// lie differently in the holder, so one's sides say little about the other's.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RollShapes {
+    portrait: Option<RollGeometry>,
+    landscape: Option<RollGeometry>,
+    all: Option<RollGeometry>,
+}
+
+impl RollShapes {
+    /// The geometry for a frame of this shape: its own shape's, or the whole
+    /// roll's where too few frames have that shape.
+    pub fn of(&self, landscape: bool) -> Option<RollGeometry> {
+        let own = if landscape {
+            self.landscape
+        } else {
+            self.portrait
+        };
+        own.or(self.all)
+    }
+}
+
+/// Whether the frame is wider than tall after its quarter turns.
+pub fn is_landscape(src: &SourceImage, s: &Settings) -> bool {
+    (src.width >= src.height) != (s.rotation % 2 == 1)
+}
+
+/// Pool `(landscape, geometry)` of a roll's frames.
+pub fn roll_shapes(frames: impl Iterator<Item = (bool, Detected)>) -> RollShapes {
+    let (mut wide, mut tall) = (Vec::new(), Vec::new());
+    for (landscape, d) in frames {
+        if landscape {
+            wide.push(d)
+        } else {
+            tall.push(d)
+        }
+    }
+    let all: Vec<Detected> = tall.iter().chain(&wide).copied().collect();
+    RollShapes {
+        portrait: roll_geometry(&tall),
+        landscape: roll_geometry(&wide),
+        all: roll_geometry(&all),
+    }
+}
+
+/// What `frames` share: a scanner holds every frame in about the same place.
+/// `None` with fewer than [`ROLL_FRAMES`] frames.
+pub fn roll_geometry(frames: &[Detected]) -> Option<RollGeometry> {
     if frames.len() < ROLL_FRAMES {
         return None;
     }
@@ -185,23 +243,44 @@ pub fn roll_geometry(frames: &[Detected]) -> Option<Detected> {
         v.sort_by(f32::total_cmp);
         v[v.len() / 2]
     };
-    Some(Detected {
-        crop: std::array::from_fn(|k| median(&|d| d.crop[k])),
-        straighten: median(&|d| d.straighten),
+    let crop: [f32; 4] = std::array::from_fn(|k| median(&|d| d.crop[k]));
+    let widest = std::array::from_fn(|k| {
+        frames
+            .iter()
+            .map(|d| d.crop[k])
+            .filter(|v| *v <= crop[k] + WIDEST_OVER_MEDIAN)
+            .fold(crop[k], f32::max)
+    });
+    Some(RollGeometry {
+        median: Detected {
+            crop,
+            straighten: median(&|d| d.straighten),
+        },
+        widest,
     })
 }
 
-/// A frame's detection, or the roll's geometry where it found nothing or
-/// something far from the rest. On a night scene most of the image is as
-/// clear as the base, so the rebate's edge disappears into it.
-pub fn settle(found: Option<Detected>, roll: Option<Detected>) -> Option<Detected> {
-    match (found, roll) {
-        (Some(d), Some(r)) if (0..4).any(|k| (d.crop[k] - r.crop[k]).abs() > ROLL_DEVIATION) => {
-            Some(r)
-        }
-        (None, r) => r,
-        (d, _) => d,
+/// A frame's detection, with the roll's geometry on the sides where it found
+/// something far from the rest, or everywhere if it found nothing. On a night
+/// scene most of the image is as clear as the base, so the rebate's edge
+/// disappears into it; those sides take the roll's widest inset, because a
+/// little less picture is better than a bright strip of rebate.
+pub fn settle(found: Option<Detected>, roll: Option<RollGeometry>) -> Option<Detected> {
+    let Some(r) = roll else { return found };
+    let Some(d) = found else {
+        return Some(Detected {
+            crop: r.widest,
+            straighten: r.median.straighten,
+        });
+    };
+    let far = |k: usize| (d.crop[k] - r.median.crop[k]).abs() > ROLL_DEVIATION;
+    if !(0..4).any(far) {
+        return Some(d);
     }
+    Some(Detected {
+        crop: std::array::from_fn(|k| if far(k) { r.widest[k] } else { d.crop[k] }),
+        straighten: r.median.straighten,
+    })
 }
 
 /// Shrink `insets` (percent, [l, t, r, b]) around their centre to the crop
@@ -440,13 +519,26 @@ mod tests {
         let found = detect(&night, &free(), BASE);
         assert_ne!(found.map(|d| d.crop), Some(normal.crop), "{found:?}");
         let roll = roll_geometry(&[normal; 3]);
-        assert_eq!(settle(found, roll), Some(normal));
-        // A detection far from the roll's is replaced, a near one kept.
+        let settled = settle(found, roll).expect("roll crop");
+        for k in 0..4 {
+            assert!(
+                (settled.crop[k] - normal.crop[k]).abs() <= ROLL_DEVIATION,
+                "{settled:?}"
+            );
+        }
+        assert_eq!(settle(None, roll), Some(normal));
+        // Sides far from the roll's are replaced, near ones kept.
         let stray = Detected {
-            crop: [38.0, 30.0, 7.0, 15.0],
-            straighten: 0.0,
+            crop: [38.0, 30.0, normal.crop[2] - 2.0, normal.crop[3] + 2.0],
+            straighten: 3.0,
         };
-        assert_eq!(settle(Some(stray), roll), Some(normal));
+        assert_eq!(
+            settle(Some(stray), roll),
+            Some(Detected {
+                crop: [normal.crop[0], normal.crop[1], stray.crop[2], stray.crop[3]],
+                straighten: normal.straighten,
+            })
+        );
         let near = Detected {
             crop: normal.crop.map(|v| v + 2.0),
             straighten: 0.5,
@@ -455,6 +547,36 @@ mod tests {
         // Too few frames make no roll crop.
         assert_eq!(roll_geometry(&[normal; 2]), None);
         assert_eq!(settle(None, None), None);
+    }
+
+    /// A lost side clears the rebate wherever the film put it: the roll's
+    /// widest inset, with strays left out, from frames of the same shape.
+    #[test]
+    fn lost_side_takes_the_widest_of_its_shape() {
+        let d = |crop| Detected {
+            crop,
+            straighten: 0.0,
+        };
+        let wide = [
+            d([2.0, 5.6, 2.0, 1.5]),
+            d([2.0, 2.0, 2.0, 5.5]),
+            d([2.0, 1.2, 2.0, 5.3]),
+            d([2.0, 30.0, 2.0, 1.0]),
+        ];
+        let tall = [d([5.6, 2.0, 1.5, 2.0]); 3];
+        let shapes = roll_shapes(
+            wide.iter()
+                .map(|d| (true, *d))
+                .chain(tall.iter().map(|d| (false, *d))),
+        );
+        let night = d([2.5, 36.0, 1.0, 0.0]);
+        let got = settle(Some(night), shapes.of(true)).unwrap().crop;
+        assert_eq!(got, [2.5, 5.6, 1.0, 0.0]);
+        // Portrait frames don't touch it, and it doesn't touch them.
+        assert_eq!(shapes.of(false).unwrap().median.crop, tall[0].crop);
+        // Too few frames of a shape: the whole roll's.
+        let few = roll_shapes(tall.iter().map(|d| (false, *d)));
+        assert_eq!(few.of(true), few.of(false));
     }
 
     #[test]

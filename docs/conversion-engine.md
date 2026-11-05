@@ -153,12 +153,17 @@ and a straighten angle on a 600‑px copy (after quarter turns / flip):
 **Roll fallback** (`roll_geometry`, `settle`). A night scene is mostly as
 clear as the rebate, so its edge disappears into it: detection finds
 nothing, or a wrong frame. When frames are converted together, their
-geometry is pooled: `roll_geometry` is the median of every side and of the
-angle over at least 3 auto‑cropped frames (`ROLL_FRAMES`). A frame whose
-detection failed, or put any side more than 10 % from the roll's
-(`ROLL_DEVIATION`), takes the roll's geometry — a scanner holds every frame
-in the same place. Only frames detected in that conversion are replaced, so
-a crop set by hand is kept.
+geometry is pooled by shape (`roll_shapes`; the whole roll where a shape has
+fewer than 3 frames, `ROLL_FRAMES`): `roll_geometry` is the median of every
+side and of the angle, plus each side's widest inset within 4 % of its median
+(`WIDEST_OVER_MEDIAN`). A side more than 10 % from the median
+(`ROLL_DEVIATION`) takes that widest inset and the frame takes the median
+angle; the other sides stay as detected. A frame with no detection takes the
+widest inset on all sides. Film can lie either way round in the holder, so
+only the widest is sure to clear the wide rebate of the sprocket edge. In a
+conversion only frames detected in that conversion are changed, so a crop set
+by hand is kept. Detect frame (grid, editor) settles against the crops the
+roll's frames already have.
 
 Geometry is not part of `AnalysisKey`; it is applied in step 4.
 

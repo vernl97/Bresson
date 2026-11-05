@@ -349,7 +349,7 @@ impl NlpApp {
         self.folder_shortcuts(&ctx);
         let cmd = egui::Modifiers::COMMAND;
         let key_text = |m, k| RichText::new(widgets::shortcut(&ctx, m, k)).color(theme::FAINT);
-        let (picks, needs_look) = self.filter_counts();
+        let (picks, unflagged, rejected) = self.filter_counts();
         // Export, Convert and the contact sheet act on the selection, or else
         // on the frames on show. Selection changes their scope, never their place.
         let shown = self.shown_frames();
@@ -473,16 +473,27 @@ impl NlpApp {
                         ui.add_space(14.0);
                         let n = self.frames.len();
                         let tabs = [
-                            (GridFilter::All, format!("All {n}"), "Every frame of the roll"),
-                            (GridFilter::Picks, format!("Picks {picks}"), "Frames picked with P"),
+                            (GridFilter::All, format!("All {n}"), "Every frame of the roll", true),
+                            (GridFilter::Picks, format!("Picks {picks}"), "Frames picked with P", true),
+                            // Only once culling has begun: until then it is All.
                             (
-                                GridFilter::NeedsLook,
-                                format!("Needs a look {needs_look}"),
-                                "Converted frames with weak colour balance, clipping, or a negative much denser or thinner than the rest",
+                                GridFilter::Unflagged,
+                                format!("Unflagged {unflagged}"),
+                                "Frames still to decide on",
+                                unflagged < n,
+                            ),
+                            (
+                                GridFilter::Rejected,
+                                format!("Rejected {rejected}"),
+                                "Frames rejected with X, left out of exports",
+                                rejected > 0,
                             ),
                         ];
-                        for (f, label, tip) in tabs {
-                            if filter_tab(ui, self.grid.filter == f, &label, f == GridFilter::NeedsLook && needs_look > 0)
+                        for (f, label, tip, show) in tabs {
+                            if !show && self.grid.filter != f {
+                                continue;
+                            }
+                            if filter_tab(ui, self.grid.filter == f, &label)
                                 .on_hover_text(tip)
                                 .clicked()
                             {
@@ -773,8 +784,7 @@ impl NlpApp {
             }
         }
         if let Some(flag) = Self::flag_key(ctx).filter(|_| !dialog) {
-            let idx = self.sel_vec();
-            self.set_flag(&idx, flag);
+            self.flag_selection(flag);
         }
         let rotate = ctx.input(|i| {
             let cmd = i.modifiers.command;
@@ -821,9 +831,27 @@ impl NlpApp {
         }
     }
 
+    /// What the roll's frames share, from the crops they already have, for
+    /// settling a detection made by hand on one of them.
+    pub fn stored_roll_shapes(&self) -> crate::engine::frame::RollShapes {
+        crate::engine::frame::roll_shapes(self.frames.iter().filter_map(|f| {
+            let s = &f.sc.settings;
+            let cropped = s.crop != [0.0; 4] || s.straighten != 0.0;
+            let src = f.proxy().filter(|_| cropped)?;
+            Some((
+                crate::engine::frame::is_landscape(&src, s),
+                crate::engine::frame::Detected {
+                    crop: s.crop,
+                    straighten: s.straighten,
+                },
+            ))
+        }))
+    }
+
     /// Crop and straighten each frame to its detected frame, free-form.
     pub fn detect_frames(&mut self, idx: &[usize]) {
         self.record(idx);
+        let shapes = self.stored_roll_shapes();
         let mut missed = 0;
         for &i in idx {
             let f = &self.frames[i];
@@ -833,7 +861,9 @@ impl NlpApp {
             };
             let mut settings = f.sc.settings.clone();
             settings.crop_aspect = CropAspect::Free;
-            match crate::engine::frame::detect(&src, &settings, f.base_for(&src)) {
+            let found = crate::engine::frame::detect(&src, &settings, f.base_for(&src));
+            let shared = shapes.of(crate::engine::frame::is_landscape(&src, &settings));
+            match crate::engine::frame::settle(found, shared) {
                 Some(d) => {
                     let s = &mut self.frames[i].sc.settings;
                     (s.crop, s.straighten) = (d.crop, d.straighten);
@@ -1195,22 +1225,18 @@ impl NlpApp {
 }
 
 /// A filter tab in the top bar: text that sits on a soft pill when active.
-fn filter_tab(ui: &mut egui::Ui, on: bool, label: &str, warn: bool) -> egui::Response {
+fn filter_tab(ui: &mut egui::Ui, on: bool, label: &str) -> egui::Response {
     let g = ui.painter().layout_no_wrap(
         label.to_string(),
         egui::FontId::proportional(12.5),
         if on { theme::TEXT } else { theme::MUTED },
     );
-    let dot = if warn { 10.0 } else { 0.0 };
-    let (rect, resp) = ui.allocate_exact_size(g.size() + vec2(20.0 + dot, 10.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(g.size() + vec2(20.0, 10.0), Sense::click());
     let p = ui.painter();
     if on {
         p.rect_filled(rect, rect.height() / 2.0, theme::SURFACE);
     } else if resp.hovered() {
         p.rect_filled(rect, rect.height() / 2.0, theme::HOVER.gamma_multiply(0.5));
-    }
-    if warn {
-        p.circle_filled(pos2(rect.left() + 12.0, rect.center().y), 3.0, theme::WARN);
     }
     let col = if on || resp.hovered() {
         theme::TEXT
@@ -1218,7 +1244,7 @@ fn filter_tab(ui: &mut egui::Ui, on: bool, label: &str, warn: bool) -> egui::Res
         theme::MUTED
     };
     p.galley_with_override_text_color(
-        pos2(rect.left() + 10.0 + dot, rect.center().y - g.size().y / 2.0),
+        pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0),
         g,
         col,
     );

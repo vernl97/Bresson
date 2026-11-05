@@ -1,7 +1,6 @@
 //! The roll's thumbnail grid: uniform cells like Lightroom's, each with its
-//! picture centred in its own shape, frame numbers, pick / reject marks, a
-//! "needs a look" check, filters, box selection, hover actions, negatives on
-//! demand and a quick look. Also the strip of actions for the selection.
+//! picture centred in its own shape, frame numbers, pick / reject marks,
+//! filters, box selection, hover actions, negatives on demand and a quick look. Also the strip of actions for the selection.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -20,7 +19,9 @@ pub enum GridFilter {
     #[default]
     All,
     Picks,
-    NeedsLook,
+    /// Frames still to decide on.
+    Unflagged,
+    Rejected,
 }
 
 /// One laid-out cell, for keyboard navigation: frame, row and centre x.
@@ -75,16 +76,12 @@ const HEADER_H: f32 = 26.0;
 const PICTURE_PAD: f32 = 8.0;
 /// Room for the frame number, so the flags line up from tile to tile.
 const NUMBER_W: f32 = 24.0;
-/// The pick and reject icons in the header.
+/// The pick and reject icons in the header,
 const FLAG_SIZE: f32 = 18.0;
-/// Narrower tiles leave out the "Solo" chip: the header has no room for it.
-const SOLO_MIN_W: f32 = 140.0;
-/// Clipped share of the print that earns a "needs a look".
-const CLIP_WHITE: f32 = 0.03;
-const CLIP_BLACK: f32 = 0.06;
-/// Density (≈ 1 stop) away from the roll's median that earns one.
-const DENSITY_OUTLIER: f64 = 0.3;
-
+/// and their click targets, wide enough to keep the two opposite actions apart.
+const FLAG_TARGET: f32 = 24.0;
+/// Header text: the frame number and the name.
+const HEADER_TEXT: f32 = 11.0;
 impl NlpApp {
     /// Whether the grid should show negatives this frame.
     pub fn negatives_shown(&self, ctx: &egui::Context) -> bool {
@@ -94,108 +91,22 @@ impl NlpApp {
                 && ctx.input(|i| i.key_down(egui::Key::N) && !i.modifiers.any()))
     }
 
-    /// Median mean-green density of the converted frames (four or more).
-    pub(super) fn roll_density(&self) -> Option<f64> {
-        let mut d: Vec<f64> = self
-            .frames
-            .iter()
-            .filter_map(|f| f.sc.analysis.as_ref().map(|a| a.auto_wb.mean[1]))
-            .filter(|v| v.is_finite() && *v != 0.0)
-            .collect();
-        if d.len() < 4 {
-            return None;
-        }
-        d.sort_by(f64::total_cmp);
-        Some(d[d.len() / 2])
-    }
-
-    /// Why frame `i` deserves a closer look (empty when it looks fine).
-    pub(super) fn look_issues(&self, i: usize, roll_density: Option<f64>) -> Vec<String> {
-        self.look_warnings(i, roll_density)
-            .into_iter()
-            .map(|(_, text)| text)
-            .collect()
-    }
-
-    /// `look_issues` with a stable id for each (a share changes as the frame is
-    /// edited), leaving out those dismissed in the editor.
-    pub(super) fn look_warnings(
-        &self,
-        i: usize,
-        roll_density: Option<f64>,
-    ) -> Vec<(&'static str, String)> {
-        let f = &self.frames[i];
-        let mut out = Vec::new();
-        let Some(a) = f.sc.analysis.as_ref() else {
-            return out;
-        };
-        let s = &f.sc.settings;
-        let auto_wb = matches!(
-            s.wb_mode,
-            WbMode::AutoNeutral | WbMode::AutoWarm | WbMode::AutoCool | WbMode::AutoMix
-        );
-        if auto_wb && a.auto_wb.confidence < pipeline::LOW_CONFIDENCE {
-            out.push((
-                "weak_balance",
-                "Few neutral tones to balance on. Pick a grey (W) or use the roll.".to_string(),
-            ));
-        }
-        if let Some([white, black]) = f.clip {
-            if white > CLIP_WHITE {
-                out.push((
-                    "clip_white",
-                    format!("{:.0}% of the print clips to white", white * 100.0),
-                ));
-            }
-            if black > CLIP_BLACK {
-                out.push((
-                    "clip_black",
-                    format!("{:.0}% of the print blocks up to black", black * 100.0),
-                ));
-            }
-        }
-        if let Some(m) = roll_density {
-            let d = a.auto_wb.mean[1] - m;
-            if d > DENSITY_OUTLIER {
-                out.push((
-                    "dense",
-                    "Much denser negative than the rest of the roll".to_string(),
-                ));
-            } else if d < -DENSITY_OUTLIER {
-                out.push((
-                    "thin",
-                    "Much thinner negative than the rest of the roll".to_string(),
-                ));
-            }
-        }
-        out.retain(|(id, _)| !f.dismissed_warnings.contains(id));
-        out
-    }
-
     /// Frames the grid shows under the current filter, in roll order.
     pub fn shown_frames(&self) -> Vec<usize> {
-        let density = self.roll_density();
         (0..self.frames.len())
             .filter(|&i| match self.grid.filter {
                 GridFilter::All => true,
                 GridFilter::Picks => self.frames[i].sc.flag == Flag::Pick,
-                GridFilter::NeedsLook => !self.look_issues(i, density).is_empty(),
+                GridFilter::Unflagged => self.frames[i].sc.flag == Flag::None,
+                GridFilter::Rejected => self.frames[i].sc.flag == Flag::Reject,
             })
             .collect()
     }
 
-    /// (picks, needing a look) for the filter tabs.
-    pub fn filter_counts(&self) -> (usize, usize) {
-        let density = self.roll_density();
-        let picks = self
-            .frames
-            .iter()
-            .filter(|f| f.sc.flag == Flag::Pick)
-            .count();
-        let look = (0..self.frames.len())
-            .filter(|&i| !self.look_issues(i, density).is_empty())
-            .count();
-        (picks, look)
+    /// Picks, unflagged and rejected frames, for the filter tabs.
+    pub fn filter_counts(&self) -> (usize, usize, usize) {
+        let count = |flag| self.frames.iter().filter(|f| f.sc.flag == flag).count();
+        (count(Flag::Pick), count(Flag::None), count(Flag::Reject))
     }
 
     /// The frames Export and the contact sheet act on: the selection, or else
@@ -231,6 +142,9 @@ impl NlpApp {
                 _ => {}
             }
         }
+        if n == 0 {
+            return "Export".into();
+        }
         format!("Export {n}")
     }
 
@@ -242,6 +156,33 @@ impl NlpApp {
                 self.frames[i].sc.flag = flag;
                 self.frames[i].dirty_since = Some(self.time);
             }
+        }
+    }
+
+    /// Flag the selection from the keyboard. Where the filter then hides it,
+    /// move on to the next frame on show, so culling carries on without a click.
+    pub fn flag_selection(&mut self, flag: Flag) {
+        let idx = self.sel_vec();
+        let before = self.shown_frames();
+        self.set_flag(&idx, flag);
+        let after = self.shown_frames();
+        if idx.is_empty() || idx.iter().any(|i| after.contains(i)) {
+            return;
+        }
+        let last = idx
+            .iter()
+            .filter_map(|i| before.iter().position(|b| b == i))
+            .max();
+        let next = last.and_then(|k| {
+            let later = before[k + 1..].iter().find(|b| after.contains(b));
+            later.or(before[..k].iter().rev().find(|b| after.contains(b)))
+        });
+        self.selected.clear();
+        self.active = next.copied();
+        if let Some(&n) = next {
+            self.selected.insert(n);
+            self.anchor = Some(n);
+            self.grid.scroll_to = Some(n);
         }
     }
 
@@ -349,7 +290,6 @@ impl NlpApp {
             key(cmd, egui::Key::CloseBracket),
         ];
         let negatives = self.negatives_shown(&ctx);
-        let density = self.roll_density();
         let shown = self.shown_frames();
         // Frames the filter hides drop out of the selection, so actions
         // never reach frames you can't see.
@@ -358,8 +298,14 @@ impl NlpApp {
             ui.add_space((ui.available_height() * 0.35).max(24.0));
             ui.vertical_centered(|ui| {
                 let (title, hint) = match self.grid.filter {
-                    GridFilter::Picks => ("No picks yet", "Press P on a frame to pick it."),
-                    _ => ("Nothing needs a look", "Every converted frame looks fine."),
+                    GridFilter::Unflagged => (
+                        "Every frame is flagged",
+                        "Picks and rejects have their own tabs.",
+                    ),
+                    GridFilter::Rejected => {
+                        ("No rejected frames", "Press X on a frame to reject it.")
+                    }
+                    _ => ("No picks yet", "Press P on a frame to pick it."),
                 };
                 ui.label(RichText::new(title).font(theme::medium(16.0)));
                 ui.label(RichText::new(hint).color(theme::MUTED));
@@ -389,6 +335,12 @@ impl NlpApp {
         let mut cells: Vec<Cell> = Vec::new();
         let mut visible: Vec<usize> = Vec::new();
         let mut marquee_hits: Vec<(usize, Rect)> = Vec::new();
+        // A quiet scrollbar, and a row cut off by the bar below fades out
+        // rather than ending in what reads as empty tiles.
+        let scroll = &mut ui.spacing_mut().scroll;
+        scroll.foreground_color = false;
+        scroll.fade.strength = 1.0;
+        scroll.fade.size = 36.0;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -453,17 +405,7 @@ impl NlpApp {
                         }
                         visible.push(i);
                         let resp = ui.interact(cell, ui.id().with(("cell", i)), Sense::click());
-                        self.paint_cell(
-                            ui,
-                            i,
-                            img,
-                            cell,
-                            &resp,
-                            negatives,
-                            density,
-                            roll_frames,
-                            now,
-                        );
+                        self.paint_cell(ui, i, img, cell, &resp, negatives, roll_frames, now);
                         // Pick and reject in the header while hovered.
                         if (resp.hovered() || ui.rect_contains_pointer(cell))
                             && let Some(a) = hover_buttons(ui, i, cell, self.frames[i].sc.flag)
@@ -635,14 +577,15 @@ impl NlpApp {
         cell: Rect,
         resp: &egui::Response,
         negatives: bool,
-        density: Option<f64>,
         roll_frames: usize,
         now: f64,
     ) {
         let f = &self.frames[i];
         let sel = self.selected.contains(&i);
         let p = ui.painter();
-        let rejected = f.sc.flag == Flag::Reject;
+        // Rejected frames are dimmed among the others, not where they are
+        // being reviewed.
+        let dimmed = f.sc.flag == Flag::Reject && self.grid.filter != GridFilter::Rejected;
         let active = sel && self.active == Some(i);
         // Each frame is a tile holding its number, flags and picture. The ground
         // is the editor canvas's neutral grey, so a frame is judged on the same
@@ -671,7 +614,7 @@ impl NlpApp {
         match (tex, &f.proxy) {
             (Some(t), _) => {
                 let mut image = egui::Image::new((t.id(), t.size_vec2()));
-                if rejected {
+                if dimmed {
                     image = image.tint(Color32::from_gray(80));
                 }
                 image.paint_at(ui, img);
@@ -742,25 +685,10 @@ impl NlpApp {
                 egui::Stroke::new(1.0, theme::MUTED),
             );
             x -= 12.0;
-        } else if !f.is_roll() && roll_frames > 0 && cell.width() >= SOLO_MIN_W {
+        } else if !f.is_roll() && roll_frames > 0 {
             // Most of a roll is balanced together: only the exception is marked.
-            let g = p.layout_no_wrap(
-                "Solo".into(),
-                egui::FontId::proportional(10.0),
-                theme::MUTED,
-            );
-            let chip = Rect::from_min_max(
-                pos2(x - g.size().x - 10.0, row_y - 8.0),
-                pos2(x, row_y + 8.0),
-            );
-            p.rect_stroke(
-                chip,
-                8.0,
-                egui::Stroke::new(1.0, Color32::from_white_alpha(40)),
-                egui::StrokeKind::Inside,
-            );
-            p.galley(chip.center() - g.size() / 2.0, g, theme::MUTED);
-            x = chip.left() - 6.0;
+            p.circle_filled(pos2(x - 3.0, row_y), 3.0, theme::MUTED);
+            x -= 12.0;
         }
         let markers = Rect::from_min_max(pos2(x, row_y - 8.0), pos2(markers_right, row_y + 8.0));
         if markers.width() > 6.0 {
@@ -774,7 +702,7 @@ impl NlpApp {
             if f.is_roll() {
                 tip.push("balanced with the roll");
             } else if f.sc.is_converted() && roll_frames > 0 {
-                tip.push("on its own, not balanced with the roll");
+                tip.push("left out of the roll's balance");
             }
             if f.exporting {
                 tip.push("exporting");
@@ -782,20 +710,15 @@ impl NlpApp {
             ui.interact(markers, ui.id().with(("markers", i)), Sense::hover())
                 .on_hover_text(tip.join(" · "));
         }
-        // "Needs a look" next to the status markers.
-        let issues = self.look_issues(i, density);
-        if !issues.is_empty() {
-            let r = Rect::from_center_size(pos2(x - 8.0, row_y), vec2(16.0, 16.0));
-            widgets::paint_icon(p, r, Icon::Warn, theme::WARN);
-            ui.interact(r, ui.id().with(("issues", i)), Sense::hover())
-                .on_hover_text(format!("Needs a look\n• {}", issues.join("\n• ")));
-            x = r.left() - 4.0;
-        }
-        let dim = if rejected { 0.6 } else { 1.0 };
-        let number = if sel { theme::TEXT } else { theme::MUTED };
+        let dim = if dimmed { 0.6 } else { 1.0 };
+        let number = if sel || hovered {
+            theme::TEXT
+        } else {
+            theme::MUTED
+        };
         let num = p.layout_no_wrap(
             format!("{:02}", i + 1),
-            theme::medium(11.5),
+            theme::medium(HEADER_TEXT),
             number.gamma_multiply(dim),
         );
         let nx = cell.left() + 8.0;
@@ -805,7 +728,7 @@ impl NlpApp {
         if hovered && name_w > 24.0 {
             let mut job = egui::text::LayoutJob::simple_singleline(
                 f.name.clone(),
-                egui::FontId::proportional(10.5),
+                egui::FontId::proportional(HEADER_TEXT),
                 theme::TEXT,
             );
             job.wrap = egui::text::TextWrapping::truncate_at_width(name_w);
@@ -851,7 +774,6 @@ impl NlpApp {
             _ => f.thumb.clone(),
         };
         let area = ui.max_rect();
-        let issues = self.look_issues(i, self.roll_density());
         let flag = f.sc.flag;
         let title = format!("{:02}  {}", i + 1, f.name);
         let resp = egui::Area::new(egui::Id::new("quick_look"))
@@ -883,21 +805,13 @@ impl NlpApp {
                     theme::medium(13.0),
                     theme::TEXT,
                 );
-                let hint = if issues.is_empty() {
-                    "← → move · P pick · X reject · U unflag · Enter edit · Space close".to_string()
-                } else {
-                    format!("Needs a look: {}", issues.join(" · "))
-                };
+                let hint = "← → move · P pick · X reject · U unflag · Enter edit · Space close";
                 p.text(
                     pos2(r.center().x, r.bottom() - 20.0),
                     egui::Align2::CENTER_CENTER,
                     hint,
                     egui::FontId::proportional(11.5),
-                    if issues.is_empty() {
-                        theme::MUTED
-                    } else {
-                        theme::WARN
-                    },
+                    theme::MUTED,
                 );
                 resp
             })
@@ -972,6 +886,16 @@ impl NlpApp {
         {
             self.selected.clear();
         }
+        divider(ui);
+        ui.label(
+            RichText::new(format!(
+                "Space to preview · {} {} to rotate",
+                key(cmd, egui::Key::OpenBracket),
+                key(cmd, egui::Key::CloseBracket),
+            ))
+            .small()
+            .color(theme::MUTED),
+        );
     }
 
     /// Render the negative thumbnails the grid needs (a few per frame).
@@ -1002,27 +926,7 @@ impl NlpApp {
     }
 }
 
-/// Share of pixels clipped to white and to black in a rendered thumbnail.
-pub fn clip_share(px: &[[f32; 3]]) -> [f32; 2] {
-    if px.is_empty() {
-        return [0.0, 0.0];
-    }
-    let (mut w, mut b) = (0usize, 0usize);
-    for p in px {
-        let lo = p[0].min(p[1]).min(p[2]);
-        let hi = p[0].max(p[1]).max(p[2]);
-        if lo >= 0.995 {
-            w += 1;
-        }
-        if hi <= 0.005 {
-            b += 1;
-        }
-    }
-    let n = px.len() as f32;
-    [w as f32 / n, b as f32 / n]
-}
-
-/// Pick / rotate buttons in a hovered cell's footer; the one clicked.
+/// Pick and reject buttons in a hovered cell's header; the one clicked.
 fn hover_buttons(ui: &egui::Ui, i: usize, cell: Rect, flag: Flag) -> Option<CellAction> {
     let mut out = None;
     let (picked, rejected) = (flag == Flag::Pick, flag == Flag::Reject);
@@ -1045,7 +949,7 @@ fn hover_buttons(ui: &egui::Ui, i: usize, cell: Rect, flag: Flag) -> Option<Cell
             .on_hover_text(tip);
         let p = ui.painter();
         if resp.hovered() {
-            p.rect_filled(r.expand(1.0), 3.0, Color32::from_white_alpha(24));
+            p.rect_filled(r, 3.0, Color32::from_white_alpha(24));
         }
         let idle = if resp.hovered() {
             theme::TEXT
@@ -1069,15 +973,16 @@ fn hover_buttons(ui: &egui::Ui, i: usize, cell: Rect, flag: Flag) -> Option<Cell
 fn flag_slot(cell: Rect, k: usize) -> Rect {
     Rect::from_min_size(
         pos2(
-            cell.left() + 8.0 + NUMBER_W + (FLAG_SIZE + 2.0) * k as f32,
-            cell.top() + (HEADER_H - FLAG_SIZE) / 2.0,
+            cell.left() + 8.0 + NUMBER_W + FLAG_TARGET * k as f32,
+            cell.top() + (HEADER_H - FLAG_TARGET) / 2.0,
         ),
-        vec2(FLAG_SIZE, FLAG_SIZE),
+        vec2(FLAG_TARGET, FLAG_TARGET),
     )
 }
 
 /// The pick pennant or the reject cross, in a flag slot.
-fn paint_flag_icon(p: &egui::Painter, r: Rect, flag: Flag, color: Color32, filled: bool) {
+fn paint_flag_icon(p: &egui::Painter, slot: Rect, flag: Flag, color: Color32, filled: bool) {
+    let r = Rect::from_center_size(slot.center(), vec2(FLAG_SIZE, FLAG_SIZE));
     if flag == Flag::Pick {
         paint_flag(p, r.shrink(FLAG_SIZE * 0.25), color, filled);
     } else {

@@ -151,12 +151,15 @@ fn convert_roll(files: &[PathBuf]) -> Vec<(PathBuf, Settings, Analysis, SourceIm
         });
     // Frames whose edge isn't found, or is far from the rest, take the
     // geometry the others share.
-    let shared: Vec<frame::Detected> = loaded.iter().filter_map(|l| l.3).collect();
-    let shared = frame::roll_geometry(&shared);
+    let shapes = frame::roll_shapes(
+        loaded
+            .iter()
+            .filter_map(|l| l.3.map(|d| (frame::is_landscape(&l.1, &l.2), d))),
+    );
     let loaded: Vec<(PathBuf, SourceImage, Settings)> = loaded
         .into_iter()
         .map(|(f, src, mut s, found)| {
-            if let Some(d) = frame::settle(found, shared) {
+            if let Some(d) = frame::settle(found, shapes.of(frame::is_landscape(&src, &s))) {
                 (s.crop, s.straighten) = (d.crop, d.straighten);
             }
             (f, src, s)

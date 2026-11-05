@@ -428,22 +428,21 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
         .par_iter()
         .map(|(_, src, s)| wants_auto_crop(s).then(|| auto_crop(src, s)))
         .collect();
-    let shared: Vec<Detected> = ok
-        .iter()
-        .zip(&found)
-        .filter_map(|((_, _, s), f)| match f {
+    let shapes = frame::roll_shapes(ok.iter().zip(&found).filter_map(|((_, src, s), f)| {
+        let d = match f {
             Some(d) => *d,
             None => s.auto_crop.then_some(Detected {
                 crop: s.crop,
                 straighten: s.straighten,
             }),
-        })
-        .collect();
-    let shared = frame::roll_geometry(&shared);
+        };
+        d.map(|d| (frame::is_landscape(src, s), d))
+    }));
     let detected: Vec<Option<Detected>> = ok
         .iter_mut()
         .zip(found)
-        .map(|((_, _, s), f)| {
+        .map(|((_, src, s), f)| {
+            let shared = shapes.of(frame::is_landscape(src, s));
             if let Some(d) = f.and_then(|f| frame::settle(f, shared)) {
                 (s.crop, s.straighten) = (d.crop, d.straighten);
             }

@@ -786,7 +786,11 @@ impl NlpApp {
         let f = &self.frames[i];
         let mut settings = f.sc.settings.clone();
         settings.crop_aspect = CropAspect::Free;
-        match crate::engine::frame::detect(&src, &settings, f.base_for(&src)) {
+        let found = crate::engine::frame::detect(&src, &settings, f.base_for(&src));
+        let shared = self
+            .stored_roll_shapes()
+            .of(crate::engine::frame::is_landscape(&src, &settings));
+        match crate::engine::frame::settle(found, shared) {
             Some(d) => {
                 if let Some(c) = &mut self.editor.crop {
                     (c.insets, c.angle) = (d.crop, d.straighten);
@@ -1124,7 +1128,6 @@ impl NlpApp {
         let mut open = None;
         let scroll_id = ui.id().with("filmstrip_scrolled_to");
         let scrolled_to: Option<usize> = ui.data(|d| d.get_temp(scroll_id));
-        let density = self.roll_density();
         egui::ScrollArea::horizontal()
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -1195,19 +1198,6 @@ impl NlpApp {
                                 widgets::paint_icon(p, mark, widgets::Icon::Reject, theme::ERR)
                             }
                             Flag::None => {}
-                        }
-                        let issues = self.look_issues(j, density);
-                        if !issues.is_empty() {
-                            let mark = Rect::from_min_size(
-                                pos2(rect.right() - 6.0 - 12.0, mark.top()),
-                                vec2(12.0, 12.0),
-                            );
-                            widgets::paint_icon(
-                                ui.painter(),
-                                mark,
-                                widgets::Icon::Warn,
-                                theme::WARN,
-                            );
                         }
                         if j == i {
                             ui.painter().rect_stroke(
@@ -1624,21 +1614,6 @@ impl NlpApp {
         ui.add_space(2.0);
     }
 
-    /// Under the histogram: why the frame needs a look, each with a close button.
-    /// A dismissed warning, and the frame's badge once none are left, stay away
-    /// until the folder is reopened.
-    fn frame_warnings(&mut self, ui: &mut egui::Ui, i: usize) {
-        let warnings = self.look_warnings(i, self.roll_density());
-        if !warnings.is_empty() {
-            ui.add_space(4.0);
-        }
-        for (id, text) in warnings {
-            if widgets::dismissable_status_line(ui, Icon::Warn, theme::WARN, &text) {
-                self.frames[i].dismissed_warnings.push(id);
-            }
-        }
-    }
-
     fn sidebar(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
         // Crop & straighten gets the sidebar to itself, like Lightroom.
         if self.editor.crop.is_some() {
@@ -1659,7 +1634,6 @@ impl NlpApp {
             })
             .show(ui, |ui| {
                 self.histogram_panel(ui, i, s);
-                self.frame_warnings(ui, i);
             });
         ui.add_space(8.0);
         widgets::reset_section_gap(ui);

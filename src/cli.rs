@@ -147,10 +147,15 @@ fn convert(args: Vec<String>) -> Result<()> {
     }
     // Frames whose edge isn't found, or is far from the rest, take the
     // geometry the others share.
-    let shared = frame::roll_geometry(&found.iter().flatten().copied().collect::<Vec<_>>());
+    let shapes = frame::roll_shapes(
+        frames
+            .iter()
+            .zip(&found)
+            .filter_map(|((_, src, _, fs), d)| d.map(|d| (frame::is_landscape(src, fs), d))),
+    );
     if s.auto_crop {
-        for ((f, _, _, fs), d) in frames.iter_mut().zip(found) {
-            match frame::settle(d, shared) {
+        for ((f, src, _, fs), d) in frames.iter_mut().zip(found) {
+            match frame::settle(d, shapes.of(frame::is_landscape(src, fs))) {
                 Some(d) => (fs.crop, fs.straighten) = (d.crop, d.straighten),
                 None => eprintln!("warning: no frame edge found in {}", f.display()),
             }
