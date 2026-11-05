@@ -509,9 +509,12 @@ pub enum Icon {
     Undo,
     Redo,
     /// Crop bar: portrait / landscape swap, mirror, and the level line.
-    Swap,
     Flip,
     Level,
+    /// The crop tool: two overlapping corner brackets.
+    Crop,
+    /// A stand-in glyph for tools that are not built yet.
+    Placeholder,
 }
 
 fn arc(c: egui::Pos2, r: f32, a0: f32, a1: f32, n: usize) -> Vec<egui::Pos2> {
@@ -587,22 +590,67 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 Stroke::NONE,
             ));
         }
-        Icon::Reset | Icon::Undo | Icon::Redo => {
+        Icon::Reset => {
             // Undo mirrors the reset arrow to point left; redo keeps it pointing right.
-            let flip = if icon == Icon::Undo { -1.0 } else { 1.0 };
+            let flip = 1.0;
             let at = |x: egui::Pos2| pos2(c.x + flip * (x.x - c.x), x.y);
-            let r = 5.0 * s;
-            let (a0, a1) = (-2.4f32, 2.2f32);
+            // A clockwise arc with an open top, ending in an arrowhead along its tangent.
+            let r = 5.5 * s;
+            let (a0, a1) = (-0.5f32, 4.0f32);
             p.add(Shape::line(
-                arc(c, r, a0, a1, 18).into_iter().map(at).collect(),
+                arc(c, r, a0, a1, 24).into_iter().map(at).collect(),
                 st,
             ));
-            let tip = at(c + r * vec2(a0.cos(), a0.sin()));
-            let h = 3.0 * s;
+            let end = c + r * vec2(a1.cos(), a1.sin());
+            let t = vec2(-a1.sin(), a1.cos());
+            let h = 3.6 * s;
+            let rot = |v: egui::Vec2, a: f32| {
+                vec2(v.x * a.cos() - v.y * a.sin(), v.x * a.sin() + v.y * a.cos())
+            };
             p.add(Shape::line(
-                vec![tip + vec2(0.0, -h), tip, tip + vec2(flip * h, 0.0)],
+                vec![
+                    at(end - rot(t, 0.7) * h),
+                    at(end),
+                    at(end - rot(t, -0.7) * h),
+                ],
                 st,
             ));
+        }
+        Icon::Undo | Icon::Redo => {
+            // A solid curved arrow: undo points left, redo is its mirror image.
+            let flip = if icon == Icon::Redo { -1.0 } else { 1.0 };
+            let q = |x: f32, y: f32| pos2(c.x + flip * x * s, c.y + y * s);
+            p.add(Shape::convex_polygon(
+                vec![q(-7.8, -1.6), q(-0.7, -7.0), q(-0.7, 4.0)],
+                color,
+                Stroke::NONE,
+            ));
+            let bez = |a: (f32, f32), k: (f32, f32), b: (f32, f32), t: f32| {
+                let u = 1.0 - t;
+                (
+                    u * u * a.0 + 2.0 * u * t * k.0 + t * t * b.0,
+                    u * u * a.1 + 2.0 * u * t * k.1 + t * t * b.1,
+                )
+            };
+            let n = 10;
+            let outer: Vec<(f32, f32)> = (0..=n)
+                .map(|i| bez((-1.0, -4.2), (5.4, -4.4), (7.9, 7.2), i as f32 / n as f32))
+                .collect();
+            let inner: Vec<(f32, f32)> = (0..=n)
+                .map(|i| bez((-1.0, 1.6), (4.6, 1.4), (7.9, 7.2), i as f32 / n as f32))
+                .collect();
+            for i in 0..n {
+                p.add(Shape::convex_polygon(
+                    vec![
+                        q(outer[i].0, outer[i].1),
+                        q(outer[i + 1].0, outer[i + 1].1),
+                        q(inner[i + 1].0, inner[i + 1].1),
+                        q(inner[i].0, inner[i].1),
+                    ],
+                    color,
+                    Stroke::new(0.5, color),
+                ));
+            }
         }
         Icon::Flag => {
             p.add(line(vec![q(-5.0, -8.0), q(-5.0, 8.0)]));
@@ -650,21 +698,6 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             p.line_segment([q(-5.0, -5.0), q(5.0, 5.0)], st);
             p.line_segment([q(-5.0, 5.0), q(5.0, -5.0)], st);
         }
-        Icon::Swap => {
-            // A landscape frame and a portrait one, overlapping.
-            p.rect_stroke(
-                Rect::from_min_max(q(-8.0, -2.0), q(3.0, 5.0)),
-                1.0,
-                st,
-                egui::StrokeKind::Middle,
-            );
-            p.rect_stroke(
-                Rect::from_min_max(q(-1.0, -7.0), q(6.0, 4.0)),
-                1.0,
-                st,
-                egui::StrokeKind::Middle,
-            );
-        }
         Icon::Flip => {
             // Two halves of a frame about a dashed mirror line.
             for k in 0..4 {
@@ -685,6 +718,18 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             p.line_segment([q(-8.0, 5.0), q(8.0, 5.0)], st);
             p.line_segment([q(-8.0, 5.0), q(7.0, -4.0)], st);
             p.add(line(arc(q(-8.0, 5.0), 8.0 * s, -0.55, 0.0, 8)));
+        }
+        Icon::Crop => {
+            p.add(line(vec![q(-4.0, -9.0), q(-4.0, 4.0), q(9.0, 4.0)]));
+            p.add(line(vec![q(-9.0, -4.0), q(4.0, -4.0), q(4.0, 9.0)]));
+        }
+        Icon::Placeholder => {
+            p.rect_stroke(
+                Rect::from_center_size(c, vec2(14.0 * s, 14.0 * s)),
+                3.0,
+                st,
+                egui::StrokeKind::Middle,
+            );
         }
         Icon::Reject => {
             p.circle_stroke(c, 7.0 * s, st);
@@ -748,7 +793,7 @@ pub fn bar_button(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sized_icon_button(
+pub fn sized_icon_button(
     ui: &mut Ui,
     icon: Icon,
     tip: &str,
