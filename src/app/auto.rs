@@ -234,7 +234,8 @@ impl NlpApp {
                     self.export_done += 1;
                 }
                 Some(_) => self.auto.export_waiting.push((path, target, ex)),
-                None => {}
+                // The frame left with its roll: count the export out.
+                None => self.export_done += 1,
             }
         }
     }

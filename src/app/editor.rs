@@ -100,7 +100,7 @@ pub struct Editor {
     /// Counts the photos opened in this session: the sidebar's section ids
     /// include it, so each photo starts with its default sections.
     epoch: u32,
-    pick: Option<Pick>,
+    pub(super) pick: Option<Pick>,
     committed: Option<Settings>,
     hist: [[u32; 256]; 3],
     /// The histogram is not following the preview (angle drag in progress).
@@ -308,6 +308,19 @@ impl NlpApp {
             None => self.editor.committed = Some(cur.clone()),
             _ => {}
         }
+    }
+
+    /// Start or stop an eyedropper. The eyedropper, crop and heal each take
+    /// over the canvas, so one is on at a time: picking closes heal, and
+    /// waits for the crop to close.
+    pub(super) fn set_pick(&mut self, pick: Option<Pick>) {
+        if pick.is_some() {
+            if self.editor.crop.is_some() {
+                return;
+            }
+            self.editor.heal = None;
+        }
+        self.editor.pick = pick;
     }
 
     fn leave_editor(&mut self) {
@@ -1113,11 +1126,11 @@ impl NlpApp {
             }
         }
         if w {
-            self.editor.pick = if self.editor.pick == Some(Pick::WhiteBalance) {
+            self.set_pick(if self.editor.pick == Some(Pick::WhiteBalance) {
                 None
             } else {
                 Some(Pick::WhiteBalance)
-            };
+            });
         }
         if esc {
             if self.editor.pick.is_some() {
@@ -1779,11 +1792,11 @@ impl NlpApp {
         }
         ui.separator();
         if ui.button("Pick white balance").clicked() {
-            self.editor.pick = Some(Pick::WhiteBalance);
+            self.set_pick(Some(Pick::WhiteBalance));
             ui.close();
         }
         if ui.button("Pick film base").clicked() {
-            self.editor.pick = Some(Pick::FilmBase);
+            self.set_pick(Some(Pick::FilmBase));
             ui.close();
         }
         ui.separator();

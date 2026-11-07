@@ -474,8 +474,9 @@ impl NlpApp {
             ui.spacing_mut().item_spacing.x = 0.0;
             widgets::combo_row(ui, caption, v, all, name, PICKER_W);
             let picking = self.editor.pick == Some(pick);
+            let enabled = enabled && self.editor.crop.is_none();
             if icon_button(ui, Icon::Eyedropper, tip, picking, enabled).clicked() {
-                self.editor.pick = if picking { None } else { Some(pick) };
+                self.set_pick(if picking { None } else { Some(pick) });
             }
         });
     }

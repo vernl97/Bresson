@@ -67,8 +67,9 @@ pub enum JobResult {
         frames: Vec<egui::ColorImage>,
     },
     Message(String),
-    /// From the scanner worker (`scanner.rs`).
-    Scan(super::scanner::ScanEvent),
+    /// From the scanner worker (`scanner.rs`) with that worker's id: events
+    /// of a worker the panel has let go are dropped.
+    Scan(u64, super::scanner::ScanEvent),
 }
 
 pub struct Jobs {

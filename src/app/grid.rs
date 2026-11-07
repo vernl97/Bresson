@@ -49,6 +49,18 @@ pub struct GridState {
     scroll_to: Option<usize>,
 }
 
+impl GridState {
+    /// Another roll opened: what pointed at the old frames goes, and the
+    /// filter returns to All (the new roll may have no picks or rejects).
+    /// Showing negatives is a view choice and stays.
+    pub fn reset_for_roll(&mut self) {
+        *self = Self {
+            negatives: self.negatives,
+            ..Default::default()
+        };
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CellAction {
     Open,

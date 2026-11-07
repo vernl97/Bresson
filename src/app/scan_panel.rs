@@ -55,6 +55,13 @@ pub struct ScanState {
     pub saved: usize,
 }
 
+impl ScanState {
+    /// The worker the panel is talking to; events from any other are stale.
+    pub fn worker_id(&self) -> Option<u64> {
+        self.worker.as_ref().map(|w| w.id)
+    }
+}
+
 fn order(a: [f32; 2], b: [f32; 2]) -> [f32; 4] {
     [
         a[0].min(b[0]),

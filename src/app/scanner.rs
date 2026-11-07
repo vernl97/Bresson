@@ -110,6 +110,11 @@ pub struct ScanJob {
     pub paths: Vec<PathBuf>,
 }
 
+/// Each command answers with one event that ends it, so the panel can tell
+/// when the worker is idle: Refresh → `Devices`; Open and SetSource →
+/// `Opened` or `Failed`; Prescan → `Prescan`, `Cancelled` or `Failed`; Scan → a
+/// `Saved` per area, or `Cancelled` / `Failed` part way; Close → `Closed` when
+/// a scanner was open. `Status` and `Progress` may come in between.
 pub enum ScanCmd {
     /// List OpticFilm and SANE scanners.
     Refresh,
@@ -147,6 +152,8 @@ pub enum ScanEvent {
 pub struct ScanWorker {
     tx: Sender<ScanCmd>,
     pub cancel: Arc<AtomicBool>,
+    /// Tags this worker's events (`JobResult::Scan`), unique in the process.
+    pub id: u64,
 }
 
 impl ScanWorker {
@@ -154,11 +161,14 @@ impl ScanWorker {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let c = cancel.clone();
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         std::thread::Builder::new()
             .name("scanner".into())
             .spawn(move || {
                 Worker {
                     events,
+                    id,
                     ctx,
                     cancel: c,
                     defaults,
@@ -168,7 +178,7 @@ impl ScanWorker {
                 .run(rx)
             })
             .expect("spawn scanner thread");
-        Self { tx, cancel }
+        Self { tx, cancel, id }
     }
 
     pub fn send(&self, cmd: ScanCmd) {
@@ -403,6 +413,7 @@ enum Open {
 
 struct Worker {
     events: Sender<JobResult>,
+    id: u64,
     ctx: egui::Context,
     cancel: Arc<AtomicBool>,
     defaults: Settings,
@@ -413,7 +424,7 @@ struct Worker {
 
 impl Worker {
     fn send(&self, ev: ScanEvent) {
-        let _ = self.events.send(JobResult::Scan(ev));
+        let _ = self.events.send(JobResult::Scan(self.id, ev));
         self.ctx.request_repaint();
     }
 
@@ -439,12 +450,21 @@ impl Worker {
     }
 
     fn close(&mut self) {
-        if let Some((_, open)) = self.open.take() {
-            if let Open::Film { mut scanner, .. } = open {
-                scanner.close();
-            }
+        if self.release() {
             self.send(ScanEvent::Closed);
         }
+    }
+
+    /// Close the open scanner, if any, without telling the panel; returns
+    /// whether one was open.
+    fn release(&mut self) -> bool {
+        let Some((_, open)) = self.open.take() else {
+            return false;
+        };
+        if let Open::Film { mut scanner, .. } = open {
+            scanner.close();
+        }
+        true
     }
 
     /// libsane, loaded on first use.
@@ -498,7 +518,8 @@ impl Worker {
     }
 
     fn open(&mut self, choice: ScannerChoice) {
-        self.close();
+        // Quietly: a `Closed` now would mark the panel idle while this open runs.
+        self.release();
         self.status("Opening the scanner…");
         let r = match &choice {
             ScannerChoice::Device(_) | ScannerChoice::Simulated(_) => {
@@ -609,7 +630,9 @@ impl Worker {
 
     fn set_source(&mut self, source: &str) {
         let Some((info, Open::Sane { device, .. })) = self.open.as_mut() else {
-            return;
+            return self.send(ScanEvent::Failed(
+                "This scanner has no sources to choose from".into(),
+            ));
         };
         if let Err(e) = device.prepare_film(Some(source)) {
             return self.send(ScanEvent::Failed(describe_sane(&e)));
@@ -626,12 +649,12 @@ impl Worker {
     /// A control that reports progress (scaled into `part` of the job) and status.
     fn control(&self, part: (f64, f64)) -> ScanControl {
         let (tx, ctx) = (self.events.clone(), self.ctx.clone());
-        let (tx2, ctx2) = (self.events.clone(), self.ctx.clone());
+        let (tx2, ctx2, id) = (self.events.clone(), self.ctx.clone(), self.id);
         ScanControl {
             cancel: Some(self.cancel.clone()),
-            progress: Some(Box::new(progress_sender(tx, ctx, part))),
+            progress: Some(Box::new(progress_sender(tx, ctx, id, part))),
             on_status: Some(Box::new(move |s| {
-                let _ = tx2.send(JobResult::Scan(ScanEvent::Status(s.to_string())));
+                let _ = tx2.send(JobResult::Scan(id, ScanEvent::Status(s.to_string())));
                 ctx2.request_repaint();
             })),
         }
@@ -641,14 +664,15 @@ impl Worker {
         let defaults = self.defaults.clone();
         let ctl = self.control((0.0, 1.0));
         let Some((_, open)) = self.open.as_mut() else {
-            return;
+            return self.send(ScanEvent::Failed("No scanner open".into()));
         };
         let r: Result<SourceImage, Outcome> = match open {
             Open::Film { scanner, model } => {
                 let dpi = prescan_dpi(model);
-                let _ = self.events.send(JobResult::Scan(ScanEvent::Status(format!(
-                    "Prescan at {dpi} dpi…"
-                ))));
+                let _ = self.events.send(JobResult::Scan(
+                    self.id,
+                    ScanEvent::Status(format!("Prescan at {dpi} dpi…")),
+                ));
                 let req = ScanRequest {
                     resolution: dpi,
                     area: Some([0.0, 0.0, 1.0, 1.0]),
@@ -662,11 +686,12 @@ impl Worker {
             }
             Open::Sane { device, .. } => {
                 let dpi = sane_prescan_dpi(&device.resolutions());
-                let _ = self.events.send(JobResult::Scan(ScanEvent::Status(format!(
-                    "Prescan at {dpi} dpi…"
-                ))));
+                let _ = self.events.send(JobResult::Scan(
+                    self.id,
+                    ScanEvent::Status(format!("Prescan at {dpi} dpi…")),
+                ));
                 let mut progress =
-                    progress_sender(self.events.clone(), self.ctx.clone(), (0.0, 1.0));
+                    progress_sender(self.events.clone(), self.ctx.clone(), self.id, (0.0, 1.0));
                 device
                     .set_window(dpi, [0.0, 0.0, 1.0, 1.0])
                     .and_then(|()| device.scan(&self.cancel, &mut progress))
@@ -682,6 +707,9 @@ impl Worker {
 
     fn scan(&mut self, job: &ScanJob) {
         let n = job.areas.len().min(job.paths.len());
+        if n == 0 {
+            return self.send(ScanEvent::Failed("Nothing framed to scan".into()));
+        }
         for k in 0..n {
             if self.cancel.load(Ordering::SeqCst) {
                 return self.send(ScanEvent::Cancelled);
@@ -760,7 +788,8 @@ impl Worker {
                     dpi: job.dpi.max(1) as u32,
                     area: area.map(f64::from),
                 };
-                let mut progress = progress_sender(self.events.clone(), self.ctx.clone(), part);
+                let mut progress =
+                    progress_sender(self.events.clone(), self.ctx.clone(), self.id, part);
                 let img = device
                     .scan_film(&scan, &self.cancel, &mut progress)
                     .map_err(Outcome::from_sane)?;
@@ -854,6 +883,7 @@ fn sane_info(
 fn progress_sender(
     tx: Sender<JobResult>,
     ctx: egui::Context,
+    id: u64,
     part: (f64, f64),
 ) -> impl FnMut(f64) + Send + 'static {
     let last = Arc::new(Mutex::new(-1.0f64));
@@ -862,7 +892,7 @@ fn progress_sender(
         let mut l = last.lock().unwrap();
         if p >= 1.0 || v - *l >= 0.005 {
             *l = v;
-            let _ = tx.send(JobResult::Scan(ScanEvent::Progress(v)));
+            let _ = tx.send(JobResult::Scan(id, ScanEvent::Progress(v)));
             ctx.request_repaint();
         }
     }
@@ -913,8 +943,8 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(60))
                 .expect("scanner event")
             {
-                JobResult::Scan(ScanEvent::Status(_) | ScanEvent::Progress(_)) => {}
-                JobResult::Scan(ev) => return ev,
+                JobResult::Scan(_, ScanEvent::Status(_) | ScanEvent::Progress(_)) => {}
+                JobResult::Scan(_, ev) => return ev,
                 _ => {}
             }
         }
@@ -994,6 +1024,37 @@ mod tests {
         assert!(matches!(next(&rx), ScanEvent::Cancelled));
         assert!(!paths[0].exists() && !paths[0].with_extension("dng.part").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every command ends in an event, so the panel never stays busy; a
+    /// second open replaces the scanner without a `Closed` in between; events
+    /// carry the worker's id.
+    #[test]
+    fn worker_answers_every_command() {
+        let (tx, rx) = channel();
+        let worker = ScanWorker::spawn(tx, egui::Context::default(), Settings::default());
+        worker.send(ScanCmd::Prescan);
+        assert!(matches!(next(&rx), ScanEvent::Failed(_)));
+        worker.send(ScanCmd::Scan(job(Vec::new(), Vec::new())));
+        assert!(matches!(next(&rx), ScanEvent::Failed(_)));
+        worker.send(ScanCmd::Open(ScannerChoice::SimulatedFlatbed));
+        assert!(matches!(next(&rx), ScanEvent::Opened(_)));
+        worker.send(ScanCmd::Open(ScannerChoice::Simulated(
+            "plustek-opticfilm-8200i-se".into(),
+        )));
+        assert!(matches!(next(&rx), ScanEvent::Opened(_)));
+        // A film scanner has no sources to switch.
+        worker.send(ScanCmd::SetSource("Transparency Unit".into()));
+        assert!(matches!(next(&rx), ScanEvent::Failed(_)));
+        let id = worker.id;
+        drop(worker);
+        let mut ids = Vec::new();
+        while let Ok(r) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            if let JobResult::Scan(i, _) = r {
+                ids.push(i);
+            }
+        }
+        assert!(!ids.is_empty() && ids.iter().all(|&i| i == id));
     }
 
     /// Three boxes on the simulated flatbed's transparency unit: three DNGs,

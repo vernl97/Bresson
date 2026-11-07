@@ -380,6 +380,26 @@ impl NlpApp {
 
     fn load_frames(&mut self, files: Vec<PathBuf>, dir: &Path) {
         self.save_all();
+        // The scanner writes into the open roll: release it when another opens.
+        if self.folder.as_deref() != Some(dir) {
+            self.close_scan_panel();
+        }
+        // Exports still waiting for their conversion go with the old frames;
+        // count them out so the progress bar ends.
+        let dropped = self.auto.export_waiting.len();
+        if dropped > 0 {
+            self.export_done += dropped;
+            self.toast(
+                format!("Cancelled {dropped} export(s) waiting for their conversion"),
+                true,
+            );
+        }
+        // Dialogs and grid state that point at the old frames by index.
+        self.convert_dialog = None;
+        self.exposure_prompt = None;
+        self.export_targets = None;
+        self.roll.dialog = None;
+        self.grid.reset_for_roll();
         // The frames below read their sidecars back from disk.
         sidecar::flush();
         jobs::set_network_folder(dir);
@@ -1095,6 +1115,10 @@ impl NlpApp {
         while let Ok(r) = self.jobs.rx.try_recv() {
             match r {
                 JobResult::ExposureVariance { items, spread } => {
+                    // From a roll that has since closed.
+                    if items.iter().all(|it| self.index_of(&it.path).is_none()) {
+                        continue;
+                    }
                     self.auto.convert_done += items.len();
                     if let Some(items) = self.auto_exposure_variance(items, spread) {
                         self.exposure_prompt = Some((items, spread));
@@ -1162,6 +1186,11 @@ impl NlpApp {
                     roll,
                     errors,
                 } => {
+                    // A conversion of a roll that has since closed: its frames are
+                    // gone, and it is not part of this roll's progress.
+                    if !frames.is_empty() && frames.iter().all(|f| self.index_of(&f.0).is_none()) {
+                        continue;
+                    }
                     for e in &errors {
                         self.toast(e.clone(), true);
                     }
@@ -1246,9 +1275,12 @@ impl NlpApp {
                     Err(e) => self.toast(format!("Contact sheet failed: {e}"), true),
                 },
                 JobResult::Message(m) => self.toast(m, true),
-                JobResult::Scan(ev) => {
-                    let ctx = self.jobs.ctx().clone();
-                    self.on_scan_event(&ctx, ev);
+                JobResult::Scan(id, ev) => {
+                    // A worker the panel let go of may still have events queued.
+                    if self.scan.worker_id() == Some(id) {
+                        let ctx = self.jobs.ctx().clone();
+                        self.on_scan_event(&ctx, ev);
+                    }
                 }
             }
         }
@@ -2367,6 +2399,19 @@ mod ui_tests {
         h.key_press(egui::Key::Q);
         h.run_steps(2);
         assert!(h.state().editor.crop.is_none() && h.state().editor.heal.is_some());
+        // The eyedropper closes heal, and waits for the crop to close.
+        h.key_press(egui::Key::W);
+        h.run_steps(2);
+        assert!(h.state().editor.heal.is_none());
+        assert!(h.state().editor.pick == Some(editor::Pick::WhiteBalance));
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert!(h.state().editor.pick.is_none());
+        h.key_press(egui::Key::C);
+        h.run_steps(2);
+        h.key_press(egui::Key::W);
+        h.run_steps(2);
+        assert!(h.state().editor.crop.is_some() && h.state().editor.pick.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
