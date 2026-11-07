@@ -374,6 +374,11 @@ pub fn read_thumb(image: &Path) -> Option<SourceImage> {
     read_cache(&thumb_cache_path(image)?)
 }
 
+/// The cached proxy, if any, without ever decoding the image.
+pub fn read_cached_proxy(image: &Path) -> Option<SourceImage> {
+    read_cache_hit(&sidecar::proxy_cache_path(image)?)
+}
+
 /// Load the proxy and its thumbnail source, caching the thumbnail if it
 /// was not yet.
 pub fn load_proxy_and_thumb(path: &Path) -> anyhow::Result<(SourceImage, SourceImage)> {

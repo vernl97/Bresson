@@ -83,10 +83,18 @@ impl Default for RollCover {
     }
 }
 
-/// Frames in a roll's strip on the Projects screen.
-const COVER_FRAMES: usize = 4;
-const ROW_H: f32 = 64.0;
-const TILE_H: f32 = 44.0;
+/// Frames on a roll's card: one large, two small.
+const COVER_FRAMES: usize = 3;
+/// Widest the Rolls grid gets.
+const LIST_MAX_W: f32 = 1600.0;
+/// Narrowest a card gets before the grid drops a column.
+const CARD_MIN_W: f32 = 300.0;
+const CARD_GAP: f32 = 14.0;
+const CARD_PAD: f32 = 10.0;
+const MOSAIC_GAP: f32 = 3.0;
+const TEXT_GAP: f32 = 10.0;
+const NAME_H: f32 = 20.0;
+const META_H: f32 = 18.0;
 
 pub struct RollDialog {
     pub dir: PathBuf,
@@ -493,9 +501,12 @@ impl NlpApp {
                     None => (Flag::None, false),
                 })
                 .collect();
-            let frames = pick_cover(&candidates, COVER_FRAMES)
+            let mut picked = pick_cover(&candidates, COVER_FRAMES);
+            pick_leads(&mut picked, &candidates);
+            let frames = picked
                 .into_iter()
-                .filter_map(|i| render_cover_frame(&scans[i], sidecars[i].as_ref()?))
+                .enumerate()
+                .filter_map(|(k, i)| render_cover_frame(&scans[i], sidecars[i].as_ref()?, k == 0))
                 .collect();
             JobResult::RollCover { dir, frames }
         });
@@ -511,7 +522,7 @@ impl NlpApp {
                     .inner_margin(egui::Margin::symmetric(24, 20)),
             )
             .show(ui, |ui| {
-                let w = ui.available_width().min(760.0);
+                let w = ui.available_width().min(LIST_MAX_W);
                 ui.vertical_centered(|ui| {
                     ui.set_max_width(w);
                     ui.horizontal(|ui| {
@@ -539,22 +550,34 @@ impl NlpApp {
                     });
                     ui.add_space(14.0);
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        for dir in self.defaults.projects.clone() {
-                            let (row, visible) = project_row(ui, &dir, self.roll.covers.get(&dir));
-                            if visible && !self.roll.covers.contains_key(&dir) {
-                                self.request_cover(&dir);
+                        let (cols, card) = grid_layout(ui.available_width());
+                        let dirs = self.defaults.projects.clone();
+                        for row in dirs.chunks(cols) {
+                            let (_, rect) = ui.allocate_space(vec2(ui.available_width(), card.y));
+                            for (i, dir) in row.iter().enumerate() {
+                                let x = i as f32 * (card.x + CARD_GAP);
+                                let r = egui::Rect::from_min_size(rect.min + vec2(x, 0.0), card);
+                                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
+                                let (a, visible) =
+                                    roll_card(&mut child, r, dir, self.roll.covers.get(dir));
+                                if visible && !self.roll.covers.contains_key(dir) {
+                                    self.request_cover(dir);
+                                }
+                                if let Some(a) = a {
+                                    action = Some((dir.clone(), a));
+                                }
                             }
-                            if let Some(a) = row {
-                                action = Some((dir.clone(), a));
-                            }
-                            ui.add_space(6.0);
+                            ui.add_space(CARD_GAP);
                         }
-                        ui.add_space(10.0);
-                        ui.label(
-                            RichText::new("Drop a roll folder or scans anywhere to open them")
-                                .small()
-                                .color(theme::FAINT),
-                        );
+                        // Open's tooltip and the drop overlay teach this once there are rolls.
+                        if dirs.is_empty() {
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("Drop a roll folder or scans anywhere to open them")
+                                    .small()
+                                    .color(theme::FAINT),
+                            );
+                        }
                     });
                 });
             });
@@ -623,10 +646,21 @@ fn pick_cover(frames: &[(Flag, bool)], n: usize) -> Vec<usize> {
     out
 }
 
-/// A frame as the grid renders it, from its cached thumbnail source. A strip
-/// is never worth decoding a RAW for, so a frame without one is left out.
-fn render_cover_frame(image: &Path, sc: &Sidecar) -> Option<egui::ColorImage> {
-    let src = jobs::read_thumb(image)?;
+/// Put the roll's first pick in the card's large spot.
+fn pick_leads(picked: &mut [usize], frames: &[(Flag, bool)]) {
+    if let Some(p) = picked.iter().position(|&i| frames[i].0 == Flag::Pick) {
+        picked[..=p].rotate_right(1);
+    }
+}
+
+/// A frame as the grid renders it, from its cached thumbnail source, or for
+/// the `large` spot from its cached proxy when there is one. A card is never
+/// worth decoding a RAW for, so a frame with neither is left out.
+fn render_cover_frame(image: &Path, sc: &Sidecar, large: bool) -> Option<egui::ColorImage> {
+    let src = large
+        .then(|| jobs::read_cached_proxy(image))
+        .flatten()
+        .or_else(|| jobs::read_thumb(image))?;
     let analysis = sc.analysis.as_ref()?;
     let neg = pipeline::prepare_negative(&src, &sc.settings, analysis.base);
     let levels = pipeline::levels_for(&sc.settings, Some(analysis), sc.roll.as_ref());
@@ -638,12 +672,55 @@ fn render_cover_frame(image: &Path, sc: &Sidecar) -> Option<egui::ColorImage> {
     ))
 }
 
-/// The centred square of a `[w, h]` image, so landscape and portrait frames
-/// sit in a strip at one size.
-fn square_uv([w, h]: [usize; 2]) -> egui::Rect {
-    let (w, h) = (w.max(1) as f32, h.max(1) as f32);
-    let side = w.min(h);
-    egui::Rect::from_center_size(egui::pos2(0.5, 0.5), vec2(side / w, side / h))
+/// How many columns fit in `width`, and the size of a card that fills its column.
+fn grid_layout(width: f32) -> (usize, egui::Vec2) {
+    let cols = (((width + CARD_GAP) / (CARD_MIN_W + CARD_GAP)).floor() as usize).max(1);
+    let w = (width - CARD_GAP * (cols - 1) as f32) / cols as f32;
+    let inner = w - CARD_PAD * 2.0;
+    // Three frames make squares: the large one the mosaic's height, two small beside it.
+    let picture = (inner - MOSAIC_GAP / 2.0) / 1.5;
+    let h = CARD_PAD * 2.0 + picture + TEXT_GAP + NAME_H + META_H;
+    (cols, vec2(w, h))
+}
+
+/// Where `n` frames sit in a card's picture.
+fn mosaic(rect: egui::Rect, n: usize) -> Vec<egui::Rect> {
+    let rect_at = |x: f32, y: f32, w: f32, h: f32| {
+        egui::Rect::from_min_size(rect.min + vec2(x, y), vec2(w, h))
+    };
+    let (w, h) = (rect.width(), rect.height());
+    match n {
+        0 => Vec::new(),
+        1 => vec![rect],
+        2 => {
+            let half = (w - MOSAIC_GAP) / 2.0;
+            vec![
+                rect_at(0.0, 0.0, half, h),
+                rect_at(half + MOSAIC_GAP, 0.0, half, h),
+            ]
+        }
+        _ => {
+            let small = (h - MOSAIC_GAP) / 2.0;
+            let x = w - small;
+            vec![
+                rect_at(0.0, 0.0, x - MOSAIC_GAP, h),
+                rect_at(x, 0.0, small, small),
+                rect_at(x, small + MOSAIC_GAP, small, small),
+            ]
+        }
+    }
+}
+
+/// The centred part of a `[w, h]` image with the shape of `target`.
+fn cover_uv([w, h]: [usize; 2], target: egui::Vec2) -> egui::Rect {
+    let image = w.max(1) as f32 / h.max(1) as f32;
+    let shape = target.x / target.y.max(1.0);
+    let size = if image > shape {
+        vec2(shape / image, 1.0)
+    } else {
+        vec2(1.0, image / shape)
+    };
+    egui::Rect::from_center_size(egui::pos2(0.5, 0.5), size)
 }
 
 fn roll_name(dir: &Path, info: Option<&RollInfo>) -> String {
@@ -711,18 +788,39 @@ fn truncated(
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
-/// One roll: the whole row opens it. Returns the action and whether the row
-/// is on screen.
-fn project_row(
+/// A card's picture: the roll's frames, or what stands in for them.
+fn paint_picture(ui: &egui::Ui, rect: egui::Rect, cover: Option<&RollCover>) {
+    let frames: &[egui::TextureHandle] = cover.map_or(&[], |c| &c.frames);
+    if frames.is_empty() {
+        let count = cover.filter(|c| c.loaded).map_or(COVER_FRAMES, |c| c.count);
+        for r in mosaic(rect, count.clamp(1, COVER_FRAMES)) {
+            ui.painter().rect_filled(r, 2.0, theme::BG);
+        }
+        return;
+    }
+    for (t, r) in frames.iter().zip(mosaic(rect, frames.len())) {
+        ui.painter().image(
+            t.id(),
+            r,
+            cover_uv(t.size(), r.size()),
+            egui::Color32::WHITE,
+        );
+    }
+}
+
+/// One roll: the whole card opens it. Returns the action and whether the card
+/// is on screen. It lays itself out in `rect` and allocates nothing, so the
+/// hover-only button can't move its neighbours.
+fn roll_card(
     ui: &mut egui::Ui,
+    rect: egui::Rect,
     dir: &Path,
     cover: Option<&RollCover>,
 ) -> (Option<RowAction>, bool) {
-    let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
     if !ui.is_rect_visible(rect) {
         return (None, false);
     }
+    let resp = ui.interact(rect, ui.id().with(("roll_card", dir)), Sense::click());
     let mut action = None;
     let exists = cover.is_none_or(|c| c.exists);
     let info = cover.and_then(|c| c.info.as_ref());
@@ -739,86 +837,54 @@ fn project_row(
         egui::Stroke::new(1.0, theme::LINE),
         egui::StrokeKind::Inside,
     );
-    let inner = rect.shrink2(vec2(14.0, 10.0));
-
-    // Right edge: the remove icon on hover, then the strip or Locate.
-    let mut right = inner.right();
-    let close = egui::Rect::from_min_size(
-        egui::pos2(right - 26.0, inner.center().y - 13.0),
-        vec2(26.0, 26.0),
+    let inner = rect.shrink(CARD_PAD);
+    let picture = egui::Rect::from_min_max(
+        inner.min,
+        egui::pos2(inner.right(), inner.bottom() - TEXT_GAP - NAME_H - META_H),
     );
-    right = close.left() - 8.0;
-    let mut left_limit = right;
-    if exists {
-        let count = cover.map_or(0, |c| c.count);
-        let frames: &[egui::TextureHandle] = cover.map_or(&[], |c| &c.frames);
-        let placeholders = if frames.is_empty() {
-            count.min(COVER_FRAMES)
+    let small = egui::FontId::proportional(12.0);
+    paint_picture(ui, picture, cover);
+
+    // In the picture's place: why there are no frames.
+    let empty = cover.is_some_and(|c| c.loaded && c.exists && c.count == 0);
+    if !exists || empty {
+        let (text, color) = if exists {
+            ("No frames yet", theme::MUTED)
         } else {
-            0
+            ("Folder not found", theme::WARN)
         };
-        let more = count.saturating_sub(frames.len() + placeholders);
-        let y = inner.center().y - TILE_H / 2.0;
-        // A fixed column, so strips line up from row to row.
-        right -= 32.0;
-        if more > 0 {
-            let g = ui.painter().layout_no_wrap(
-                format!("+{more}"),
-                egui::FontId::proportional(11.5),
-                theme::FAINT,
-            );
-            ui.painter().galley(
-                egui::pos2(right, inner.center().y - g.size().y / 2.0),
-                g,
-                theme::FAINT,
-            );
-        }
-        right -= 8.0;
-        let tile = |ui: &egui::Ui, right: &mut f32, tex: Option<&egui::TextureHandle>| {
-            *right -= TILE_H;
-            let r = egui::Rect::from_min_size(egui::pos2(*right, y), vec2(TILE_H, TILE_H));
-            match tex {
-                Some(t) => {
-                    ui.painter()
-                        .image(t.id(), r, square_uv(t.size()), egui::Color32::WHITE);
-                }
-                None => {
-                    ui.painter().rect_filled(r, 2.0, theme::SURFACE);
-                }
+        let centre = picture.center() - vec2(0.0, if exists { 0.0 } else { 16.0 });
+        ui.painter().text(
+            centre,
+            egui::Align2::CENTER_CENTER,
+            text,
+            small.clone(),
+            color,
+        );
+        if !exists {
+            let r =
+                egui::Rect::from_center_size(picture.center() + vec2(0.0, 14.0), vec2(90.0, 30.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+            ));
+            if child
+                .add(widgets::ghost("Locate…"))
+                .on_hover_text("Find the folder this roll moved to")
+                .clicked()
+            {
+                action = Some(RowAction::Locate);
             }
-            *right -= 3.0;
-        };
-        for t in frames.iter().rev() {
-            tile(ui, &mut right, Some(t));
         }
-        for _ in 0..placeholders {
-            tile(ui, &mut right, None);
-        }
-        left_limit = right - 8.0;
-    } else {
-        let r = egui::Rect::from_min_max(
-            egui::pos2(right - 90.0, inner.top()),
-            egui::pos2(right, inner.bottom()),
-        );
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(r)
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
-            |ui| {
-                if ui
-                    .add(widgets::ghost("Locate…"))
-                    .on_hover_text("Find the folder this roll moved to")
-                    .clicked()
-                {
-                    action = Some(RowAction::Locate);
-                }
-            },
-        );
-        left_limit -= 98.0;
     }
 
-    // Left: name, then the metadata line.
-    let text_w = left_limit - inner.left();
+    // Under the picture: the name and details, with the remove icon on hover.
+    let name_y = picture.bottom() + TEXT_GAP;
+    let meta_y = name_y + NAME_H;
+    let close = egui::Rect::from_center_size(
+        egui::pos2(inner.right() - 13.0, (name_y + inner.bottom()) / 2.0),
+        vec2(26.0, 26.0),
+    );
+    let text_w = close.left() - 8.0 - inner.left();
     let title = truncated(
         ui,
         roll_name(dir, info),
@@ -826,39 +892,30 @@ fn project_row(
         if exists { theme::TEXT } else { theme::FAINT },
         text_w,
     );
-    let meta_y = inner.center().y + 2.0;
-    ui.painter().galley(
-        egui::pos2(inner.left(), meta_y - title.size().y - 1.0),
-        title,
-        theme::TEXT,
-    );
-    let small = egui::FontId::proportional(12.0);
+    ui.painter()
+        .galley(egui::pos2(inner.left(), name_y), title, theme::TEXT);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     if !exists {
-        let g = truncated(
-            ui,
-            format!("Folder not found · {}", widgets::short_path(&path)),
-            small,
-            theme::WARN,
-            text_w,
-        );
+        let g = truncated(ui, widgets::short_path(&path), small, theme::FAINT, text_w);
         ui.painter()
-            .galley(egui::pos2(inner.left(), meta_y), g, theme::WARN);
+            .galley(egui::pos2(inner.left(), meta_y), g, theme::FAINT);
     } else if let Some(c) = cover.filter(|c| c.loaded) {
         let no_stock = info.is_none_or(|i| i.metadata.film_stock.is_empty());
         let link = no_stock.then(|| {
             ui.painter()
                 .layout_no_wrap("Add film details".into(), small.clone(), theme::ACCENT)
         });
-        let link_w = link.as_ref().map_or(0.0, |l| l.size().x + 16.0);
+        let link_w = link.as_ref().map_or(0.0, |l| l.size().x + 12.0);
         let g = truncated(ui, row_meta(c, now), small, theme::MUTED, text_w - link_w);
         let end = inner.left() + g.size().x;
         ui.painter()
             .galley(egui::pos2(inner.left(), meta_y), g, theme::MUTED);
-        if let Some(l) = link {
-            let r = egui::Rect::from_min_size(egui::pos2(end + 16.0, meta_y), l.size());
+        // Only while the card is hovered, like the grid's flag buttons: it
+        // shouldn't compete with the pictures on every card.
+        if let Some(l) = link.filter(|_| hovered) {
+            let r = egui::Rect::from_min_size(egui::pos2(end + 12.0, meta_y), l.size());
             let id = ui.id().with(("film_details", dir));
             let lr = ui.interact(r, id, Sense::click());
             ui.painter().galley(r.min, l, theme::ACCENT);
@@ -877,19 +934,18 @@ fn project_row(
     }
 
     if hovered {
-        ui.scope_builder(egui::UiBuilder::new().max_rect(close), |ui| {
-            if widgets::icon_button(
-                ui,
-                Icon::Close,
-                "Remove from this list (no files are deleted)",
-                false,
-                true,
-            )
-            .clicked()
-            {
-                action = Some(RowAction::Remove);
-            }
-        });
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(close));
+        if widgets::icon_button(
+            &mut child,
+            Icon::Close,
+            "Remove from this list (no files are deleted)",
+            false,
+            true,
+        )
+        .clicked()
+        {
+            action = Some(RowAction::Remove);
+        }
     }
     if resp.hovered() && exists {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -951,7 +1007,7 @@ mod tests {
             ..Default::default()
         };
         let mut h = Harness::builder()
-            .with_size(vec2(800.0, 200.0))
+            .with_size(vec2(800.0, 480.0))
             .build_ui_state(
                 move |ui, st: &mut State| {
                     // The app's fonts take effect on the next pass.
@@ -961,11 +1017,10 @@ mod tests {
                         return;
                     }
                     let min = ui.next_widget_position();
-                    let (a, _) = project_row(ui, Path::new("/rolls/one"), Some(&cover));
-                    st.rect = Some(egui::Rect::from_min_size(
-                        min,
-                        vec2(ui.available_width(), ROW_H),
-                    ));
+                    let r = egui::Rect::from_min_size(min, grid_layout(360.0).1);
+                    let mut card = ui.new_child(egui::UiBuilder::new().max_rect(r));
+                    let (a, _) = roll_card(&mut card, r, Path::new("/rolls/one"), Some(&cover));
+                    st.rect = Some(r);
                     if let Some(a) = a {
                         st.action = Some(match a {
                             RowAction::Open => "open",
@@ -994,25 +1049,73 @@ mod tests {
             }
             h.state().action
         };
-        // The right edge holds the remove icon, the middle of the row is empty.
-        let remove = egui::pos2(rect.right() - 14.0 - 13.0, rect.center().y);
+        // The text under the picture ends in the remove icon; the picture opens.
+        let meta_y = rect.bottom() - CARD_PAD - META_H / 2.0;
+        let remove = egui::pos2(rect.right() - CARD_PAD - 13.0, meta_y - NAME_H / 2.0);
         assert_eq!(click(remove), Some("remove"));
         assert_eq!(click(rect.center()), Some("open"));
-        // No film stock, so the metadata line ends in the link.
-        let details = egui::pos2(rect.left() + 14.0 + 100.0, rect.center().y + 9.0);
+        // No film stock, so the details end in the link while hovered.
+        let details = egui::pos2(rect.left() + CARD_PAD + 110.0, meta_y);
         assert_eq!(click(details), Some("details"));
     }
 
     #[test]
-    fn strip_tiles_crop_to_the_centred_square() {
-        let landscape = square_uv([300, 200]);
+    fn grid_fills_the_width_with_columns_that_fit() {
+        for (width, cols) in [
+            (200.0, 1),
+            (640.0, 2),
+            (1152.0, 3),
+            (1382.0, 4),
+            (1600.0, 5),
+        ] {
+            let (n, card) = grid_layout(width);
+            assert_eq!(n, cols, "{width}");
+            let used = card.x * n as f32 + CARD_GAP * (n - 1) as f32;
+            assert!((used - width).abs() < 1e-3, "{width}");
+        }
+    }
+
+    #[test]
+    fn three_frames_make_squares() {
+        let (_, card) = grid_layout(1000.0);
+        let w = card.x - CARD_PAD * 2.0;
+        let h = card.y - CARD_PAD * 2.0 - TEXT_GAP - NAME_H - META_H;
+        let rect = egui::Rect::from_min_size(egui::pos2(5.0, 7.0), vec2(w, h));
+        let tiles = mosaic(rect, 3);
+        for t in &tiles {
+            assert!((t.width() - t.height()).abs() < 1e-3, "{t:?}");
+        }
+        assert!((tiles[0].height() - h).abs() < 1e-3);
+        assert!((tiles[1].right() - rect.right()).abs() < 1e-3);
+        assert!((tiles[2].bottom() - rect.bottom()).abs() < 1e-3);
+        assert_eq!(mosaic(rect, 1), vec![rect]);
+        assert_eq!(mosaic(rect, 2).len(), 2);
+        assert!(mosaic(rect, 0).is_empty());
+    }
+
+    #[test]
+    fn cover_crops_to_the_centred_shape() {
+        let square = vec2(100.0, 100.0);
+        let landscape = cover_uv([300, 200], square);
         assert!((landscape.width() - 2.0 / 3.0).abs() < 1e-6);
         assert_eq!(landscape.height(), 1.0);
         assert_eq!(landscape.center(), egui::pos2(0.5, 0.5));
-        let portrait = square_uv([200, 300]);
+        let portrait = cover_uv([200, 300], square);
         assert_eq!(portrait.width(), 1.0);
         assert!((portrait.height() - 2.0 / 3.0).abs() < 1e-6);
-        assert_eq!(square_uv([100, 100]).size(), vec2(1.0, 1.0));
+        assert_eq!(cover_uv([100, 100], square).size(), vec2(1.0, 1.0));
+    }
+
+    #[test]
+    fn first_pick_takes_the_large_spot() {
+        let n = (Flag::None, true);
+        let p = (Flag::Pick, true);
+        let mut picked = vec![0, 2, 3];
+        pick_leads(&mut picked, &[n, n, p, p]);
+        assert_eq!(picked, vec![2, 0, 3]);
+        let mut none = vec![0, 1];
+        pick_leads(&mut none, &[n, n]);
+        assert_eq!(none, vec![0, 1]);
     }
 
     #[test]
