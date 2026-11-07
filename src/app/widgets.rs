@@ -831,6 +831,7 @@ pub fn sized_icon_button(
     if hot {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
     resp.on_hover_text(tip)
 }
 

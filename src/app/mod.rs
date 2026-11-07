@@ -1917,6 +1917,35 @@ mod ui_tests {
         assert_eq!(before, after, "leaving crop mode resized the sidebar");
     }
 
+    /// The bar under the canvas turns the frame, as one undo step, and so do the keys.
+    #[test]
+    #[ignore]
+    fn view_bar_rotates_the_frame() {
+        use egui_kittest::kittest::Queryable;
+        let dir = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
+        let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1480.0, 940.0))
+            .build_eframe(|cc| NlpApp::new(cc, Some(dir.clone())));
+        settle(&mut h, 60.0);
+        h.state_mut().open_editor(0);
+        settle(&mut h, 60.0);
+        let rotation = |h: &Harness<'_, NlpApp>| h.state().frames[0].sc.settings.rotation;
+        let start = rotation(&h);
+        h.get_by_label_contains("Rotate right").click();
+        settle(&mut h, 5.0);
+        assert_eq!(rotation(&h), (start + 1) % 4, "the button turns the frame");
+        if let Some(out) = &out {
+            shot(&mut h, out, "bar_rotated");
+        }
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        settle(&mut h, 5.0);
+        assert_eq!(rotation(&h), start, "one undo step");
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::OpenBracket);
+        settle(&mut h, 5.0);
+        assert_eq!(rotation(&h), (start + 3) % 4, "the shortcut turns it too");
+    }
+
     #[test]
     #[ignore]
     fn view_bar_moves_between_frames() {

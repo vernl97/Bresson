@@ -813,6 +813,18 @@ impl NlpApp {
                     self.set_flag(&[i], if on { Flag::None } else { f });
                 }
             }
+            divider(ui);
+            // Quarter turns, applied at once. Inside Crop & straighten they are pending.
+            let cmd = egui::Modifiers::COMMAND;
+            let key = |k| widgets::shortcut(ui.ctx(), cmd, k);
+            let left = format!("Rotate left ({})", key(egui::Key::OpenBracket));
+            let right = format!("Rotate right ({})", key(egui::Key::CloseBracket));
+            if ib(ui, Icon::RotateLeft, &left, false) {
+                self.rotate_frames(&[i], false);
+            }
+            if ib(ui, Icon::RotateRight, &right, false) {
+                self.rotate_frames(&[i], true);
+            }
             // Zoom presets in the same button style, right-aligned (laid out
             // right to left, so listed from the last).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
