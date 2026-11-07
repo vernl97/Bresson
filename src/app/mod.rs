@@ -2287,7 +2287,11 @@ mod ui_tests {
         h.key_press(egui::Key::Escape);
         h.run_steps(3);
         assert!(h.state().editor.crop.is_none(), "Esc leaves crop mode");
-        assert_eq!(h.state().frames[i].sc.settings.crop, start.crop, "Esc cancels");
+        assert_eq!(
+            h.state().frames[i].sc.settings.crop,
+            start.crop,
+            "Esc cancels"
+        );
 
         h.key_press(egui::Key::C);
         h.run_steps(3);
@@ -2482,6 +2486,117 @@ mod ui_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The dodge & burn brush: a drag paints a stroke that shows while it is painted
+    /// and lands on release as one undo step; Burn prints darker; the tool takes turns
+    /// with heal and crop. With `NLP_UI_OUT` set it saves screenshots.
+    #[test]
+    fn burn_tool_paints_strokes() {
+        let dir = std::env::temp_dir().join(format!("nlp_burn_ui_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.tif", "b.tif"] {
+            crate::cli::synth_negative(&dir.join(name), 0.0).unwrap();
+        }
+        let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
+        let builder = Harness::builder().with_size(egui::vec2(1480.0, 940.0));
+        let builder = if out.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let d = dir.clone();
+        let mut h = builder.build_eframe(move |cc| NlpApp::new(cc, Some(d.clone())));
+        settle(&mut h, 30.0);
+        h.state_mut().roll.dialog = None;
+        h.state_mut().open_editor(0);
+        settle(&mut h, 30.0);
+        let i = h.state().active.unwrap();
+        let strokes = |h: &Harness<'_, NlpApp>| h.state().frames[i].sc.settings.burn.clone();
+        let snap = |h: &mut Harness<'_, NlpApp>, name: &str| {
+            if let Some(out) = &out {
+                shot(h, out, name);
+            }
+        };
+        let paint = |h: &mut Harness<'_, NlpApp>, from: egui::Pos2, to: egui::Pos2| {
+            h.hover_at(from);
+            h.step();
+            h.drag_at(from);
+            h.step();
+            for k in 1..=6 {
+                h.hover_at(from + (to - from) * (k as f32 / 6.0));
+                h.step();
+            }
+        };
+
+        h.key_press(egui::Key::K);
+        h.run_steps(3);
+        assert!(h.state().editor.burn.is_some(), "K turns the brush on");
+        h.hover_at(egui::pos2(500.0, 400.0));
+        h.run_steps(3);
+        snap(&mut h, "burn_1_brush");
+
+        paint(&mut h, egui::pos2(400.0, 350.0), egui::pos2(650.0, 420.0));
+        h.run_steps(2);
+        assert!(strokes(&h).is_empty(), "the stroke lands on release");
+        let (hi, _) = h
+            .state()
+            .editor
+            .local_range()
+            .expect("the stroke shows while painted");
+        assert!(hi > 0.3, "it dodges: {hi}");
+        h.drop_at(egui::pos2(650.0, 420.0));
+        h.run_steps(3);
+        assert_eq!(strokes(&h).len(), 1);
+        assert!(strokes(&h)[0].points.len() > 3 && strokes(&h)[0].ev > 0.0);
+
+        if let Some(b) = h.state_mut().editor.burn.as_mut() {
+            b.mode = editor::BurnMode::Burn;
+            b.overlay = true;
+        }
+        paint(&mut h, egui::pos2(500.0, 600.0), egui::pos2(700.0, 600.0));
+        h.drop_at(egui::pos2(700.0, 600.0));
+        h.run_steps(3);
+        assert_eq!(strokes(&h).len(), 2);
+        assert!(strokes(&h)[1].ev < 0.0, "Burn prints longer");
+        let (_, lo) = h.state().editor.local_range().unwrap();
+        assert!(lo < -0.3, "it burns: {lo}");
+        settle(&mut h, 10.0);
+        snap(&mut h, "burn_2_overlay");
+        if let Some(b) = h.state_mut().editor.burn.as_mut() {
+            b.overlay = false;
+        }
+        h.run_steps(3);
+        snap(&mut h, "burn_3_strokes");
+
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(3);
+        assert_eq!(strokes(&h).len(), 1, "undo takes one stroke back");
+
+        // Pasting an edit leaves a frame's strokes alone.
+        let mut other = h.state().frames[1].sc.settings.clone();
+        other.copy_edit_from(&h.state().frames[i].sc.settings);
+        assert!(other.burn.is_empty());
+
+        // Heal, crop and the brush take turns; Esc leaves the brush, not the editor.
+        h.key_press(egui::Key::Q);
+        h.run_steps(2);
+        assert!(h.state().editor.heal.is_some() && h.state().editor.burn.is_none());
+        h.key_press(egui::Key::K);
+        h.run_steps(2);
+        assert!(h.state().editor.heal.is_none() && h.state().editor.burn.is_some());
+        h.key_press(egui::Key::C);
+        h.run_steps(2);
+        assert!(h.state().editor.crop.is_some() && h.state().editor.burn.is_none());
+        h.key_press(egui::Key::K);
+        h.run_steps(2);
+        assert!(h.state().editor.crop.is_none() && h.state().editor.burn.is_some());
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        assert!(h.state().editor.burn.is_none());
+        assert!(matches!(h.state().view, View::Editor));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Step until `done` holds and the Scan panel's worker is idle.
     fn wait_scan(h: &mut Harness<'_, NlpApp>, done: impl Fn(&NlpApp) -> bool) {
         let t0 = std::time::Instant::now();
@@ -2661,7 +2776,10 @@ mod ui_tests {
         wait_scan(&mut h, |a| {
             a.scan.info.as_ref().and_then(|i| i.source.as_deref()) == Some("Flatbed")
         });
-        assert_eq!(h.state().defaults.scan.source.get(&key).map(String::as_str), Some("Flatbed"));
+        assert_eq!(
+            h.state().defaults.scan.source.get(&key).map(String::as_str),
+            Some("Flatbed")
+        );
 
         h.state_mut().set_scan_source("Bogus".into());
         let t0 = std::time::Instant::now();
@@ -3132,7 +3250,10 @@ mod ui_tests {
         finish_convert(&mut app, vec![item]);
         let f = &app.frames[0];
         assert!(f.sc.is_converted());
-        assert_eq!((f.sc.settings.crop, f.sc.settings.straighten), ([5.0, 6.0, 7.0, 8.0], 1.5));
+        assert_eq!(
+            (f.sc.settings.crop, f.sc.settings.straighten),
+            ([5.0, 6.0, 7.0, 8.0], 1.5)
+        );
         assert_eq!(f.sc.settings.crop_aspect, CropAspect::TwoThree);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3164,7 +3285,9 @@ mod ui_tests {
         app.frames[0].exporting = true;
         app.export_total = 1;
         let ex = app.defaults.export.clone();
-        app.auto.export_waiting.push((app.frames[0].path.clone(), dir.join("out.jpg"), ex));
+        app.auto
+            .export_waiting
+            .push((app.frames[0].path.clone(), dir.join("out.jpg"), ex));
         app.unconvert(&[0]);
         finish_convert(&mut app, vec![item]);
         let f = &app.frames[0];
@@ -3201,7 +3324,10 @@ mod ui_tests {
         app.set_roll_source(crate::engine::settings::Source::LinearScan);
         assert!(app.auto.queue.is_empty(), "still in flight");
         finish_convert(&mut app, vec![item]);
-        assert!(!app.frames[0].sc.is_converted(), "old-source analysis dropped");
+        assert!(
+            !app.frames[0].sc.is_converted(),
+            "old-source analysis dropped"
+        );
         assert_eq!(app.auto.queue, vec![path]);
         let _ = std::fs::remove_dir_all(&dir);
     }

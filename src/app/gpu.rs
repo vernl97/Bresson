@@ -11,8 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use eframe::egui;
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor, wgpu};
 
-use crate::engine::curve::{LUT_DMAX, LUT_DMIN, LUT_SIZE};
-use crate::engine::dodge;
+use crate::engine::curve::{LUT_DMAX, LUT_DMIN, LUT_SIZE, PRINT_TONE_PER_STOP};
 use crate::engine::look::LOOK_GRID;
 use crate::engine::pipeline::{Negative, Renderer};
 
@@ -26,8 +25,7 @@ fn next_id() -> u64 {
 const GREY_KNOTS: usize = 11;
 const TABLE_LEN: usize = LUT_SIZE + LOOK_GRID[0] * LOOK_GRID[1] * LOOK_GRID[2] + GREY_KNOTS;
 
-/// A negative uploaded as an RGBA32F density texture: the channels'
-/// densities and, fourth, the low-pass density the dodge works from.
+/// A negative uploaded as an RGBA32F density texture (alpha unused).
 pub struct NegData {
     id: u64,
     width: u32,
@@ -36,24 +34,45 @@ pub struct NegData {
 }
 
 impl NegData {
-    /// `with_low` fills the dodge low-pass; a drag preview skips it.
-    pub fn new(neg: &Negative, with_low: bool) -> Arc<Self> {
-        let low = if with_low {
-            dodge::low_pass(neg)
-        } else {
-            vec![0.0; neg.data.len()]
-        };
+    pub fn new(neg: &Negative) -> Arc<Self> {
         Arc::new(Self {
             id: next_id(),
             width: neg.width as u32,
             height: neg.height as u32,
-            texels: neg
-                .data
-                .iter()
-                .zip(low)
-                .map(|(d, low)| [d[0], d[1], d[2], low])
-                .collect(),
+            texels: neg.data.iter().map(|d| [d[0], d[1], d[2], 0.0]).collect(),
         })
+    }
+}
+
+/// A negative's dodge & burn map (stops per pixel), uploaded as an R32F texture
+/// of the negative's size. Its own upload, so painting a stroke resends only it.
+pub struct LocalData {
+    id: u64,
+    width: u32,
+    height: u32,
+    texels: Vec<f32>,
+}
+
+impl LocalData {
+    /// `None` when the negative has no map.
+    pub fn new(neg: &Negative) -> Option<Arc<Self>> {
+        let m = neg.local.as_ref()?;
+        Some(Arc::new(Self {
+            id: next_id(),
+            width: neg.width as u32,
+            height: neg.height as u32,
+            texels: m.clone(),
+        }))
+    }
+
+    /// The empty map: a single texel, drawn with no effect.
+    fn none() -> Self {
+        Self {
+            id: 0,
+            width: 1,
+            height: 1,
+            texels: vec![0.0],
+        }
     }
 }
 
@@ -65,13 +84,14 @@ pub struct ViewData {
     look: [f32; 4],
     /// Output matrix rows, luminance weights in w.
     out: [[f32; 4]; 3],
-    /// Dodge key, light and dark compression, knee²; channel gains.
-    dodge: [f32; 4],
-    gain: [f32; 4],
+    /// Print tone per stop of dodge & burn (0 draws without it).
+    local_k: f32,
+    local: Option<Arc<LocalData>>,
 }
 
 impl ViewData {
-    pub fn new(r: &Renderer) -> Arc<Self> {
+    /// `local`: the negative's dodge & burn map, drawn when `r` converts.
+    pub fn new(r: &Renderer, local: Option<Arc<LocalData>>) -> Arc<Self> {
         let (lut, look, out) = r.gpu_parts();
         let mut tables: Vec<[f32; 4]> = (0..LUT_SIZE)
             .map(|i| {
@@ -102,20 +122,19 @@ impl ViewData {
             None => tables.resize(TABLE_LEN, [0.0; 4]),
         }
         debug_assert_eq!(tables.len(), TABLE_LEN);
-        let (dodge, gain) = match r.dodge() {
-            Some(d) => (
-                [d.key, d.light, d.dark, dodge::KNEE * dodge::KNEE],
-                [d.gain[0], d.gain[1], d.gain[2], 0.0],
-            ),
-            None => ([0.0; 4], [0.0; 4]),
+        let local = local.filter(|_| r.curve_lut().is_some());
+        let local_k = if local.is_some() {
+            PRINT_TONE_PER_STOP
+        } else {
+            0.0
         };
         Arc::new(Self {
             id: next_id(),
             tables,
             look: look_params,
             out,
-            dodge,
-            gain,
+            local_k,
+            local,
         })
     }
 }
@@ -129,15 +148,15 @@ struct Params {
     out2: [f32; 4],
     look: [f32; 4],
     lut: [f32; 4],
+    /// Negative width, height; print tone per stop of dodge & burn.
     size: [f32; 4],
-    dodge: [f32; 4],
-    gain: [f32; 4],
 }
 
 /// One drawable image (main view, or the "before" side of the split).
 struct Slot {
     view: u64,
     neg: u64,
+    local: u64,
     tables: wgpu::Buffer,
     params: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
@@ -149,6 +168,8 @@ pub struct GpuPreview {
     layout: wgpu::BindGroupLayout,
     linear_target: bool,
     neg: Option<(u64, wgpu::TextureView)>,
+    /// Dodge & burn maps by id (0: the empty one), kept while a slot uses them.
+    locals: HashMap<u64, wgpu::TextureView>,
     slots: HashMap<u8, Slot>,
 }
 
@@ -193,6 +214,14 @@ impl GpuPreview {
                         min_binding_size: None,
                     },
                 ),
+                entry(
+                    3,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -230,6 +259,7 @@ impl GpuPreview {
             layout,
             linear_target: linear_output,
             neg: None,
+            locals: HashMap::new(),
             slots: HashMap::new(),
         }
     }
@@ -245,41 +275,35 @@ impl GpuPreview {
         uv: [f32; 4],
     ) {
         if self.neg.as_ref().map(|n| n.0) != Some(neg.id) {
-            let size = wgpu::Extent3d {
-                width: neg.width,
-                height: neg.height,
-                depth_or_array_layers: 1,
-            };
-            let tex = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("preview negative"),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba32Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
+            let tex = upload(
+                device,
+                queue,
+                "preview negative",
+                wgpu::TextureFormat::Rgba32Float,
+                (neg.width, neg.height),
                 bytemuck::cast_slice(&neg.texels),
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(neg.width * 16),
-                    rows_per_image: Some(neg.height),
-                },
-                size,
+                16,
             );
-            self.neg = Some((neg.id, tex.create_view(&Default::default())));
+            self.neg = Some((neg.id, tex));
+        }
+        let none = LocalData::none();
+        let local = view.local.as_deref().unwrap_or(&none);
+        if !self.locals.contains_key(&local.id) {
+            let tex = upload(
+                device,
+                queue,
+                "preview dodge & burn",
+                wgpu::TextureFormat::R32Float,
+                (local.width, local.height),
+                bytemuck::cast_slice(&local.texels),
+                4,
+            );
+            self.locals.insert(local.id, tex);
         }
         let s = self.slots.entry(slot).or_insert_with(|| Slot {
             view: 0,
             neg: 0,
+            local: u64::MAX,
             tables: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("preview tables"),
                 size: (TABLE_LEN * 16) as u64,
@@ -310,13 +334,12 @@ impl GpuPreview {
                 LUT_SIZE as f32,
                 if self.linear_target { 1.0 } else { 0.0 },
             ],
-            size: [neg.width as f32, neg.height as f32, 0.0, 0.0],
-            dodge: view.dodge,
-            gain: view.gain,
+            size: [neg.width as f32, neg.height as f32, view.local_k, 0.0],
         };
         queue.write_buffer(&s.params, 0, bytemuck::bytes_of(&params));
-        if s.neg != neg.id || s.bind_group.is_none() {
+        if s.neg != neg.id || s.local != local.id || s.bind_group.is_none() {
             let tex = &self.neg.as_ref().unwrap().1;
+            let local_tex = &self.locals[&local.id];
             s.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("preview"),
                 layout: &self.layout,
@@ -333,10 +356,18 @@ impl GpuPreview {
                         binding: 2,
                         resource: s.tables.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(local_tex),
+                    },
                 ],
             }));
             s.neg = neg.id;
+            s.local = local.id;
         }
+        // Maps no slot draws any more.
+        let used: Vec<u64> = self.slots.values().map(|s| s.local).collect();
+        self.locals.retain(|id, _| *id == 0 || used.contains(id));
     }
 
     fn draw(&self, pass: &mut wgpu::RenderPass<'_>, slot: u8) {
@@ -347,6 +378,49 @@ impl GpuPreview {
         pass.set_bind_group(0, bg, &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+/// A texture of `size` filled with `data` (`texel` bytes each), as a view.
+fn upload(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    format: wgpu::TextureFormat,
+    (width, height): (u32, u32),
+    data: &[u8],
+    texel: u32,
+) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * texel),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+    tex.create_view(&Default::default())
 }
 
 /// Register the GPU preview with eframe's wgpu renderer; `false` when the
@@ -417,7 +491,7 @@ impl CallbackTrait for PreviewCallback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::settings::{Lut, OutputSpace, Settings};
+    use crate::engine::settings::{BurnStroke, Lut, OutputSpace, Settings};
 
     /// Draw `neg` with `r` offscreen at its own size; RGBA16F target, so the
     /// shader returns linear values, encoded here like the CPU does.
@@ -430,7 +504,7 @@ mod tests {
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
         let format = wgpu::TextureFormat::Rgba32Float;
         let mut gp = GpuPreview::new(&device, format, true);
-        let (neg_d, view) = (NegData::new(neg, true), ViewData::new(r));
+        let (neg_d, view) = (NegData::new(neg), ViewData::new(r, LocalData::new(neg)));
         gp.prepare(&device, &queue, 0, &neg_d, &view, [0.0, 0.0, 1.0, 1.0]);
         let (w, h) = (neg.width as u32, neg.height as u32);
         let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -518,17 +592,30 @@ mod tests {
     #[test]
     fn gpu_preview_matches_the_cpu_renderer() {
         let chart = crate::engine::testchart::negative(0.0);
-        for (lut, dodge) in [
-            (Lut::None, 0.0),
-            (Lut::Frontier, 0.0),
-            (Lut::Pakon, 0.0),
-            (Lut::Frontier, 80.0),
+        let strokes = vec![
+            BurnStroke {
+                points: vec![[0.2, 0.3], [0.7, 0.4]],
+                radius: 0.1,
+                ev: 0.8,
+                ..BurnStroke::default()
+            },
+            BurnStroke {
+                points: vec![[0.6, 0.7]],
+                radius: 0.15,
+                ev: -1.2,
+                ..BurnStroke::default()
+            },
+        ];
+        for (lut, burn) in [
+            (Lut::None, vec![]),
+            (Lut::Frontier, vec![]),
+            (Lut::Pakon, vec![]),
+            (Lut::Frontier, strokes),
         ] {
             let s = Settings {
                 lut,
                 post_saturation: 7,
-                hyper_tone_highlights: dodge,
-                hyper_tone_shadows: dodge,
+                burn,
                 ..Settings::default()
             };
             let base = crate::engine::pipeline::resolve_base(&chart.src, &s, None);

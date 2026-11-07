@@ -3,10 +3,10 @@
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::burn;
 use super::color;
 use super::curve::{self, ChannelLevels, CurveLut, Levels};
 use super::decode::{self, SourceImage};
-use super::dodge::{self, Dodge};
 use super::look::{self, Look};
 use super::presets;
 use super::settings::{AnalysisKey, FilmBase, ImageType, OutputSpace, RollMode, Settings, WbMode};
@@ -40,6 +40,36 @@ pub struct Negative {
     pub width: usize,
     pub height: usize,
     pub data: Vec<[f32; 3]>,
+    /// Dodge & burn: print time in stops per pixel ([`burn::exposure_map`]),
+    /// when the frame has strokes. The analysis never sees it.
+    pub local: Option<Vec<f32>>,
+}
+
+impl Negative {
+    pub fn new(width: usize, height: usize, data: Vec<[f32; 3]>) -> Self {
+        Self {
+            width,
+            height,
+            data,
+            local: None,
+        }
+    }
+
+    /// A copy no longer than `long` pixels, its dodge & burn map with it.
+    pub fn downscaled(&self, long: usize) -> Self {
+        let (data, w, h) = decode::downscale(&self.data, self.width, self.height, long);
+        let local = self.local.as_ref().map(|m| {
+            let packed: Vec<[f32; 3]> = m.iter().map(|&v| [v, 0.0, 0.0]).collect();
+            let (d, _, _) = decode::downscale(&packed, self.width, self.height, long);
+            d.into_iter().map(|p| p[0]).collect()
+        });
+        Self {
+            width: w,
+            height: h,
+            data,
+            local,
+        }
+    }
 }
 
 /// Auto white-balance candidates as (temp, tint) in CC.
@@ -275,7 +305,22 @@ pub fn detect_source(src: &SourceImage) -> super::settings::Source {
 pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Negative {
     let mut neg = prepare_density(src, s, base);
     denoise_chroma(&mut neg, src, s);
+    attach_local(&mut neg, src, s);
     neg
+}
+
+/// Give a negative prepared from `src` with `s`'s geometry its dodge & burn map.
+pub fn attach_local(neg: &mut Negative, src: &SourceImage, s: &Settings) {
+    let map = decode::GeometryMap::new(
+        src.width,
+        src.height,
+        s.rotation,
+        s.flip_h,
+        s.straighten,
+        s.crop,
+    );
+    neg.local = burn::exposure_map(&s.burn, &map, src.width, src.height)
+        .filter(|m| m.len() == neg.data.len());
 }
 
 /// The chroma noise reduction `prepare_negative` applies, for a negative
@@ -301,8 +346,8 @@ pub fn prepare_density(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Negat
         .and_then(super::flat::get)
         .map(|f| f.apply(&src.data, src.width, src.height));
     let flat = flat.as_deref().unwrap_or(&src.data);
-    let healed = (!s.heal.is_empty())
-        .then(|| super::heal::apply(flat, src.width, src.height, &s.heal));
+    let healed =
+        (!s.heal.is_empty()).then(|| super::heal::apply(flat, src.width, src.height, &s.heal));
     let (d, w, h) = decode::geometry(
         healed.as_deref().unwrap_or(flat),
         src.width,
@@ -356,11 +401,7 @@ pub fn prepare_density(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Negat
             }
         })
         .collect();
-    Negative {
-        width: w,
-        height: h,
-        data,
-    }
+    Negative::new(w, h, data)
 }
 
 // ---- analysis ------------------------------------------------------------------
@@ -379,11 +420,7 @@ pub fn analysis_buffer(neg: &Negative, s: &Settings) -> Negative {
     let ins = [b, b, b, b];
     let (d, w, h) = decode::crop(&d, w, h, ins);
     let d = look::gaussian_blur_3(&d, w, h, 2.0);
-    Negative {
-        width: w,
-        height: h,
-        data: d,
-    }
+    Negative::new(w, h, d)
 }
 
 /// Whether a density is not image: unexposed film (within 0.05 D of the
@@ -1313,7 +1350,8 @@ pub struct Renderer {
     out_luma: [f32; 3],
     out_enc: color::EncodeLut,
     sharpen: Option<presets::SharpenDef>,
-    dodge: Option<Dodge>,
+    /// Draws the negative's dodge & burn map.
+    local: bool,
 }
 
 impl Renderer {
@@ -1331,7 +1369,7 @@ impl Renderer {
             out_luma: color::output_luma(space),
             out_enc: color::EncodeLut::new(f),
             sharpen: presets::sharpening(s.sharpening),
-            dodge: levels.and_then(|l| Dodge::new(s, l)),
+            local: true,
         }
     }
 
@@ -1344,6 +1382,12 @@ impl Renderer {
             sd.amount *= sharpness / sd.lr_sharpness;
             sd.radius = (sd.radius * f).clamp(1.0, 3.0);
         }
+        self
+    }
+
+    /// Render without the negative's dodge & burn (the editor's Before).
+    pub fn without_local(mut self) -> Self {
+        self.local = false;
         self
     }
 
@@ -1365,11 +1409,6 @@ impl Renderer {
             self.converted.then_some(&self.look),
             [row(0), row(1), row(2)],
         )
-    }
-
-    /// The dodge applied before the curves (see [`dodge`]), if any.
-    pub fn dodge(&self) -> Option<&Dodge> {
-        self.dodge.as_ref()
     }
 
     /// Encoded MelissaRGB positive (before output conversion).
@@ -1399,21 +1438,29 @@ impl Renderer {
         ]
     }
 
+    /// [`Self::positive`] printed `ev` stops longer or shorter: dodge & burn.
+    #[inline]
+    pub fn positive_at(&self, d: [f32; 3], ev: f32) -> [f32; 3] {
+        if !self.converted || ev == 0.0 {
+            return self.positive(d);
+        }
+        self.look.apply(
+            self.lut
+                .apply_rgb_shifted(d, ev * curve::PRINT_TONE_PER_STOP),
+        )
+    }
+
     /// Render a whole buffer to encoded output pixels. `sharpen_scale` is the
     /// ratio of this buffer to full resolution (0 disables sharpening).
     pub fn render(&self, neg: &Negative, sharpen_scale: f32) -> Vec<[f32; 3]> {
-        let mut out: Vec<[f32; 3]> = match &self.dodge {
-            Some(dg) => neg
+        let mut out: Vec<[f32; 3]> = match neg.local.as_deref() {
+            Some(local) if self.local && local.len() == neg.data.len() => neg
                 .data
                 .par_iter()
-                .zip(dodge::low_pass(neg))
-                .map(|(p, low)| {
-                    let o = dg.offset(low);
-                    let d = std::array::from_fn(|c| p[c] + o * dg.gain[c]);
-                    self.output(self.positive(d))
-                })
+                .zip(local)
+                .map(|(p, &ev)| self.output(self.positive_at(*p, ev)))
                 .collect(),
-            None => neg
+            _ => neg
                 .data
                 .par_iter()
                 .map(|p| self.output(self.positive(*p)))
@@ -1490,11 +1537,7 @@ mod tests {
                 [v, v + 0.1, v + 0.3]
             })
             .collect();
-        let buf = Negative {
-            width: 1000,
-            height: 1,
-            data,
-        };
+        let buf = Negative::new(1000, 1, data);
         let (l, _) = levels_from_buffer(&buf, ImageType::Negative);
         assert!(
             (l[0].lo - 0.2).abs() < 0.01 && (l[0].hi - 1.2).abs() < 0.01,
@@ -1805,13 +1848,13 @@ mod tests {
             bow: 0.0,
         }; 3];
         let n = 65536;
-        let neg = Negative {
-            width: n,
-            height: 1,
-            data: (0..n)
+        let neg = Negative::new(
+            n,
+            1,
+            (0..n)
                 .map(|i| [(0.1 + 1.1 * i as f64 / (n - 1) as f64) as f32; 3])
                 .collect(),
-        };
+        );
         let s = chart_settings();
         for space in [
             OutputSpace::Srgb,
@@ -1983,11 +2026,7 @@ mod tests {
                     [range * t * 0.9, range * t, range * t * 1.1]
                 })
                 .collect();
-            Negative {
-                width: w,
-                height: h,
-                data,
-            }
+            Negative::new(w, h, data)
         };
         let (l, _) = levels_from_buffer(&frame(0.1), ImageType::Negative);
         assert!(l[1].hi - l[1].lo >= MIN_RANGE - 1e-9, "{l:?}");
@@ -2070,6 +2109,63 @@ mod tests {
             lut: crate::engine::settings::Lut::None,
             ..Settings::default()
         }
+    }
+
+    /// A dodge stroke prints what it covers fully exactly as more print time would,
+    /// leaves the rest untouched, and doesn't change the analysis.
+    #[test]
+    fn dodge_and_burn_is_local_print_time() {
+        let chart = crate::engine::testchart::negative(0.0);
+        let s = chart_settings();
+        let stroke = crate::engine::settings::BurnStroke {
+            points: vec![[0.5, 0.5]],
+            radius: 0.2,
+            feather: 0.0,
+            flow: 100.0,
+            ev: 1.0,
+            erase: false,
+        };
+        let dodged = Settings {
+            burn: vec![stroke],
+            ..chart_settings()
+        };
+        let a = analyse_chart(&chart, &s);
+        assert_eq!(a.levels, analyse_chart(&chart, &dodged).levels);
+        let render = |s: &Settings| {
+            let neg = prepare_negative(&chart.src, s, a.base);
+            (
+                Renderer::new(s, Some(&a.levels), OutputSpace::Srgb).render(&neg, 0.0),
+                neg,
+            )
+        };
+        let (plain, _) = render(&s);
+        let (lit, _) = render(&Settings {
+            print_exposure: 1.0,
+            ..chart_settings()
+        });
+        let (out, neg) = render(&dodged);
+        let local = neg.local.as_ref().expect("the stroke's map");
+        let (mut inside, mut outside) = (0, 0);
+        for k in 0..out.len() {
+            let want = if local[k] >= 0.999 {
+                inside += 1;
+                lit[k]
+            } else if local[k] == 0.0 {
+                outside += 1;
+                plain[k]
+            } else {
+                continue;
+            };
+            for c in 0..3 {
+                assert!((out[k][c] - want[c]).abs() < 1e-4, "pixel {k}");
+            }
+        }
+        assert!(inside > 1000 && outside > 1000, "{inside} {outside}");
+        // Without levels the negative is shown as scanned, strokes or not.
+        let raw = Renderer::new(&dodged, None, OutputSpace::Srgb).render(&neg, 0.0);
+        let bare = Renderer::new(&s, None, OutputSpace::Srgb)
+            .render(&Negative::new(neg.width, neg.height, neg.data.clone()), 0.0);
+        assert_eq!(raw, bare);
     }
 
     fn analyse_chart(chart: &crate::engine::testchart::Chart, s: &Settings) -> Analysis {
@@ -2329,93 +2425,6 @@ mod tests {
                 "{name}: keyed {keyed} median {median} reference {reference}"
             );
         }
-    }
-
-    /// Hyper Tone lifts a dark subject against a bright sky and keeps the
-    /// shading inside it; a scene whose large areas sit near its key is
-    /// left as it was.
-    #[test]
-    fn hyper_tone_dodges_large_areas_only() {
-        use crate::engine::testchart::{patch_lab, portrait};
-        let s = chart_settings();
-        let dodged = Settings {
-            hyper_tone_highlights: 100.0,
-            hyper_tone_shadows: 100.0,
-            ..chart_settings()
-        };
-        let render = |chart: &crate::engine::testchart::Chart, s: &Settings| {
-            let base = resolve_base(&chart.src, s, None);
-            let neg = prepare_negative(&chart.src, s, base);
-            let a = analyze_skin(&neg, s, base, None, false);
-            convert_chart(chart, s, &a, None)
-        };
-        // L* across the face (shaded 6 L*): right edge minus left edge.
-        let shading = |chart: &crate::engine::testchart::Chart, px: &[[f32; 3]]| {
-            let w = crate::engine::testchart::WIDTH;
-            let face = &chart.patches[0].pixels;
-            let (x0, x1) = face
-                .iter()
-                .fold((usize::MAX, 0), |(a, b), &i| (a.min(i % w), b.max(i % w)));
-            let side = |x: usize| {
-                let v: Vec<[f32; 3]> = face
-                    .iter()
-                    .filter(|&&i| (i % w).abs_diff(x) < 3)
-                    .map(|&i| px[i])
-                    .collect();
-                let n = v.len() as f32;
-                let m: [f32; 3] = std::array::from_fn(|c| v.iter().map(|p| p[c]).sum::<f32>() / n);
-                color::xyz_to_lab(
-                    color::mat_vec(
-                        &color::rgb_to_xyz(&color::SRGB),
-                        m.map(|v| color::srgb_decode(v) as f64),
-                    ),
-                    color::D65,
-                )[0]
-            };
-            side(x1) - side(x0)
-        };
-        let face_l =
-            |chart: &crate::engine::testchart::Chart, px: &[[f32; 3]]| patch_lab(chart, px)[0][0];
-        let chart = portrait(0.0, [92.0, -2.0, -10.0], [40.0, 12.0, 15.0]);
-        let (before, after) = (render(&chart, &s), render(&chart, &dodged));
-        let (l0, l1) = (face_l(&chart, &before), face_l(&chart, &after));
-        // The face printed undodged with the exposure that makes it as light.
-        let (mut lo, mut hi) = (0.0f32, 5.0f32);
-        for _ in 0..20 {
-            let e = (lo + hi) / 2.0;
-            let lit = Settings {
-                print_exposure: e,
-                ..chart_settings()
-            };
-            if face_l(&chart, &render(&chart, &lit)) < l1 {
-                lo = e
-            } else {
-                hi = e
-            }
-        }
-        let lit = render(
-            &chart,
-            &Settings {
-                print_exposure: lo,
-                ..chart_settings()
-            },
-        );
-        let (k0, k1) = (shading(&chart, &lit), shading(&chart, &after));
-        eprintln!(
-            "hyper tone: dark face L* {l0:.1} -> {l1:.1}; shading {k1:.2} L*, printed lighter {k0:.2} L*"
-        );
-        assert!(l1 > l0 + 4.0, "the face is dodged");
-        assert!(k1 > 0.8 * k0, "the face keeps its shading");
-        let chart = portrait(0.0, [50.0, 0.0, 0.0], [55.0, 12.0, 15.0]);
-        let (l0, l1) = (
-            patch_lab(&chart, &render(&chart, &s))[0][0],
-            patch_lab(&chart, &render(&chart, &dodged))[0][0],
-        );
-        eprintln!("hyper tone: face on grey L* {l0:.1} -> {l1:.1}");
-        assert!(
-            (l1 - l0).abs() < 1.5,
-            "a scene near its key moves {l0} -> {l1}"
-        );
     }
 
     /// A flash at night: lit things far brighter than the dark scene keep

@@ -1,13 +1,13 @@
 //! Negative inversion engine — a standalone port of the Negative Conversion
 //! Plugin (Lightroom) processing pipeline.
 
+pub mod burn;
 pub mod color;
 pub mod contact;
 pub mod curve;
 pub mod decode;
-pub mod denoise;
 pub mod demosaic;
-pub mod dodge;
+pub mod denoise;
 pub mod export;
 pub mod flat;
 pub mod frame;

@@ -161,12 +161,7 @@ pub fn export_frame(
     let mut neg = pipeline::prepare_negative(&src, s, base);
     let full_long = neg.width.max(neg.height);
     if ex.long_edge > 0 && (ex.long_edge as usize) < full_long {
-        let (d, w, h) = decode::downscale(&neg.data, neg.width, neg.height, ex.long_edge as usize);
-        neg = pipeline::Negative {
-            width: w,
-            height: h,
-            data: d,
-        };
+        neg = neg.downscaled(ex.long_edge as usize);
     }
     let scale = neg.width.max(neg.height) as f32 / full_long as f32;
     let levels = pipeline::levels_for(s, analysis, roll);

@@ -8,7 +8,7 @@ use eframe::egui::{self, Color32, Rect, Stroke, pos2};
 
 use crate::app::NlpApp;
 use crate::app::widgets::{self, pill, theme};
-use crate::engine::decode::GeometryMap;
+use crate::engine::decode::{GeometryMap, SourceImage};
 use crate::engine::heal;
 use crate::engine::settings::{HealMode, HealSpot, Settings};
 
@@ -143,7 +143,7 @@ impl HealEdit {
 }
 
 /// Between source pixels of the normalised spot coordinates and the canvas.
-struct CanvasMap {
+pub(super) struct CanvasMap {
     map: GeometryMap,
     w: f32,
     h: f32,
@@ -152,7 +152,25 @@ struct CanvasMap {
 }
 
 impl CanvasMap {
-    fn to_screen(&self, uv: [f32; 2]) -> egui::Pos2 {
+    /// For the source `src` drawn with `s`'s geometry into `rect`.
+    pub(super) fn new(src: &SourceImage, s: &Settings, rect: Rect) -> Self {
+        Self {
+            map: GeometryMap::new(
+                src.width,
+                src.height,
+                s.rotation,
+                s.flip_h,
+                s.straighten,
+                s.crop,
+            ),
+            w: src.width as f32,
+            h: src.height as f32,
+            long: src.width.max(src.height) as f32,
+            rect,
+        }
+    }
+
+    pub(super) fn to_screen(&self, uv: [f32; 2]) -> egui::Pos2 {
         let (x, y) = self.map.to_view(uv[0] * self.w - 0.5, uv[1] * self.h - 0.5);
         let (ow, oh) = (self.map.out.0 as f32, self.map.out.1 as f32);
         pos2(
@@ -161,7 +179,7 @@ impl CanvasMap {
         )
     }
 
-    fn to_uv(&self, pos: egui::Pos2) -> [f32; 2] {
+    pub(super) fn to_uv(&self, pos: egui::Pos2) -> [f32; 2] {
         let (ow, oh) = (self.map.out.0 as f32, self.map.out.1 as f32);
         let x = (pos.x - self.rect.left()) / self.rect.width() * ow - 0.5;
         let y = (pos.y - self.rect.top()) / self.rect.height() * oh - 0.5;
@@ -173,7 +191,7 @@ impl CanvasMap {
     }
 
     /// A radius on the canvas, in screen points.
-    fn screen_radius(&self, radius: f32) -> f32 {
+    pub(super) fn screen_radius(&self, radius: f32) -> f32 {
         radius * self.long * self.rect.width() / self.map.out.0 as f32
     }
 
@@ -184,7 +202,7 @@ impl CanvasMap {
 }
 
 /// A circle that reads on any picture: light over a dark edge.
-fn ring(p: &egui::Painter, c: egui::Pos2, r: f32, light: Color32, width: f32) {
+pub(super) fn ring(p: &egui::Painter, c: egui::Pos2, r: f32, light: Color32, width: f32) {
     p.circle_stroke(
         c,
         r,
@@ -226,6 +244,7 @@ impl NlpApp {
             self.apply_crop(i);
         }
         self.editor.pick = None;
+        self.editor.burn = None;
         // The tool works on the edited picture, side by side only gets in the way.
         if self.editor.before || self.editor.split {
             self.editor.before = false;
@@ -467,20 +486,7 @@ impl NlpApp {
             return;
         };
         let s = &self.frames[i].sc.settings;
-        let canvas = CanvasMap {
-            map: GeometryMap::new(
-                src.width,
-                src.height,
-                s.rotation,
-                s.flip_h,
-                s.straighten,
-                s.crop,
-            ),
-            w: src.width as f32,
-            h: src.height as f32,
-            long: src.width.max(src.height) as f32,
-            rect,
-        };
+        let canvas = CanvasMap::new(&src, s, rect);
         let mut spots = s.heal.clone();
         // An undo can take the selected spot away.
         h.selected = h.selected.filter(|n| *n < spots.len());

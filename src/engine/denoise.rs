@@ -14,7 +14,7 @@
 
 use rayon::prelude::*;
 
-use super::pipeline::{Negative, DENSITY_WEIGHTS};
+use super::pipeline::{DENSITY_WEIGHTS, Negative};
 
 /// Box radius in full-resolution pixels at 0 and at 100.
 const RADIUS_MIN: f32 = 1.0;
@@ -97,7 +97,10 @@ fn box_blur<const N: usize>(data: &[[f32; N]], w: usize, h: usize, r: usize) -> 
             for c in 0..N {
                 out[x][c] = acc[c] / n;
             }
-            let (add, sub) = (row[at(x as isize + r as isize + 1, w)], row[at(x as isize - r as isize, w)]);
+            let (add, sub) = (
+                row[at(x as isize + r as isize + 1, w)],
+                row[at(x as isize - r as isize, w)],
+            );
             for c in 0..N {
                 acc[c] += add[c] - sub[c];
             }
@@ -150,13 +153,17 @@ mod tests {
         let data = (0..w * h)
             .map(|i| {
                 let right = i % w >= w / 2;
-                let base = if right { [0.9, 0.6, 0.6] } else { [0.5, 0.5, 0.5] };
+                let base = if right {
+                    [0.9, 0.6, 0.6]
+                } else {
+                    [0.5, 0.5, 0.5]
+                };
                 let grain = 0.02 * noise(i, 1);
                 let (cr, cb) = (0.04 * noise(i, 2), 0.04 * noise(i, 3));
                 [base[0] + grain + cr, base[1] + grain, base[2] + grain + cb]
             })
             .collect();
-        Negative { width: w, height: h, data }
+        Negative::new(w, h, data)
     }
 
     fn chroma_var(neg: &Negative, x0: usize, x1: usize) -> f32 {
@@ -201,8 +208,16 @@ mod tests {
                 .sum::<f32>()
                 / neg.height as f32
         };
-        assert!(mean(w / 2 - 3).abs() < 0.05, "grey side {}", mean(w / 2 - 3));
-        assert!((mean(w / 2 + 2) - 0.3).abs() < 0.05, "red side {}", mean(w / 2 + 2));
+        assert!(
+            mean(w / 2 - 3).abs() < 0.05,
+            "grey side {}",
+            mean(w / 2 - 3)
+        );
+        assert!(
+            (mean(w / 2 + 2) - 0.3).abs() < 0.05,
+            "red side {}",
+            mean(w / 2 + 2)
+        );
     }
 
     #[test]

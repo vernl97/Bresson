@@ -15,10 +15,14 @@ use crate::engine::pipeline::{self, Negative, Renderer};
 use crate::engine::settings::*;
 use crate::engine::sidecar::Flag;
 
+mod burn;
 mod crop;
 mod heal;
 mod sidebar;
 
+use burn::BurnEdit;
+#[cfg(test)]
+pub(crate) use burn::BurnMode;
 pub(super) use crop::rotate_insets;
 use crop::{CropEdit, CropGrid};
 use heal::{HealEdit, SpotMap};
@@ -45,7 +49,16 @@ pub enum Pick {
     FilmBase,
 }
 
-type NegKey = (AnalysisKey, [i32; 4], i32, u8, bool, [i32; 3], bool, Vec<HealSpot>);
+type NegKey = (
+    AnalysisKey,
+    [i32; 4],
+    i32,
+    u8,
+    bool,
+    [i32; 3],
+    bool,
+    Vec<HealSpot>,
+);
 
 /// A requested zoom change, resolved in the canvas where the geometry is known.
 #[derive(Clone, Copy)]
@@ -122,6 +135,13 @@ pub struct Editor {
     pub(super) heal: Option<HealEdit>,
     /// What Visualize Spots shows of the current negative.
     spot_map: Option<SpotMap>,
+    /// The dodge & burn brush is on; it stays on from frame to frame.
+    pub(super) burn: Option<BurnEdit>,
+    /// The brush's Show Overlay picture of the current map.
+    burn_tex: Option<egui::TextureHandle>,
+    /// The strokes the negatives' dodge & burn maps were made from.
+    local_key: Option<(NegKey, i32, Vec<BurnStroke>)>,
+    gpu_local: Option<Arc<gpu::LocalData>>,
     /// The Finishing section, across frames (section states reset per frame).
     finishing_open: bool,
     pub export_open: bool,
@@ -198,6 +218,10 @@ impl Default for Editor {
             crop: None,
             crop_grid: CropGrid::default(),
             heal: None,
+            burn: None,
+            burn_tex: None,
+            local_key: None,
+            gpu_local: None,
             spot_map: None,
             finishing_open: false,
             export_open: false,
@@ -240,6 +264,7 @@ impl Editor {
         );
         let edits = (self.last_edit.take(), self.prev_edit.take());
         let heal = self.heal.map(HealEdit::for_next_frame);
+        let burn = self.burn.take().map(BurnEdit::for_next_frame);
         let crop_grid = self.crop_grid;
         *self = Editor {
             last_edit: edits.0,
@@ -249,12 +274,23 @@ impl Editor {
             committed: Some(settings),
             epoch,
             heal,
+            burn,
             crop_grid,
             ..Default::default()
         };
         self.color_tab = keep;
         self.hist_view = view;
         self.filmstrip = strip;
+    }
+
+    /// The largest and smallest stop of the shown negative's dodge & burn map.
+    #[cfg(test)]
+    pub(crate) fn local_range(&self) -> Option<(f32, f32)> {
+        let m = self.neg.as_ref()?.local.as_ref()?;
+        Some(
+            m.iter()
+                .fold((f32::MIN, f32::MAX), |(hi, lo), &v| (hi.max(v), lo.min(v))),
+        )
     }
 
     /// The settings an undo step brought back: the base for the next one.
@@ -329,6 +365,7 @@ impl NlpApp {
                 return;
             }
             self.editor.heal = None;
+            self.editor.burn = None;
         }
         self.editor.pick = pick;
     }
@@ -340,6 +377,7 @@ impl NlpApp {
         self.editor.pick = None;
         self.editor.crop = None;
         self.editor.heal = None;
+        self.editor.burn = None;
         self.view = View::Folder;
         if self.single_mode {
             // Lone image: return to the welcome screen.
@@ -388,6 +426,9 @@ impl NlpApp {
     /// live-straightened frame).
     fn preview_settings(&self, i: usize) -> Settings {
         let mut s = self.frames[i].sc.settings.clone();
+        if let Some(stroke) = self.editor.burn.as_ref().and_then(|b| b.pending()) {
+            s.burn.push(stroke.clone());
+        }
         if let Some(c) = &self.editor.crop {
             s.crop = [0.0; 4];
             s.straighten = c.angle;
@@ -472,11 +513,7 @@ impl NlpApp {
                 let pre = &self.editor.neg_pre.as_ref().unwrap().1;
                 let (data, width, height) =
                     decode::straighten(&pre.data, pre.width, pre.height, s.straighten);
-                Negative {
-                    width,
-                    height,
-                    data,
-                }
+                Negative::new(width, height, data)
             } else {
                 self.editor.neg_pre = None;
                 pipeline::prepare_density(&prep_src, &s, base)
@@ -489,16 +526,21 @@ impl NlpApp {
         if self.editor.denoise_key.as_ref() != Some(&dkey) || self.editor.neg.is_none() {
             let mut neg = self.editor.neg_raw.clone().unwrap();
             pipeline::denoise_chroma(&mut neg, &prep_src, &s);
-            let (d, w, h) = decode::downscale(&neg.data, neg.width, neg.height, 1024);
-            self.editor.neg_small = Some(Negative {
-                width: w,
-                height: h,
-                data: d,
-            });
-            self.editor.gpu_neg = self.gpu.then(|| gpu::NegData::new(&neg, !low));
+            self.editor.gpu_neg = self.gpu.then(|| gpu::NegData::new(&neg));
             self.editor.neg = Some(neg);
-            self.editor.denoise_key = Some(dkey);
+            self.editor.denoise_key = Some(dkey.clone());
             self.editor.spot_map = None;
+            self.editor.local_key = None;
+        }
+        // Dodge & burn: only the map is made again, so a stroke shows as it is painted.
+        let lkey = (dkey.0, dkey.1, s.burn.clone());
+        if self.editor.local_key.as_ref() != Some(&lkey) || self.editor.neg_small.is_none() {
+            let neg = self.editor.neg.as_mut().unwrap();
+            pipeline::attach_local(neg, &prep_src, &s);
+            self.editor.neg_small = Some(neg.downscaled(1024));
+            self.editor.gpu_local = self.gpu.then(|| gpu::LocalData::new(neg)).flatten();
+            self.editor.local_key = Some(lkey);
+            self.editor.burn_tex = None;
         }
         let full = self.editor.neg.as_ref().unwrap();
         let small = self.editor.neg_small.as_ref().unwrap();
@@ -512,7 +554,11 @@ impl NlpApp {
         };
         let origins = pipeline::levels_for(render_s, f.sc.analysis.as_ref(), f.sc.roll.as_ref());
         let mp = (src.info.full_width * src.info.full_height) as f32 / 1e6;
-        let r = Renderer::new(render_s, origins.as_ref(), OutputSpace::Srgb).with_megapixels(mp);
+        let mut r =
+            Renderer::new(render_s, origins.as_ref(), OutputSpace::Srgb).with_megapixels(mp);
+        if self.editor.before {
+            r = r.without_local();
+        }
         let full_long = src.info.full_width.max(src.info.full_height).max(1) as f32;
         let crop_frac = 1.0 - (s.crop[0] + s.crop[2]).max(s.crop[1] + s.crop[3]) / 100.0;
         let scale = cpu_neg.width.max(cpu_neg.height) as f32 / (full_long * crop_frac.max(0.1));
@@ -537,7 +583,12 @@ impl NlpApp {
         };
         let (w, h) = (cpu_neg.width, cpu_neg.height);
         if self.gpu {
-            self.editor.gpu_view = Some(gpu::ViewData::new(&r));
+            let local = self
+                .editor
+                .gpu_local
+                .clone()
+                .filter(|_| !self.editor.before);
+            self.editor.gpu_view = Some(gpu::ViewData::new(&r, local));
             self.editor.tex = None;
         } else {
             set_texture(
@@ -559,9 +610,11 @@ impl NlpApp {
         if self.editor.split && !self.editor.before && !cropping {
             let b = base_s.as_ref().unwrap_or(&s);
             let b_levels = pipeline::levels_for(b, f.sc.analysis.as_ref(), f.sc.roll.as_ref());
-            let before = Renderer::new(b, b_levels.as_ref(), OutputSpace::Srgb).with_megapixels(mp);
+            let before = Renderer::new(b, b_levels.as_ref(), OutputSpace::Srgb)
+                .with_megapixels(mp)
+                .without_local();
             if self.gpu {
-                self.editor.gpu_before = Some(gpu::ViewData::new(&before));
+                self.editor.gpu_before = Some(gpu::ViewData::new(&before, None));
             } else {
                 let img = to_color_image(&before.render(cpu_neg, scale.min(1.0)), w, h);
                 set_texture(ctx, &mut self.editor.before_tex, "editor-before", img);
@@ -656,6 +709,8 @@ impl NlpApp {
                     self.crop_bar(ui, i);
                 } else if self.editor.heal.is_some() {
                     self.heal_bar(ui);
+                } else if self.editor.burn.is_some() {
+                    self.burn_bar(ui);
                 } else {
                     self.view_bar(ui, i);
                 }
@@ -1016,6 +1071,8 @@ impl NlpApp {
                 !cmd && inp.key_pressed(egui::Key::I),
                 cmd && !inp.modifiers.shift && inp.key_pressed(egui::Key::E),
                 !cmd && inp.key_pressed(egui::Key::Q),
+                !cmd && inp.key_pressed(egui::Key::K),
+                !cmd && inp.key_pressed(egui::Key::O),
                 !cmd && inp.key_pressed(egui::Key::OpenBracket),
                 !cmd && inp.key_pressed(egui::Key::CloseBracket),
                 inp.key_pressed(egui::Key::Delete) || inp.key_pressed(egui::Key::Backspace),
@@ -1045,6 +1102,8 @@ impl NlpApp {
             info,
             export,
             q,
+            kk,
+            o,
             smaller,
             larger,
             delete,
@@ -1131,9 +1190,23 @@ impl NlpApp {
             self.apply_crop(i);
         } else if enter {
             self.editor.heal = None;
+            if self.editor.burn.take().is_some() {
+                self.editor.dirty = true;
+            }
         }
         if q {
             self.toggle_heal(i);
+        }
+        if kk {
+            self.toggle_burn(i);
+        }
+        if self.editor.burn.is_some() {
+            if smaller || larger {
+                self.step_burn_size(larger);
+            }
+            if o && let Some(b) = self.editor.burn.as_mut() {
+                b.overlay = !b.overlay;
+            }
         }
         if self.editor.heal.is_some() {
             if smaller || larger {
@@ -1159,6 +1232,9 @@ impl NlpApp {
                 self.cancel_crop();
             } else if self.editor.heal.is_some() {
                 self.editor.heal = None;
+            } else if self.editor.burn.is_some() {
+                self.editor.burn = None;
+                self.editor.dirty = true;
             } else {
                 self.leave_editor();
                 return true;
@@ -1732,6 +1808,8 @@ impl NlpApp {
             }
         } else if self.editor.heal.is_some() {
             self.heal_overlay(ui, &resp, rect, avail, i);
+        } else if self.editor.burn.is_some() {
+            self.burn_overlay(ui, &resp, rect, avail, i);
         } else {
             if resp.dragged() && self.editor.zoom.is_some() {
                 self.editor.zoom_anim = None;
@@ -1747,7 +1825,11 @@ impl NlpApp {
                 }
             }
         }
-        if !cropping && self.editor.pick.is_none() && self.editor.heal.is_none() {
+        if !cropping
+            && self.editor.pick.is_none()
+            && self.editor.heal.is_none()
+            && self.editor.burn.is_none()
+        {
             resp.context_menu(|ui| self.canvas_menu(ui, i));
         }
 

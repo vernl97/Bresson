@@ -25,7 +25,7 @@ file ──decode──▶ SourceImage (linear camera RGB)
                     ▼
      levels_for ──▶ Levels the frame prints with
                     ▼
-     Renderer:  [dodge offset] → CurveLut (print engine) → Look
+     Renderer:  CurveLut (print engine, + dodge & burn) → Look
                 → output colour space → [sharpening]  ──▶ export.rs
 ```
 
@@ -525,29 +525,35 @@ filtration that gives all three channels equal exposure, i.e. grey.
 
 ---
 
-## 7. Hyper Tone (dodge & burn) — `dodge.rs`
+## 7. Dodge & burn — `burn.rs`
 
-Off by default (`hyper_tone_highlights/shadows = 0`); only for negatives.
-After the Frontier's Hyper Tone (US 6,807,316).
+Print time changed by hand over parts of the frame, as with a card or a hole
+in one under the enlarger. `Settings::burn` is a list of brush strokes
+(`BurnStroke`), stored like healed spots in the source image before any
+geometry: points normalised to its width and height, radius to its long edge,
+so a stroke keeps its place through rotation, straightening and crop and at
+any decode size. Each has a feather (share of the radius that fades), a flow
+and `ev`, the stops at full coverage (+ dodges, − burns, like
+`print_exposure`), or `erase`.
 
-**Low‑pass** (`low_pass`, once per negative): green density on a 256‑px map,
-blurred twice — wide σ = 12 % and narrow σ = 5 % of the long edge. They are
-blended `s + (l − s)·exp(−((l − s)/0.1)²)`: the wide blur in smooth areas,
-the narrow one where they disagree by ≳ 0.1 D (near strong edges), which
-prevents halos. Upsampled bilinearly. (In the GPU preview it rides in the
-density texture's alpha channel.)
+**Map** (`exposure_map`, made by `prepare_negative` → `attach_local` and kept
+in `Negative::local`): each stroke is resampled into dabs every ¼ radius,
+mapped to the output with `GeometryMap::to_view` (rigid, so a dab stays a
+circle of the same pixel radius). A dab covers `f = flow · smoothstep` from
+1 inside `radius·(1 − feather)` to 0 at the radius; dabs build up within a
+stroke as `m ← m + (1 − m)·f`. Strokes then apply in order:
+`local += ev · m`, or for erase `local *= 1 − m`.
 
-**Offset** per pixel, with `u = low − key` (`key` = green `mid`):
+**Applying it** (`CurveLut::apply_rgb_shifted`): print tone is
+`1 − exposure / PAPER_RANGE`, so a stop of print time moves it by
+`log10 2 / PAPER_RANGE` (`PRINT_TONE_PER_STOP`). Each channel's print tone gets
+`local · PRINT_TONE_PER_STOP` before the tone profile, which is exactly what
+`print_exposure` does globally: greys stay grey, and a fully covered area
+prints as the whole frame would with that much more or less time
+(`dodge_and_burn_is_local_print_time`). Only converted frames use it.
 
-```
-offset = −g · u³ / (u² + 0.3²)          g = slider/100 · 0.4  (light side if u > 0, dark side if u < 0)
-D_c   += offset · gain_c                gain_c = (hi_c − lo_c)/(hi_g − lo_g)
-```
-
-Near the key (|u| ≪ 0.3 D) almost nothing changes, so midtone contrast is
-kept; far from it up to 40 % of the departure is taken away. The per‑channel
-gain keeps greys grey. This is added to the density **before** the curve
-LUTs.
+It comes after the analysis (`analysis_buffer` builds a negative without the
+map), so it is not in `AnalysisKey` and never needs a Convert.
 
 ---
 
@@ -683,14 +689,14 @@ two qualify).
 - `CurveLut` from the levels (or `negative_view` if the frame is unconverted),
 - the `Look`,
 - the output matrix and encoding LUT,
-- the sharpening preset,
-- the `Dodge`, if Hyper Tone is on.
+- the sharpening preset.
 
 `render(neg, sharpen_scale)`, in parallel per pixel:
 
 ```
-d    = density (+ dodge offset · gain_c)
+d    = density
 p    = apply_rgb(d)                                # encoded MelissaRGB (6.4)
+       (apply_rgb_shifted(d, local·PRINT_TONE_PER_STOP) where the negative has a dodge & burn map, 7)
 p    = look(p)                                     # converted frames only
 out  = encode_out(compress_gamut(M_out · srgb_decode(p)))
 ```
@@ -699,14 +705,15 @@ then sharpening over the whole buffer.
 
 Where it runs:
 
-- **Editor preview**: `app/gpu.rs` + `preview.wgsl` run dodge, curve LUTs,
+- **Editor preview**: `app/gpu.rs` + `preview.wgsl` run curve LUTs, dodge & burn,
   the hue‑preserving tone profile, look and output in a shader (no
   sharpening) on the 2048‑px proxy; `gpu_preview_matches_the_cpu_renderer`
   keeps it in step. The CPU renders a 1024‑px copy for the histogram, readout
   and clipping, and is the fallback. While the straighten angle is dragged,
-  the preview re‑straightens a cached 1024‑px negative without the Hyper Tone
-  low‑pass and the histogram stays as it was (dimmed); both are rebuilt at
-  full quality on release.
+  the preview re‑straightens a cached 1024‑px negative without the dodge &
+  burn map and the histogram stays as it was (dimmed); both are rebuilt at
+  full quality on release. The map is its own R32F texture (`LocalData`), so
+  a stroke being painted re‑uploads only it.
 - **Export** (`export::export_frame`): decode at full resolution, the
   analysis' stored base, `prepare_negative`, optional downscale to the
   export's long edge, `levels_for`, `Renderer` with `with_megapixels`, render,
@@ -722,7 +729,7 @@ crosstalk matrix and strength, border buffer, film base mode and sample,
 flat field. These change the
 density image or how it is measured, so changing any of them needs
 **Convert** again. Everything else — tone, WB, filtration, print exposure,
-looks, Hyper Tone, sharpening, geometry, roll mode — only rebuilds the
+looks, dodge & burn, sharpening, geometry, roll mode — only rebuilds the
 `Renderer`. Healed spots change the density image, but too little for the
 blurred analysis buffer to notice, so they re‑prepare the negative without
 asking for a Convert. Chroma noise reduction is the same.

@@ -246,6 +246,38 @@ impl Default for HealSpot {
     }
 }
 
+/// One dodge & burn brush stroke, in the source image before any geometry like a
+/// [`HealSpot`]: `points` normalised to its width and height, `radius` to its long edge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BurnStroke {
+    /// The brush centre's path; a single point is one dab.
+    pub points: Vec<[f32; 2]>,
+    pub radius: f32,
+    /// 0..=100: share of the radius that fades out.
+    pub feather: f32,
+    /// 1..=100: how much one dab covers; overlapping dabs build up to full.
+    pub flow: f32,
+    /// Print time in stops where the stroke covers fully: + dodges (lighter),
+    /// − burns, as `print_exposure`.
+    pub ev: f32,
+    /// Takes away the strokes before it instead of adding exposure.
+    pub erase: bool,
+}
+
+impl Default for BurnStroke {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            radius: 0.03,
+            feather: 50.0,
+            flow: 50.0,
+            ev: 0.5,
+            erase: false,
+        }
+    }
+}
+
 /// Every parameter that influences how a frame is rendered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -299,10 +331,6 @@ pub struct Settings {
     pub glow: f32,
     /// "Lab Fade"
     pub fade: f32,
-    /// Hyper Tone: compression (0..100) of the large-area tones above and
-    /// below the frame's key, i.e. automatic burning and dodging.
-    pub hyper_tone_highlights: f32,
-    pub hyper_tone_shadows: f32,
     /// Chroma noise reduction (0..100): smooths the colour of grain and
     /// sensor noise on the prepared negative, leaving luma alone. Spatial,
     /// like the healed spots, so it stays out of [`AnalysisKey`].
@@ -346,6 +374,10 @@ pub struct Settings {
     /// analysis, so this stays out of [`AnalysisKey`] and a spot needs no Convert.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub heal: Vec<HealSpot>,
+    /// Dodge & burn strokes, in the order they apply: local print time, after
+    /// the analysis, so it stays out of [`AnalysisKey`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub burn: Vec<BurnStroke>,
 }
 
 impl Default for Settings {
@@ -377,8 +409,6 @@ impl Default for Settings {
             blacks: 0.0,
             glow: 0.0,
             fade: 0.0,
-            hyper_tone_highlights: 0.0,
-            hyper_tone_shadows: 0.0,
             chroma_denoise: 25.0,
             wb_mode: WbMode::AutoNeutral,
             wb_temp: 0.0,
@@ -402,6 +432,7 @@ impl Default for Settings {
             use_roll: false,
             roll_mode: RollMode::Lab,
             heal: Vec::new(),
+            burn: Vec::new(),
         }
     }
 }
@@ -472,6 +503,7 @@ impl Settings {
             (k.rotation, k.flip_h, k.straighten, k.crop);
         self.crop_aspect = k.crop_aspect;
         self.heal = k.heal.clone();
+        self.burn = k.burn.clone();
         self.flat_field = k.flat_field.clone();
         (self.crosstalk, self.crosstalk_strength) = (k.crosstalk.clone(), k.crosstalk_strength);
     }

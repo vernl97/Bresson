@@ -54,8 +54,7 @@ impl Section {
             Section::Tone => differs!(s, r; tone_profile, print_exposure, brightness, contrast,
                 highlights, shadows, whites, blacks),
             Section::WhiteBalance => s.wb_mode != r.wb_mode,
-            Section::PrintCharacter => differs!(s, r; hyper_tone_highlights, hyper_tone_shadows,
-                glow, fade, chroma_denoise),
+            Section::PrintCharacter => differs!(s, r; glow, fade, chroma_denoise),
             Section::Colour => differs!(s, r; mid_cyan, mid_tint, mid_temp, high_cyan, high_tint,
                 high_temp, high_range, shadow_cyan, shadow_tint, shadow_temp, shadow_range,
                 lut, lut_strength, post_saturation),
@@ -71,8 +70,7 @@ impl Section {
             Section::Tone => take!(s, r; tone_profile, print_exposure, brightness, contrast,
                 highlights, shadows, whites, blacks),
             Section::WhiteBalance => take!(s, r; wb_mode, wb_temp, wb_tint),
-            Section::PrintCharacter => take!(s, r; hyper_tone_highlights, hyper_tone_shadows,
-                glow, fade, chroma_denoise),
+            Section::PrintCharacter => take!(s, r; glow, fade, chroma_denoise),
             Section::Colour => take!(s, r; mid_cyan, mid_tint, mid_temp, high_cyan, high_tint,
                 high_temp, high_range, shadow_cyan, shadow_tint, shadow_temp, shadow_range,
                 lut, lut_strength, post_saturation),
@@ -174,7 +172,8 @@ impl NlpApp {
         ui.add_space(2.0);
     }
 
-    /// The tool strip under the histogram: Crop, Heal, and placeholders for tools to come.
+    /// The tool strip under the histogram: Crop, Heal, Dodge & burn, and a placeholder
+    /// for a tool to come.
     fn tool_strip(&mut self, ui: &mut egui::Ui, i: usize) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -214,18 +213,31 @@ impl NlpApp {
             {
                 self.toggle_heal(i);
             }
-            for k in 2..=3 {
-                widgets::sized_icon_button(
-                    ui,
-                    Icon::Placeholder,
-                    &format!("Tool {k} (coming soon)"),
-                    false,
-                    false,
-                    None,
-                    size,
-                    3.0,
-                );
+            let burning = self.editor.burn.is_some();
+            if widgets::sized_icon_button(
+                ui,
+                Icon::Burn,
+                "Dodge & burn: lighten or darken areas by hand (K)",
+                burning,
+                true,
+                None,
+                size,
+                3.0,
+            )
+            .clicked()
+            {
+                self.toggle_burn(i);
             }
+            widgets::sized_icon_button(
+                ui,
+                Icon::Placeholder,
+                "Tool 4 (coming soon)",
+                false,
+                false,
+                None,
+                size,
+                3.0,
+            );
         });
         ui.add_space(2.0);
     }
@@ -241,6 +253,7 @@ impl NlpApp {
                 self.tool_strip(ui, i);
                 self.crop_panel(ui, i);
                 self.heal_panel(ui, s);
+                self.burn_panel(ui, s);
             });
         ui.add_space(8.0);
         widgets::reset_section_gap(ui);
@@ -727,23 +740,6 @@ impl NlpApp {
             };
             tone(ui, "Glow", &mut s.glow, "Silky compressed highlights");
             tone(ui, "Fade", &mut s.fade, "Open, compressed deep shadows");
-            widgets::group_divider(ui);
-            caption(ui, "Large areas");
-            let amount = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
-                fl_slider(ui, l, v, 0.0..=100.0, 0.0, 0, tip, None)
-            };
-            amount(
-                ui,
-                "Burn",
-                &mut s.hyper_tone_highlights,
-                "Holds back large bright areas (sky, window light) while keeping their detail",
-            );
-            amount(
-                ui,
-                "Dodge",
-                &mut s.hyper_tone_shadows,
-                "Opens large dark areas (backlit subjects, shade) while keeping their detail",
-            );
             widgets::group_divider(ui);
             caption(ui, "Noise");
             fl_slider(

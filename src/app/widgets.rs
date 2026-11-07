@@ -513,6 +513,8 @@ pub enum Icon {
     Crop,
     /// Spot healing: a sticking plaster.
     Heal,
+    /// Dodge & burn: a darkroom dodging wand, its disc half dark.
+    Burn,
     /// The crop's aspect lock, closed and open.
     Lock,
     Unlock,
@@ -699,12 +701,28 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             let quarter = std::f32::consts::FRAC_PI_4;
             let half = std::f32::consts::PI;
             let mut outline = arc(a, R * s, -quarter - half / 2.0, -quarter + half / 2.0, 8);
-            outline.extend(arc(b, R * s, -quarter + half / 2.0, -quarter + half * 1.5, 8));
+            outline.extend(arc(
+                b,
+                R * s,
+                -quarter + half / 2.0,
+                -quarter + half * 1.5,
+                8,
+            ));
             p.add(Shape::closed_line(outline, st));
             p.line_segment([along(2.6, -R), along(2.6, R)], st);
             p.line_segment([along(-2.6, -R), along(-2.6, R)], st);
             p.circle_filled(along(0.0, -1.1), 0.75 * s, color);
             p.circle_filled(along(0.0, 1.1), 0.75 * s, color);
+        }
+        Icon::Burn => {
+            let (centre, r) = (q(2.5, -2.5), 5.5 * s);
+            p.circle_stroke(centre, r, st);
+            // The disc's lower half filled: printed darker.
+            let half = std::f32::consts::PI;
+            let mut fill = arc(centre, r, -half / 4.0, half * 3.0 / 4.0, 12);
+            fill.push(centre);
+            p.add(Shape::convex_polygon(fill, color, egui::Stroke::NONE));
+            p.line_segment([q(-1.4, 1.4), q(-8.0, 8.0)], st);
         }
         Icon::Lock | Icon::Unlock => {
             p.rect_stroke(
@@ -723,7 +741,14 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 std::f32::consts::TAU,
                 10,
             ));
-            shackle.push(q(3.5, if icon == Icon::Lock { -1.0 } else { -4.5 - lift }));
+            shackle.push(q(
+                3.5,
+                if icon == Icon::Lock {
+                    -1.0
+                } else {
+                    -4.5 - lift
+                },
+            ));
             p.add(line(shackle));
         }
         Icon::Placeholder => {

@@ -171,6 +171,7 @@ impl NlpApp {
         }
         self.editor.crop = Some(c);
         self.editor.heal = None;
+        self.editor.burn = None;
         self.fit_pending_crop();
         self.editor.pick = None;
         self.editor.zoom = None;
@@ -622,12 +623,7 @@ impl NlpApp {
         );
         // Dark under light, so the frame and handles read on a pale picture too.
         let ink = Color32::from_black_alpha(170);
-        p.rect_stroke(
-            r,
-            0.0,
-            Stroke::new(3.5, ink),
-            egui::StrokeKind::Middle,
-        );
+        p.rect_stroke(r, 0.0, Stroke::new(3.5, ink), egui::StrokeKind::Middle);
         p.rect_stroke(
             r,
             0.0,
@@ -672,7 +668,11 @@ impl NlpApp {
                 p.circle(e, 4.0, theme::ACCENT, Stroke::new(1.5, Color32::WHITE));
             }
         } else if c.level {
-            pill(&p, pos2(avail.center().x, avail.top() + 22.0), "Drag along something that should be level or upright · Esc to cancel");
+            pill(
+                &p,
+                pos2(avail.center().x, avail.top() + 22.0),
+                "Drag along something that should be level or upright · Esc to cancel",
+            );
         }
     }
 }

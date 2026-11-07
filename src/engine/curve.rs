@@ -78,6 +78,9 @@ pub type Levels = [ChannelLevels; 3];
 /// (ISO R ≈ 105, a grade-2 paper): the span print exposure and filtration
 /// move along.
 pub const PAPER_RANGE: f64 = 1.05;
+/// Print tone (before the tone profile) one stop of print time moves: what
+/// dodge & burn adds per stop, exactly as `print_exposure` does.
+pub const PRINT_TONE_PER_STOP: f32 = (std::f64::consts::LOG10_2 / PAPER_RANGE) as f32;
 /// One CC unit of printing filtration, in log exposure.
 pub const CC: f64 = 0.01;
 
@@ -560,6 +563,15 @@ impl CurveLut {
     #[inline]
     pub fn apply_rgb(&self, d: [f32; 3]) -> [f32; 3] {
         let x: [f32; 3] = std::array::from_fn(|c| lerp_table(&self.tone[c], Self::index(d[c])));
+        rgb_tone(x, |v| lerp_table(&self.profile, profile_index(v))).map(|v| v.clamp(0.0, 1.0))
+    }
+
+    /// [`Self::apply_rgb`] with every channel's print tone moved by `shift`
+    /// before the profile: local print time ([`PRINT_TONE_PER_STOP`]).
+    #[inline]
+    pub fn apply_rgb_shifted(&self, d: [f32; 3], shift: f32) -> [f32; 3] {
+        let x: [f32; 3] =
+            std::array::from_fn(|c| lerp_table(&self.tone[c], Self::index(d[c])) + shift);
         rgb_tone(x, |v| lerp_table(&self.profile, profile_index(v))).map(|v| v.clamp(0.0, 1.0))
     }
 

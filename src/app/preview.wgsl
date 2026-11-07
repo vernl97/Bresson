@@ -13,12 +13,8 @@ struct Params {
     // Curve tables: density at entry 0, at the last entry, entries,
     // linear output (1 for sRGB render targets).
     lut: vec4<f32>,
-    // Negative width, height.
+    // Negative width, height; print tone per stop of dodge & burn (0 = off).
     size: vec4<f32>,
-    // Dodge: key density, light and dark compression (0 = off), knee².
-    dodge: vec4<f32>,
-    // Dodge gain per channel.
-    gain: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -26,6 +22,8 @@ struct Params {
 // Curve tables (print tone per channel in rgb, the tone profile in a),
 // then the look map, then its grey curves.
 @group(0) @binding(2) var<storage, read> tables: array<vec4<f32>>;
+// Dodge & burn in stops, the negative's size (a single texel when there is none).
+@group(0) @binding(3) var burn: texture_2d<f32>;
 
 // Print tone span of the profile table (curve::PROFILE_XMIN / XMAX).
 const PROFILE_XMIN: f32 = -0.5;
@@ -51,7 +49,7 @@ fn vs(@builtin(vertex_index) i: u32) -> VOut {
     return o;
 }
 
-// Densities and (alpha) the low-pass density.
+// Densities.
 fn density(uv: vec2<f32>) -> vec4<f32> {
     let dims = p.size.xy;
     let xy = uv * dims - 0.5;
@@ -62,6 +60,23 @@ fn density(uv: vec2<f32>) -> vec4<f32> {
     let b = textureLoad(neg, clamp(i0 + vec2<i32>(1, 0), vec2<i32>(0, 0), mx), 0);
     let c = textureLoad(neg, clamp(i0 + vec2<i32>(0, 1), vec2<i32>(0, 0), mx), 0);
     let d = textureLoad(neg, clamp(i0 + vec2<i32>(1, 1), vec2<i32>(0, 0), mx), 0);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// Dodge & burn in stops, sampled like the densities.
+fn local(uv: vec2<f32>) -> f32 {
+    if (p.size.z == 0.0) {
+        return 0.0;
+    }
+    let dims = p.size.xy;
+    let xy = uv * dims - 0.5;
+    let f = fract(xy);
+    let i0 = vec2<i32>(floor(xy));
+    let mx = vec2<i32>(textureDimensions(burn)) - vec2<i32>(1, 1);
+    let a = textureLoad(burn, clamp(i0, vec2<i32>(0, 0), mx), 0).r;
+    let b = textureLoad(burn, clamp(i0 + vec2<i32>(1, 0), vec2<i32>(0, 0), mx), 0).r;
+    let c = textureLoad(burn, clamp(i0 + vec2<i32>(0, 1), vec2<i32>(0, 0), mx), 0).r;
+    let d = textureLoad(burn, clamp(i0 + vec2<i32>(1, 1), vec2<i32>(0, 0), mx), 0).r;
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
@@ -250,17 +265,12 @@ fn compress_gamut(o: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let uv = mix(p.uv.xy, p.uv.zw, in.uv);
-    let n = density(uv);
-    // Dodge (see engine::dodge): offset from the low-pass density's
-    // departure from the key, nothing near it.
-    let u = n.a - p.dodge.x;
-    var g = p.dodge.z;
-    if (u > 0.0) {
-        g = p.dodge.y;
-    }
-    let off = -g * u * u * u / (u * u + p.dodge.w + 1e-9);
-    let d = n.rgb + off * p.gain.xyz;
-    let pos = look(print(vec3<f32>(curve(0u, d.r), curve(1u, d.g), curve(2u, d.b))));
+    let d = density(uv).rgb;
+    // Dodge & burn moves the print time before the tone profile
+    // (CurveLut::apply_rgb_shifted).
+    let shift = local(uv) * p.size.z;
+    let tone = vec3<f32>(curve(0u, d.r), curve(1u, d.g), curve(2u, d.b)) + vec3<f32>(shift);
+    let pos = look(print(tone));
     let c = clamp(pos, vec3<f32>(0.0), vec3<f32>(1.0));
     let lin = vec3<f32>(srgb_decode(c.r), srgb_decode(c.g), srgb_decode(c.b));
     let o = clamp(
