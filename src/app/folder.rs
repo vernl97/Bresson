@@ -239,6 +239,9 @@ impl NlpApp {
 
     /// Save and close the open folder, then show the Projects (rolls) list.
     fn close_to_projects(&mut self) {
+        // The scanner writes into the open roll: release it with the roll, or a
+        // running scan keeps adding frames behind the Rolls screen.
+        self.close_scan_panel();
         self.save_all();
         self.frames.clear();
         self.selected.clear();
@@ -1225,6 +1228,8 @@ impl NlpApp {
                 });
             });
         if go {
+            // The paused pass was counted done when it stopped: count this one in.
+            self.convert_started(items.len());
             self.jobs
                 .spawn(move || super::jobs::convert(items, true, false));
         } else if !(cancel || r.should_close()) {
