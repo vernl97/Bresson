@@ -303,6 +303,10 @@ pub struct Settings {
     /// below the frame's key, i.e. automatic burning and dodging.
     pub hyper_tone_highlights: f32,
     pub hyper_tone_shadows: f32,
+    /// Chroma noise reduction (0..100): smooths the colour of grain and
+    /// sensor noise on the prepared negative, leaving luma alone. Spatial,
+    /// like the healed spots, so it stays out of [`AnalysisKey`].
+    pub chroma_denoise: f32,
 
     // ---- Color ---------------------------------------------------------------
     pub wb_mode: WbMode,
@@ -375,6 +379,7 @@ impl Default for Settings {
             fade: 0.0,
             hyper_tone_highlights: 0.0,
             hyper_tone_shadows: 0.0,
+            chroma_denoise: 25.0,
             wb_mode: WbMode::AutoNeutral,
             wb_temp: 0.0,
             wb_tint: 0.0,

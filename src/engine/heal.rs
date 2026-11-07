@@ -406,7 +406,11 @@ mod tests {
         use crate::engine::pipeline::{prepare_negative, resolve_base};
         use crate::engine::settings::Settings;
         let src = crate::engine::testchart::negative(0.0).src;
-        let mut s = Settings::default();
+        // Chroma noise reduction would spread the change by its radius.
+        let mut s = Settings {
+            chroma_denoise: 0.0,
+            ..Default::default()
+        };
         let base = resolve_base(&src, &s, None);
         let plain = prepare_negative(&src, &s, base);
         s.heal.push(HealSpot {

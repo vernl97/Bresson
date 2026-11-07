@@ -227,6 +227,22 @@ For every pixel, in this order:
      otherwise print.
 7. **Black & white** (colour model B+W): all three channels become the
    weighted density `0.30 R + 0.55 G + 0.15 B`.
+8. **Chroma noise reduction** (`denoise.rs`, `Settings::chroma_denoise`,
+   0..100, default 25; `pipeline::denoise_chroma`, skipped for B+W). Density
+   splits into luma `Y = DENSITY_WEIGHTS · D` and colour differences
+   `R − G`, `B − G`. Each difference is smoothed by a guided filter with `Y`
+   as the guide (box means of radius `r`, regularisation `ε`): `a = cov(Y, c)
+   / (var Y + ε)`, `b = mean c − a · mean Y`, `c' = mean a · Y + mean b`. A
+   flat area takes its local mean colour; across a luma step larger than
+   `√ε` the colour follows the step, so it doesn't bleed. `r = (1 + 7 t)`
+   full‑resolution pixels, `√ε = 0.03 + 0.03 t` D (`t = amount / 100`), and
+   `r` is scaled by the buffer's long edge over the full frame's, so
+   previews smooth the same share of the picture as exports (and skip it
+   when `r` rounds to 0, as on small proxies). Up to 25 the filtered colour
+   fades in at the smallest radius; above, the radius grows. The channels
+   are rebuilt with `Y` unchanged, so luma grain and detail are untouched.
+   `pipeline::prepare_density` is everything before this step; the editor
+   keeps that result so the Chroma slider only filters again.
 
 *Edit Only* frames (already positive) skip gains, matrix and crosstalk:
 `D = −log10(v)`.
@@ -709,7 +725,7 @@ density image or how it is measured, so changing any of them needs
 looks, Hyper Tone, sharpening, geometry, roll mode — only rebuilds the
 `Renderer`. Healed spots change the density image, but too little for the
 blurred analysis buffer to notice, so they re‑prepare the negative without
-asking for a Convert.
+asking for a Convert. Chroma noise reduction is the same.
 
 ---
 

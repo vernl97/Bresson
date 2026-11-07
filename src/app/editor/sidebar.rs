@@ -55,7 +55,7 @@ impl Section {
                 highlights, shadows, whites, blacks),
             Section::WhiteBalance => s.wb_mode != r.wb_mode,
             Section::PrintCharacter => differs!(s, r; hyper_tone_highlights, hyper_tone_shadows,
-                glow, fade),
+                glow, fade, chroma_denoise),
             Section::Colour => differs!(s, r; mid_cyan, mid_tint, mid_temp, high_cyan, high_tint,
                 high_temp, high_range, shadow_cyan, shadow_tint, shadow_temp, shadow_range,
                 lut, lut_strength, post_saturation),
@@ -72,12 +72,24 @@ impl Section {
                 highlights, shadows, whites, blacks),
             Section::WhiteBalance => take!(s, r; wb_mode, wb_temp, wb_tint),
             Section::PrintCharacter => take!(s, r; hyper_tone_highlights, hyper_tone_shadows,
-                glow, fade),
+                glow, fade, chroma_denoise),
             Section::Colour => take!(s, r; mid_cyan, mid_tint, mid_temp, high_cyan, high_tint,
                 high_temp, high_range, shadow_cyan, shadow_tint, shadow_temp, shadow_range,
                 lut, lut_strength, post_saturation),
         }
     }
+}
+
+/// A small muted caption over a group of sliders, aligned with their labels.
+fn caption(ui: &mut egui::Ui, text: &str) {
+    let (cap, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
+    ui.painter().text(
+        cap.left_center() + vec2(widgets::LABEL_W, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        text,
+        egui::FontId::proportional(11.0),
+        theme::MUTED,
+    );
 }
 
 /// A section header that marks edits and resets the section on request;
@@ -716,14 +728,7 @@ impl NlpApp {
             tone(ui, "Glow", &mut s.glow, "Silky compressed highlights");
             tone(ui, "Fade", &mut s.fade, "Open, compressed deep shadows");
             widgets::group_divider(ui);
-            let (cap, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
-            ui.painter().text(
-                cap.left_center() + vec2(widgets::LABEL_W, 0.0),
-                egui::Align2::RIGHT_CENTER,
-                "Large areas",
-                egui::FontId::proportional(11.0),
-                theme::MUTED,
-            );
+            caption(ui, "Large areas");
             let amount = |ui: &mut egui::Ui, l: &str, v: &mut f32, tip: &str| {
                 fl_slider(ui, l, v, 0.0..=100.0, 0.0, 0, tip, None)
             };
@@ -738,6 +743,18 @@ impl NlpApp {
                 "Dodge",
                 &mut s.hyper_tone_shadows,
                 "Opens large dark areas (backlit subjects, shade) while keeping their detail",
+            );
+            widgets::group_divider(ui);
+            caption(ui, "Noise");
+            fl_slider(
+                ui,
+                "Chroma",
+                &mut s.chroma_denoise,
+                0.0..=100.0,
+                25.0,
+                0,
+                "Smooths coloured grain and colour noise; luminance grain and detail are kept",
+                None,
             );
         }
     }

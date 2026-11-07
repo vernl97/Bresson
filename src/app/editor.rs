@@ -80,6 +80,11 @@ pub struct Editor {
     neg: Option<Negative>,
     neg_small: Option<Negative>,
     neg_key: Option<NegKey>,
+    /// The negative before chroma noise reduction (keyed by `neg_key`), so
+    /// the Chroma slider only has to filter it again.
+    neg_raw: Option<Negative>,
+    /// `neg_key` and the chroma noise reduction (tenths) `neg` was made with.
+    denoise_key: Option<(NegKey, i32)>,
     /// 1024 px copy of `src` (and the `src` it was made from) that the
     /// preview uses while the straighten angle is being dragged.
     src_low: Option<(Arc<SourceImage>, Arc<SourceImage>)>,
@@ -168,6 +173,8 @@ impl Default for Editor {
             neg: None,
             neg_small: None,
             neg_key: None,
+            neg_raw: None,
+            denoise_key: None,
             src_low: None,
             neg_pre: None,
             tex: None,
@@ -444,7 +451,7 @@ impl NlpApp {
             low,
             s.heal.clone(),
         );
-        if self.editor.neg_key.as_ref() != Some(&key) || self.editor.neg.is_none() {
+        if self.editor.neg_key.as_ref() != Some(&key) || self.editor.neg_raw.is_none() {
             let neg = if low {
                 let pre_key = (
                     key.0.clone(),
@@ -459,7 +466,7 @@ impl NlpApp {
                 if self.editor.neg_pre.as_ref().map(|(k, _)| k) != Some(&pre_key) {
                     let mut flat = s.clone();
                     flat.straighten = 0.0;
-                    let n = pipeline::prepare_negative(&prep_src, &flat, base);
+                    let n = pipeline::prepare_density(&prep_src, &flat, base);
                     self.editor.neg_pre = Some((pre_key, n));
                 }
                 let pre = &self.editor.neg_pre.as_ref().unwrap().1;
@@ -472,8 +479,16 @@ impl NlpApp {
                 }
             } else {
                 self.editor.neg_pre = None;
-                pipeline::prepare_negative(&prep_src, &s, base)
+                pipeline::prepare_density(&prep_src, &s, base)
             };
+            self.editor.neg_raw = Some(neg);
+            self.editor.neg_key = Some(key.clone());
+            self.editor.denoise_key = None;
+        }
+        let dkey = (key, (s.chroma_denoise * 10.0).round() as i32);
+        if self.editor.denoise_key.as_ref() != Some(&dkey) || self.editor.neg.is_none() {
+            let mut neg = self.editor.neg_raw.clone().unwrap();
+            pipeline::denoise_chroma(&mut neg, &prep_src, &s);
             let (d, w, h) = decode::downscale(&neg.data, neg.width, neg.height, 1024);
             self.editor.neg_small = Some(Negative {
                 width: w,
@@ -482,7 +497,7 @@ impl NlpApp {
             });
             self.editor.gpu_neg = self.gpu.then(|| gpu::NegData::new(&neg, !low));
             self.editor.neg = Some(neg);
-            self.editor.neg_key = Some(key);
+            self.editor.denoise_key = Some(dkey);
             self.editor.spot_map = None;
         }
         let full = self.editor.neg.as_ref().unwrap();

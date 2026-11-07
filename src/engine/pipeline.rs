@@ -24,7 +24,7 @@ const BASE_LEVEL: f32 = 0.97;
 /// colour error against them.
 const DENSITY_SATURATION: f32 = 0.85;
 /// Channel weights for monochrome density and for saturation in density.
-const DENSITY_WEIGHTS: [f32; 3] = [0.30, 0.55, 0.15];
+pub(crate) const DENSITY_WEIGHTS: [f32; 3] = [0.30, 0.55, 0.15];
 
 /// Residual unwanted absorption of C-41 dyes after the masking couplers, as
 /// a camera sees it: measured density per unit of dye (rows R/G/B channel,
@@ -271,8 +271,30 @@ pub fn detect_source(src: &SourceImage) -> super::settings::Source {
 
 /// Build the negative's density image from linear source pixels: flat
 /// field, healed spots, camera matrix, film base neutralisation, `log10`, crosstalk and
-/// calibration.
+/// calibration, then chroma noise reduction.
 pub fn prepare_negative(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Negative {
+    let mut neg = prepare_density(src, s, base);
+    denoise_chroma(&mut neg, src, s);
+    neg
+}
+
+/// The chroma noise reduction `prepare_negative` applies, for a negative
+/// prepared from `src` by [`prepare_density`].
+pub fn denoise_chroma(neg: &mut Negative, src: &SourceImage, s: &Settings) {
+    if s.is_monochrome() {
+        return;
+    }
+    let full = src.info.full_width.max(src.info.full_height);
+    let scale = if full == 0 {
+        1.0
+    } else {
+        (src.long_edge() as f32 / full as f32).min(1.0)
+    };
+    super::denoise::chroma(neg, s.chroma_denoise, scale);
+}
+
+/// [`prepare_negative`] without the chroma noise reduction.
+pub fn prepare_density(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Negative {
     let flat = s
         .flat_field
         .as_deref()
@@ -2143,10 +2165,14 @@ mod tests {
         .unwrap();
         let mut chart = negative(0.0);
         vignette(&mut chart, 0.35);
-        let without = chart_settings();
+        // Chroma noise reduction would smooth some of the falloff's cast too.
+        let without = Settings {
+            chroma_denoise: 0.0,
+            ..chart_settings()
+        };
         let with = Settings {
             flat_field: Some(flat_path.clone()),
-            ..chart_settings()
+            ..without.clone()
         };
         let run = |s: &Settings| {
             let a = analyse_chart(&chart, s);
