@@ -75,6 +75,8 @@ pub struct Editor {
     pub path: Option<PathBuf>,
     pub src: Option<Arc<SourceImage>>,
     pub loading: bool,
+    /// Why the preview couldn't be decoded; opening the frame again retries.
+    pub load_error: Option<String>,
     neg: Option<Negative>,
     neg_small: Option<Negative>,
     neg_key: Option<NegKey>,
@@ -162,6 +164,7 @@ impl Default for Editor {
             path: None,
             src: None,
             loading: false,
+            load_error: None,
             neg: None,
             neg_small: None,
             neg_key: None,
@@ -1457,6 +1460,21 @@ impl NlpApp {
     fn canvas(&mut self, ui: &mut egui::Ui, i: usize) {
         let avail = ui.max_rect();
         let Some([tw, th]) = self.editor.size else {
+            if let Some(e) = self.editor.load_error.clone() {
+                let mut retry = false;
+                ui.vertical_centered(|ui| {
+                    ui.add_space((avail.height() * 0.5 - 40.0).max(0.0));
+                    ui.label(RichText::new("Couldn't open this frame").color(theme::TEXT));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(e).small().color(theme::MUTED));
+                    ui.add_space(10.0);
+                    retry = ui.add(widgets::ghost("Try again")).clicked();
+                });
+                if retry {
+                    self.load_editor_image(i);
+                }
+                return;
+            }
             ui.centered_and_justified(|ui| {
                 ui.add(egui::Spinner::new().size(24.0).color(theme::MUTED));
             });

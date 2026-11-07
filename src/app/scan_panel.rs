@@ -53,6 +53,8 @@ pub struct ScanState {
     pub error: Option<String>,
     /// Frames saved since the panel opened.
     pub saved: usize,
+    /// The source asked for and not confirmed yet (see `set_scan_source`).
+    source_req: Option<String>,
 }
 
 impl ScanState {
@@ -123,7 +125,12 @@ impl NlpApp {
         self.scan_send(ScanCmd::Refresh);
     }
 
+    /// Open another scanner. Not while a command runs: the open would wait
+    /// behind it with the panel already cleared, hiding the running scan.
     pub fn open_scanner(&mut self, choice: ScannerChoice) {
+        if self.scan.busy {
+            return;
+        }
         self.scan.info = None;
         self.scan.prescan = None;
         self.scan.crops.clear();
@@ -134,14 +141,14 @@ impl NlpApp {
         self.scan_send(ScanCmd::Prescan);
     }
 
-    fn set_scan_source(&mut self, source: String) {
-        if let Some(info) = &self.scan.info {
-            self.defaults
-                .scan
-                .source
-                .insert(info.choice.key(), source.clone());
-            let _ = crate::engine::sidecar::save_defaults(&self.defaults);
+    /// Switch the flatbed's source. It is remembered for the scanner once the
+    /// scanner has switched (`ScanEvent::Opened`), so a source that fails isn't
+    /// tried again on every open.
+    pub fn set_scan_source(&mut self, source: String) {
+        if self.scan.busy {
+            return;
         }
+        self.scan.source_req = Some(source.clone());
         self.scan_send(ScanCmd::SetSource(source));
     }
 
@@ -210,8 +217,17 @@ impl NlpApp {
                         && Some(w) != info.source.as_ref()
                         && info.sources.contains(w)
                 });
+                // A source switch went through: remember it for this scanner.
+                if let Some(req) = s.source_req.take()
+                    && info.source.as_ref() == Some(&req)
+                    && self.defaults.scan.source.get(&info.choice.key()) != Some(&req)
+                {
+                    self.defaults.scan.source.insert(info.choice.key(), req);
+                    let _ = crate::engine::sidecar::save_defaults(&self.defaults);
+                }
                 s.info = Some(info);
                 if let Some(w) = switch {
+                    s.source_req = Some(w.clone());
                     self.scan_send(ScanCmd::SetSource(w));
                 }
             }
@@ -261,6 +277,14 @@ impl NlpApp {
                 s.busy = false;
                 s.pending = 0;
                 s.progress = None;
+                // A source that fails to switch isn't one to come back to on the next open.
+                if let (Some(req), Some(info)) = (s.source_req.take(), &s.info) {
+                    let key = info.choice.key();
+                    if self.defaults.scan.source.get(&key) == Some(&req) {
+                        self.defaults.scan.source.remove(&key);
+                        let _ = crate::engine::sidecar::save_defaults(&self.defaults);
+                    }
+                }
                 self.toast(m, true);
             }
             ScanEvent::Closed => {
@@ -369,19 +393,22 @@ impl NlpApp {
         };
         let mut picked = None;
         ui.horizontal(|ui| {
-            widgets::combo("scan_scanner")
-                .width(230.0)
-                .selected_text(text)
-                .show_ui(ui, |ui| {
-                    for d in &devices {
-                        if ui
-                            .selectable_label(current.as_ref() == Some(&d.choice), &d.label)
-                            .clicked()
-                        {
-                            picked = Some(d.choice.clone());
+            // Switching scanners mid-command would hide the running scan's Cancel.
+            ui.add_enabled_ui(!self.scan.busy, |ui| {
+                widgets::combo("scan_scanner")
+                    .width(230.0)
+                    .selected_text(text)
+                    .show_ui(ui, |ui| {
+                        for d in &devices {
+                            if ui
+                                .selectable_label(current.as_ref() == Some(&d.choice), &d.label)
+                                .clicked()
+                            {
+                                picked = Some(d.choice.clone());
+                            }
                         }
-                    }
-                });
+                    });
+            });
             if ui
                 .add_enabled(!self.scan.busy, widgets::ghost("Refresh"))
                 .on_hover_text("Look for connected scanners")
@@ -414,12 +441,15 @@ impl NlpApp {
             if info.sources.len() > 1 {
                 ui.label(RichText::new("Source").color(theme::MUTED));
                 let current = info.source.clone().unwrap_or_default();
-                widgets::combo("scan_source").selected_text(&current).show_ui(ui, |ui| {
-                    for s in &info.sources {
-                        if ui.selectable_label(*s == current, s).clicked() && *s != current {
-                            new_source = Some(s.clone());
+                // A source change would wait behind the running command and then reset the boxes.
+                ui.add_enabled_ui(!self.scan.busy, |ui| {
+                    widgets::combo("scan_source").selected_text(&current).show_ui(ui, |ui| {
+                        for s in &info.sources {
+                            if ui.selectable_label(*s == current, s).clicked() && *s != current {
+                                new_source = Some(s.clone());
+                            }
                         }
-                    }
+                    });
                 });
                 ui.end_row();
             }

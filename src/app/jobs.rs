@@ -1,5 +1,6 @@
 //! Background work (decoding, analysis, export) on the rayon pool.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,7 +38,7 @@ pub enum JobResult {
     },
     Converted {
         /// The frame geometry, for frames converted with auto-crop.
-        frames: Vec<(PathBuf, Arc<SourceImage>, Analysis, Option<Detected>)>,
+        frames: Vec<ConvertedFrame>,
         roll: Option<RollData>,
         errors: Vec<String>,
     },
@@ -420,12 +421,27 @@ pub struct ConvertItem {
     pub path: PathBuf,
     pub proxy: Option<Arc<SourceImage>>,
     pub settings: Settings,
+    /// The frame's `Frame::convert_ticket` when this conversion was asked
+    /// for; the result applies only while it is still the frame's ticket.
+    pub ticket: u64,
+}
+
+/// One frame of a finished conversion.
+pub struct ConvertedFrame {
+    pub path: PathBuf,
+    pub ticket: u64,
+    pub src: Arc<SourceImage>,
+    pub analysis: Analysis,
+    /// The frame geometry, for frames converted with auto-crop.
+    pub detected: Option<Detected>,
 }
 
 /// Analyse frames individually or as a roll. `use_exposure` matches the
 /// roll's frames by their EXIF exposure (`commonEV`).
 pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> JobResult {
     use rayon::prelude::*;
+    let tickets: HashMap<PathBuf, u64> = items.iter().map(|it| (it.path.clone(), it.ticket)).collect();
+    let ticket = |p: &PathBuf| tickets.get(p).copied().unwrap_or_default();
     let loaded: Vec<Result<(PathBuf, Arc<SourceImage>, Settings), String>> = items
         .into_par_iter()
         .map(|it| {
@@ -512,6 +528,7 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
             let items = ok
                 .into_iter()
                 .map(|(path, src, settings)| ConvertItem {
+                    ticket: ticket(&path),
                     path,
                     proxy: Some(src),
                     settings,
@@ -550,7 +567,13 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
         .into_iter()
         .zip(analyses)
         .zip(detected)
-        .map(|(((p, src, _), a), d)| (p, src, a, d))
+        .map(|(((path, src, _), analysis), detected)| ConvertedFrame {
+            ticket: ticket(&path),
+            path,
+            src,
+            analysis,
+            detected,
+        })
         .collect();
     JobResult::Converted {
         frames,

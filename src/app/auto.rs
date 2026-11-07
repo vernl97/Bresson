@@ -125,11 +125,7 @@ impl NlpApp {
                 let f = &mut self.frames[i];
                 f.sc.settings.auto_crop = true;
                 self.auto.in_flight.insert(f.path.clone());
-                ConvertItem {
-                    path: f.path.clone(),
-                    proxy: f.proxy(),
-                    settings: f.sc.settings.clone(),
-                }
+                self.convert_item(i)
             })
             .collect();
         self.convert_started(idx.len());
@@ -212,6 +208,9 @@ impl NlpApp {
             f.sc.roll = None;
             f.sc.settings.use_roll = false;
             f.auto_convert = true;
+            // A conversion still running used the old source; it is queued
+            // again when it comes back (`stale_conversion`).
+            f.convert_ticket = None;
             self.mark_changed(i);
             if self.frames[i].proxy().is_some() {
                 self.auto_queue(i);
@@ -220,6 +219,30 @@ impl NlpApp {
         self.auto.roll_pass = RollPass::Waiting;
         self.auto.exposure_note = None;
         self.editor.invalidate();
+    }
+
+    /// A conversion of frame `i` came back after something made it stale. If
+    /// no newer one is running, an automatic frame queues again; otherwise
+    /// its waiting exports have nothing left to wait for and are cancelled.
+    pub fn stale_conversion(&mut self, i: usize) {
+        let f = &self.frames[i];
+        if f.convert_ticket.is_some() || f.sc.is_converted() {
+            return;
+        }
+        self.auto_queue(i);
+        let path = self.frames[i].path.clone();
+        if self.auto.queue.contains(&path) {
+            return;
+        }
+        let before = self.auto.export_waiting.len();
+        self.auto.export_waiting.retain(|(p, _, _)| *p != path);
+        let dropped = before - self.auto.export_waiting.len();
+        if dropped > 0 {
+            self.frames[i].exporting = false;
+            self.export_done += dropped;
+            let name = self.frames[i].name.clone();
+            self.toast(format!("Cancelled the export of {name}: it is no longer converted"), true);
+        }
     }
 
     /// Start the exports whose frames are now converted.

@@ -64,6 +64,20 @@ pub struct Frame {
     pub auto_convert: bool,
     /// The thumbnail as the scanned negative (unconverted), made on demand.
     pub thumb_neg: Option<egui::TextureHandle>,
+    /// The conversion this frame waits for, if any (see [`ConvertTicket`]).
+    pub convert_ticket: Option<ConvertTicket>,
+}
+
+/// The latest conversion asked for a frame. A result carrying another
+/// ticket was superseded (a newer conversion, Unconvert, a new scan source)
+/// and is dropped, so it can't undo what happened since.
+#[derive(Clone, Copy, Debug)]
+pub struct ConvertTicket {
+    pub id: u64,
+    /// The geometry when the conversion was asked for: detected geometry
+    /// applies only if the frame still has it, so a crop made meanwhile stays.
+    pub crop: [f32; 4],
+    pub straighten: f32,
 }
 
 impl Frame {
@@ -359,6 +373,26 @@ impl NlpApp {
             source_auto,
             auto_convert,
             thumb_neg: None,
+            convert_ticket: None,
+        }
+    }
+
+    /// What a conversion of frame `i` needs, with a new ticket that makes any
+    /// conversion of it still running stale.
+    pub fn convert_item(&mut self, i: usize) -> jobs::ConvertItem {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let f = &mut self.frames[i];
+        f.convert_ticket = Some(ConvertTicket {
+            id,
+            crop: f.sc.settings.crop,
+            straighten: f.sc.settings.straighten,
+        });
+        jobs::ConvertItem {
+            path: f.path.clone(),
+            proxy: f.proxy(),
+            settings: f.sc.settings.clone(),
+            ticket: id,
         }
     }
 
@@ -551,14 +585,7 @@ impl NlpApp {
             return;
         }
         self.auto_release(&idx);
-        let items = idx
-            .iter()
-            .map(|&i| jobs::ConvertItem {
-                path: self.frames[i].path.clone(),
-                proxy: self.frames[i].proxy(),
-                settings: self.frames[i].sc.settings.clone(),
-            })
-            .collect();
+        let items: Vec<_> = idx.iter().map(|&i| self.convert_item(i)).collect();
         self.convert_started(idx.len());
         self.jobs.spawn(move || jobs::convert(items, as_roll, true));
     }
@@ -567,6 +594,8 @@ impl NlpApp {
         self.auto_release(idx);
         for &i in idx {
             let f = &mut self.frames[i];
+            // A conversion still running would convert it again.
+            f.convert_ticket = None;
             f.sc.analysis = None;
             f.sc.roll = None;
             f.sc.settings.use_roll = false;
@@ -1111,6 +1140,88 @@ impl NlpApp {
 
     // ---- job results ------------------------------------------------------------
 
+    /// A conversion came back. Frames whose ticket has moved on since it was
+    /// asked for keep what happened in the meantime; see [`ConvertTicket`].
+    fn on_converted(
+        &mut self,
+        frames: Vec<jobs::ConvertedFrame>,
+        roll: Option<sidecar::RollData>,
+        errors: Vec<String>,
+    ) {
+        // A conversion of a roll that has since closed: its frames are
+        // gone, and it is not part of this roll's progress.
+        if !frames.is_empty() && frames.iter().all(|f| self.index_of(&f.path).is_none()) {
+            return;
+        }
+        for e in &errors {
+            self.toast(e.clone(), true);
+        }
+        self.auto.convert_done += frames.len() + errors.len();
+        let paths: Vec<PathBuf> = frames.iter().map(|f| f.path.clone()).collect();
+        let auto = self.auto_converted(&paths, roll.is_some());
+        let mut n = 0;
+        for cf in frames {
+            let Some(i) = self.index_of(&cf.path) else {
+                continue;
+            };
+            let f = &mut self.frames[i];
+            if !matches!(f.proxy, ProxyState::Ready(_)) {
+                let src = cf.src;
+                let (d, w, h) = decode::downscale(&src.data, src.width, src.height, THUMB_SIZE);
+                f.thumb_src = Some(SourceImage {
+                    data: d,
+                    width: w,
+                    height: h,
+                    ..(*src).clone()
+                });
+                f.proxy = ProxyState::Ready(src);
+            }
+            let ticket = match f.convert_ticket {
+                Some(t) if t.id == cf.ticket => t,
+                _ => {
+                    self.stale_conversion(i);
+                    continue;
+                }
+            };
+            f.convert_ticket = None;
+            let s = &mut f.sc.settings;
+            if let Some(d) = cf.detected
+                && (s.crop, s.straighten) == (ticket.crop, ticket.straighten)
+                && (d.crop, d.straighten) != (s.crop, s.straighten)
+            {
+                (s.crop, s.straighten) = (d.crop, d.straighten);
+                s.crop_aspect = CropAspect::Free;
+            }
+            f.sc.analysis = Some(cf.analysis);
+            f.sc.roll = roll.clone();
+            f.sc.settings.use_roll = roll.is_some();
+            if f.sc.settings.wb_mode != WbMode::Custom {
+                f.apply_wb_mode();
+            }
+            self.mark_changed(i);
+            self.save_frame(i);
+            n += 1;
+        }
+        if let Some(r) = &roll
+            && !r.excluded.is_empty()
+        {
+            self.toast(
+                format!(
+                    "Roll: excluded outlier frames from the roll balance: {}",
+                    r.excluded.join(", ")
+                ),
+                false,
+            );
+        }
+        if n > 0 && !auto {
+            self.toast(format!("Converted {n} frame(s)"), false);
+        } else if n > 0 && roll.is_some() {
+            self.toast(format!("Balanced {n} frames as a roll"), false);
+        }
+        self.editor.invalidate();
+        self.flush_waiting_exports();
+    }
+
     fn poll_jobs(&mut self) {
         while let Ok(r) = self.jobs.rx.try_recv() {
             match r {
@@ -1177,7 +1288,10 @@ impl NlpApp {
                                 self.editor.src = Some(src);
                                 self.editor.invalidate();
                             }
-                            Err(e) => self.toast(e, true),
+                            Err(e) => {
+                                self.editor.load_error = Some(e.clone());
+                                self.toast(e, true);
+                            }
                         }
                     }
                 }
@@ -1186,65 +1300,7 @@ impl NlpApp {
                     roll,
                     errors,
                 } => {
-                    // A conversion of a roll that has since closed: its frames are
-                    // gone, and it is not part of this roll's progress.
-                    if !frames.is_empty() && frames.iter().all(|f| self.index_of(&f.0).is_none()) {
-                        continue;
-                    }
-                    for e in &errors {
-                        self.toast(e.clone(), true);
-                    }
-                    let n = frames.len();
-                    self.auto.convert_done += n + errors.len();
-                    let paths: Vec<PathBuf> = frames.iter().map(|f| f.0.clone()).collect();
-                    let auto = self.auto_converted(&paths, roll.is_some());
-                    for (path, src, a, detected) in frames {
-                        let Some(i) = self.index_of(&path) else {
-                            continue;
-                        };
-                        let f = &mut self.frames[i];
-                        if !matches!(f.proxy, ProxyState::Ready(_)) {
-                            let (d, w, h) =
-                                decode::downscale(&src.data, src.width, src.height, THUMB_SIZE);
-                            f.thumb_src = Some(SourceImage {
-                                data: d,
-                                width: w,
-                                height: h,
-                                ..(*src).clone()
-                            });
-                            f.proxy = ProxyState::Ready(src);
-                        }
-                        if let Some(d) = detected {
-                            (f.sc.settings.crop, f.sc.settings.straighten) = (d.crop, d.straighten);
-                            f.sc.settings.crop_aspect = CropAspect::Free;
-                        }
-                        f.sc.analysis = Some(a);
-                        f.sc.roll = roll.clone();
-                        f.sc.settings.use_roll = roll.is_some();
-                        if f.sc.settings.wb_mode != WbMode::Custom {
-                            f.apply_wb_mode();
-                        }
-                        self.mark_changed(i);
-                        self.save_frame(i);
-                    }
-                    if let Some(r) = &roll {
-                        if !r.excluded.is_empty() {
-                            self.toast(
-                                format!(
-                                    "Roll: excluded outlier frames from the roll balance: {}",
-                                    r.excluded.join(", ")
-                                ),
-                                false,
-                            );
-                        }
-                    }
-                    if !auto {
-                        self.toast(format!("Converted {n} frame(s)"), false);
-                    } else if roll.is_some() {
-                        self.toast(format!("Balanced {n} frames as a roll"), false);
-                    }
-                    self.editor.invalidate();
-                    self.flush_waiting_exports();
+                    self.on_converted(frames, roll, errors);
                 }
                 JobResult::Exported { path, result } => {
                     self.export_done += 1;
@@ -1330,16 +1386,26 @@ impl NlpApp {
         let path = self.frames[i].path.clone();
         if self.editor.path.as_ref() != Some(&path) {
             self.editor.load(&path, self.frames[i].sc.settings.clone());
-            let p = path.clone();
-            self.jobs.spawn(move || {
-                let result = jobs::load_editor(&p)
-                    .map(Arc::new)
-                    .map_err(|e| format!("{e:#}"));
-                JobResult::Editor { path: p, result }
-            });
+            self.load_editor_image(i);
+        } else if self.editor.load_error.is_some() {
+            // It failed last time (a network folder that was away, say): try again.
+            self.load_editor_image(i);
         }
         self.request_proxy(i);
         self.view = View::Editor;
+    }
+
+    /// Decode frame `i`'s editor preview in the background.
+    pub fn load_editor_image(&mut self, i: usize) {
+        self.editor.loading = true;
+        self.editor.load_error = None;
+        let p = self.frames[i].path.clone();
+        self.jobs.spawn(move || {
+            let result = jobs::load_editor(&p)
+                .map(Arc::new)
+                .map_err(|e| format!("{e:#}"));
+            JobResult::Editor { path: p, result }
+        });
     }
 
     pub fn choose_folder(&mut self) {
@@ -1542,6 +1608,7 @@ mod tests {
             source_auto: false,
             auto_convert: false,
             thumb_neg: None,
+            convert_ticket: None,
         };
 
         let dummy_src = SourceImage {
@@ -2547,6 +2614,70 @@ mod ui_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Picking another scanner or source while a scan runs does nothing: the
+    /// scan keeps its panel (and its Cancel) and finishes on the same scanner.
+    #[test]
+    fn scan_panel_ignores_scanner_switch_mid_scan() {
+        let (dir, _, mut h) = scan_roll("switch");
+        h.state_mut()
+            .open_scanner(scanner::ScannerChoice::SimulatedFlatbed);
+        wait_scan(&mut h, |a| a.scan.info.is_some());
+        h.state_mut().prescan();
+        wait_scan(&mut h, |_| true);
+        let boxes = vec![[0.3, 0.05, 0.7, 0.2], [0.3, 0.22, 0.7, 0.37]];
+        {
+            let app = h.state_mut();
+            app.defaults.scan.dpi = 300;
+            app.scan.crops = boxes.clone();
+        }
+        let before = h.state().scan.info.clone().unwrap();
+        h.state_mut().scan_frames();
+        assert!(h.state().scan.busy);
+        h.state_mut()
+            .open_scanner(scanner::ScannerChoice::Simulated(
+                "plustek-opticfilm-8200i-se".into(),
+            ));
+        h.state_mut().set_scan_source("Flatbed".into());
+        let info = h.state().scan.info.clone();
+        assert!(info.is_some(), "the running scan keeps its panel");
+        assert_eq!(h.state().scan.crops, boxes);
+        wait_scan(&mut h, |a| a.scan.saved == 2);
+        let info = h.state().scan.info.clone().unwrap();
+        assert_eq!((info.choice, info.source), (before.choice, before.source));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A flatbed source is remembered once the scanner has switched to it, and
+    /// one that fails to switch is not.
+    #[test]
+    fn scan_source_is_remembered_only_when_it_works() {
+        let (dir, _, mut h) = scan_roll("source");
+        h.state_mut()
+            .open_scanner(scanner::ScannerChoice::SimulatedFlatbed);
+        wait_scan(&mut h, |a| a.scan.info.is_some());
+        let key = h.state().scan.info.as_ref().unwrap().choice.key();
+
+        h.state_mut().set_scan_source("Flatbed".into());
+        wait_scan(&mut h, |a| {
+            a.scan.info.as_ref().and_then(|i| i.source.as_deref()) == Some("Flatbed")
+        });
+        assert_eq!(h.state().defaults.scan.source.get(&key).map(String::as_str), Some("Flatbed"));
+
+        h.state_mut().set_scan_source("Bogus".into());
+        let t0 = std::time::Instant::now();
+        while h.state().scan.busy && t0.elapsed().as_secs() < 30 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(h.state().scan.error.is_some(), "the bogus source fails");
+        assert_eq!(
+            h.state().defaults.scan.source.get(&key).map(String::as_str),
+            Some("Flatbed"),
+            "the failed source isn't remembered"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A new folder converts itself: each frame as it loads, then the roll.
     #[test]
     #[ignore]
@@ -2894,6 +3025,185 @@ mod ui_tests {
         assert_eq!(quality_clamped, 100);
         let quality_low = 0u8.clamp(1, 100);
         assert_eq!(quality_low, 1);
+    }
+
+    fn bare_app() -> NlpApp {
+        NlpApp {
+            view: View::Folder,
+            folder: None,
+            frames: Vec::new(),
+            selected: BTreeSet::new(),
+            anchor: None,
+            active: None,
+            jobs: Jobs::new(egui::Context::default()),
+            defaults: Default::default(),
+            clipboard: None,
+            editor: editor::Editor::default(),
+            toasts: Vec::new(),
+            shortcuts_open: false,
+            export_total: 0,
+            export_done: 0,
+            thumb_size: 180.0,
+            grid: Default::default(),
+            time: 0.0,
+            single_mode: false,
+            export_targets: None,
+            convert_dialog: None,
+            auto: Default::default(),
+            history: Default::default(),
+            scan: Default::default(),
+            exposure_prompt: None,
+            preset_draft: None,
+            roll: Default::default(),
+            gpu: false,
+        }
+    }
+
+    /// A one-frame roll with its proxy loaded, ready to convert.
+    fn roll_of_one(tag: &str) -> (PathBuf, NlpApp) {
+        let dir = std::env::temp_dir().join(format!("nlp_stale_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("a.tif");
+        crate::cli::synth_negative(&img, 0.0).unwrap();
+        let mut app = bare_app();
+        app.load_frames(vec![img.clone()], &dir);
+        app.frames[0].proxy = ProxyState::Ready(Arc::new(jobs::load_proxy(&img).unwrap()));
+        (dir, app)
+    }
+
+    /// Run a conversion to the end and hand its result to the app.
+    fn finish_convert(app: &mut NlpApp, items: Vec<jobs::ConvertItem>) {
+        match jobs::convert(items, false, true) {
+            JobResult::Converted {
+                frames,
+                roll,
+                errors,
+            } => app.on_converted(frames, roll, errors),
+            _ => panic!("expected a conversion result"),
+        }
+    }
+
+    /// Handle job results until the editor's preview load has come back.
+    fn wait_editor(app: &mut NlpApp) {
+        let t0 = std::time::Instant::now();
+        while app.editor.loading && t0.elapsed().as_secs() < 30 {
+            app.poll_jobs();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!app.editor.loading, "editor load never came back");
+    }
+
+    /// A frame the editor can't read says so, and opening it again retries.
+    #[test]
+    fn editor_retries_a_failed_load() {
+        let dir = std::env::temp_dir().join(format!("nlp_editor_retry_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("a.tif");
+        std::fs::write(&img, b"not a tiff").unwrap();
+        let mut app = bare_app();
+        app.load_frames(vec![img.clone()], &dir);
+        app.open_editor(0);
+        wait_editor(&mut app);
+        assert!(app.editor.src.is_none() && app.editor.load_error.is_some());
+
+        // The file is readable now (a network folder came back): back to the
+        // grid and in again loads it.
+        crate::cli::synth_negative(&img, 0.0).unwrap();
+        app.view = View::Folder;
+        app.open_editor(0);
+        assert!(app.editor.loading, "opening the frame again retries");
+        wait_editor(&mut app);
+        assert!(app.editor.src.is_some() && app.editor.load_error.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A crop made while the frame converts stays, and so does its aspect.
+    #[test]
+    fn conversion_result_keeps_a_crop_made_meanwhile() {
+        let (dir, mut app) = roll_of_one("crop");
+        app.frames[0].sc.settings.auto_crop = true;
+        let item = app.convert_item(0);
+        let s = &mut app.frames[0].sc.settings;
+        s.crop = [5.0, 6.0, 7.0, 8.0];
+        s.straighten = 1.5;
+        s.crop_aspect = CropAspect::TwoThree;
+        finish_convert(&mut app, vec![item]);
+        let f = &app.frames[0];
+        assert!(f.sc.is_converted());
+        assert_eq!((f.sc.settings.crop, f.sc.settings.straighten), ([5.0, 6.0, 7.0, 8.0], 1.5));
+        assert_eq!(f.sc.settings.crop_aspect, CropAspect::TwoThree);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An automatic conversion of a frame that is already cropped (a roll pass
+    /// run again) leaves its aspect lock alone.
+    #[test]
+    fn conversion_keeps_the_aspect_of_a_cropped_frame() {
+        let (dir, mut app) = roll_of_one("aspect");
+        let s = &mut app.frames[0].sc.settings;
+        s.auto_crop = true;
+        s.crop = [4.0; 4];
+        s.crop_aspect = CropAspect::TwoThree;
+        let item = app.convert_item(0);
+        finish_convert(&mut app, vec![item]);
+        let f = &app.frames[0];
+        assert!(f.sc.is_converted());
+        assert_eq!(f.sc.settings.crop, [4.0; 4]);
+        assert_eq!(f.sc.settings.crop_aspect, CropAspect::TwoThree);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unconvert while a conversion runs: the frame stays unconverted, and an
+    /// export waiting for it is cancelled rather than left waiting.
+    #[test]
+    fn unconvert_during_a_conversion_sticks() {
+        let (dir, mut app) = roll_of_one("unconvert");
+        let item = app.convert_item(0);
+        app.frames[0].exporting = true;
+        app.export_total = 1;
+        let ex = app.defaults.export.clone();
+        app.auto.export_waiting.push((app.frames[0].path.clone(), dir.join("out.jpg"), ex));
+        app.unconvert(&[0]);
+        finish_convert(&mut app, vec![item]);
+        let f = &app.frames[0];
+        assert!(!f.sc.is_converted(), "the old conversion came back");
+        assert!(!f.exporting && app.auto.export_waiting.is_empty());
+        assert_eq!(app.export_done, 1, "the export is counted out");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A newer conversion wins over an older one that finishes after it.
+    #[test]
+    fn older_conversion_does_not_overwrite_a_newer_one() {
+        let (dir, mut app) = roll_of_one("newer");
+        let old = app.convert_item(0);
+        app.frames[0].sc.settings.border_buffer += 5.0;
+        let new = app.convert_item(0);
+        let key = app.frames[0].sc.settings.analysis_key();
+        finish_convert(&mut app, vec![new]);
+        finish_convert(&mut app, vec![old]);
+        let a = app.frames[0].sc.analysis.as_ref().unwrap();
+        assert!(a.key == key, "the newer analysis stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Changing the roll's source while an automatic conversion runs: its
+    /// result is dropped and the frame queues again with the new source.
+    #[test]
+    fn source_change_during_auto_conversion_requeues() {
+        let (dir, mut app) = roll_of_one("source");
+        app.frames[0].auto_convert = true;
+        let path = app.frames[0].path.clone();
+        app.auto.in_flight.insert(path.clone());
+        let item = app.convert_item(0);
+        app.set_roll_source(crate::engine::settings::Source::LinearScan);
+        assert!(app.auto.queue.is_empty(), "still in flight");
+        finish_convert(&mut app, vec![item]);
+        assert!(!app.frames[0].sc.is_converted(), "old-source analysis dropped");
+        assert_eq!(app.auto.queue, vec![path]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
