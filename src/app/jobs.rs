@@ -270,14 +270,13 @@ fn is_network_path(p: &Path) -> bool {
 /// Load the analysis/thumbnail proxy, using the disk cache when possible.
 pub fn load_proxy(path: &Path) -> anyhow::Result<SourceImage> {
     let cache = sidecar::proxy_cache_path(path);
-    if let Some(c) = &cache {
-        if let Some(img) = read_cache(c) {
-            return Ok(img);
-        }
+    if let Some(img) = cache.as_deref().and_then(read_cache_hit) {
+        return Ok(img);
     }
     let img = decode::load(path, Some(PROXY_SIZE))?;
     if let Some(c) = &cache {
         write_cache(c, &img);
+        trim_cache(c.parent(), sidecar::PROXY_EXT, CACHE_CAP);
     }
     Ok(img)
 }
@@ -304,36 +303,60 @@ fn editor_cache_path(image: &Path) -> Option<PathBuf> {
 /// reopening a frame on a network drive does not read the whole file again.
 pub fn load_editor(path: &Path) -> anyhow::Result<SourceImage> {
     let cache = editor_cache_path(path);
-    if let Some(img) = cache.as_deref().and_then(read_cache) {
+    if let Some(img) = cache.as_deref().and_then(read_cache_hit) {
         return Ok(img);
     }
     let img = decode::load(path, Some(EDITOR_SIZE))?;
     if let Some(c) = &cache {
         write_cache(c, &img);
-        trim_editor_cache(c.parent());
+        trim_cache(c.parent(), "ed", CACHE_CAP);
     }
     Ok(img)
 }
 
-/// Keep the editor cache (about 32 MB a frame) under a size cap, dropping
-/// the least recently written files first.
-fn trim_editor_cache(dir: Option<&Path>) {
-    const CAP: u64 = 2 << 30;
+/// Size cap for each kind of file in the proxy cache: analysis proxies
+/// (about 8 MB a frame) and editor previews (about 32 MB a frame).
+const CACHE_CAP: u64 = 2 << 30;
+
+/// Read a cache file and mark it as used, so trimming drops the least
+/// recently used files rather than the least recently written.
+fn read_cache_hit(p: &Path) -> Option<SourceImage> {
+    let img = read_cache(p)?;
+    if let Ok(f) = std::fs::File::options().write(true).open(p) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+    Some(img)
+}
+
+/// Keep the files with extension `ext` in the cache `dir` under `cap` bytes,
+/// dropping the least recently used first. Also sweeps what earlier versions
+/// left there (proxies named `.json`, grid thumbnails, which now live in each
+/// roll's `NLP/`) and temporary files of writes that never finished.
+fn trim_cache(dir: Option<&Path>, ext: &str, cap: u64) {
     let Some(rd) = dir.and_then(|d| std::fs::read_dir(d).ok()) else {
         return;
     };
-    let mut files: Vec<_> = rd
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|x| x == "ed"))
-        .filter_map(|e| {
-            let m = e.metadata().ok()?;
-            Some((m.modified().ok()?, m.len(), e.path()))
-        })
-        .collect();
+    let now = std::time::SystemTime::now();
+    let mut files = Vec::new();
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        let Some(x) = p.extension().and_then(|x| x.to_str()) else {
+            continue;
+        };
+        let Ok(m) = e.metadata() else { continue };
+        let Ok(modified) = m.modified() else { continue };
+        let stale_tmp = x == "tmp"
+            && now.duration_since(modified).is_ok_and(|d| d.as_secs() > 3600);
+        if x == "json" || x == "thumb" || stale_tmp {
+            let _ = std::fs::remove_file(&p);
+        } else if x == ext {
+            files.push((modified, m.len(), p));
+        }
+    }
     let mut total: u64 = files.iter().map(|f| f.1).sum();
     files.sort();
     for (_, len, p) in files {
-        if total <= CAP {
+        if total <= cap {
             break;
         }
         if std::fs::remove_file(p).is_ok() {
@@ -527,5 +550,52 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
         frames,
         roll,
         errors,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn file(dir: &Path, name: &str, len: usize, age_secs: u64) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, vec![0u8; len]).unwrap();
+        let f = std::fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(age_secs)).unwrap();
+        p
+    }
+
+    #[test]
+    fn cache_trim_drops_least_recently_used_and_legacy_files() {
+        let dir = std::env::temp_dir().join(format!("nlp-cache-trim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let oldest = file(&dir, "a.prx", 100, 400);
+        let old = file(&dir, "b.prx", 100, 300);
+        let used = file(&dir, "c.prx", 100, 500);
+        let new = file(&dir, "d.prx", 100, 10);
+        let editor = file(&dir, "a.ed", 1000, 1000);
+        let legacy = file(&dir, "e.json", 100, 10);
+        let thumb = file(&dir, "f.thumb", 100, 10);
+        let stale_tmp = file(&dir, "g.prx.tmp", 100, 7200);
+        let fresh_tmp = file(&dir, "h.prx.tmp", 100, 10);
+
+        // A cache hit marks the oldest file as just used (it is not a valid
+        // proxy, so touch it the way `read_cache_hit` does).
+        std::fs::File::options()
+            .write(true)
+            .open(&used)
+            .unwrap()
+            .set_modified(SystemTime::now())
+            .unwrap();
+
+        trim_cache(Some(&dir), "prx", 250);
+        assert!(!oldest.exists() && !old.exists());
+        assert!(used.exists() && new.exists());
+        assert!(editor.exists(), "other kinds are trimmed by their own cap");
+        assert!(!legacy.exists() && !thumb.exists() && !stale_tmp.exists());
+        assert!(fresh_tmp.exists(), "a write in progress is left alone");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

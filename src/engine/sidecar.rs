@@ -370,13 +370,17 @@ pub fn save_defaults(d: &Defaults) -> Result<()> {
     Ok(())
 }
 
+/// Extension of the cached analysis proxies (raw f32 pixels behind a short
+/// header; earlier versions named them `.json`).
+pub const PROXY_EXT: &str = "prx";
+
 /// Disk cache for decoded analysis proxies (keyed by decoder version, path,
 /// size and mtime).
 pub fn proxy_cache_path(image: &Path) -> Option<PathBuf> {
     let key = cache_key(image)?;
     let dir = dirs::cache_dir()?.join("nlp-studio").join("proxies");
     std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join(format!("{key:016x}.json")))
+    Some(dir.join(format!("{key:016x}.{PROXY_EXT}")))
 }
 
 fn cache_key(image: &Path) -> Option<u64> {

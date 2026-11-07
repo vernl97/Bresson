@@ -74,7 +74,7 @@ Persistence (`sidecar.rs`):
 - `NLP/roll.json` holds the roll info (`RollInfo`: name, date, film metadata, notes). It is asked for the first time a folder is opened (`app/roll.rs`), and frames without their own film details inherit it.
 - App defaults, last folder and the Projects list (`projects`): `dirs::config_dir()/nlp-studio/defaults.json`. `Defaults.scan` keeps the Scan panel's choices (resolution, IR, multi-exposure, passes, and per scanner the flatbed source and the gamma-encoded switch).
 - Scans: `scan_NNN.dng` (or `.tif` for gamma-encoded flatbeds) in the roll folder, OpticFilm IR planes as `NLP/scan_NNN.ir.tif`. The OpticFilm calibration cache is the driver's: `dirs::cache_dir()/opticfilm/calib_v2.json`, in pyopticfilm's format.
-- Decoded proxy cache: `dirs::cache_dir()/nlp-studio/proxies/`, keyed by path, size and mtime.
+- Decoded proxy cache: `dirs::cache_dir()/nlp-studio/proxies/`, keyed by path, size and mtime: analysis proxies (`.prx`) and editor previews (`.ed`), each kept under 2 GB, least recently used dropped first (`jobs::trim_cache`, which also sweeps files left by earlier versions).
 
 New `Settings` fields need `#[serde(default)]` compatibility so existing sidecars still load.
 
