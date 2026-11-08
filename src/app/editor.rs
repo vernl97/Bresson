@@ -9,7 +9,7 @@ use std::sync::Arc;
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use super::widgets::{self, Icon, icon_button, icon_button_tinted, pill, theme};
-use super::{NlpApp, View, gpu, to_color_image};
+use super::{NlpApp, ProxyState, View, gpu, to_color_image};
 use crate::engine::decode::{self, SourceImage};
 use crate::engine::pipeline::{self, Negative, Renderer};
 use crate::engine::settings::*;
@@ -86,10 +86,9 @@ const ZOOM_ANIM_SECS: f64 = 0.25;
 
 pub struct Editor {
     pub path: Option<PathBuf>,
-    pub src: Option<Arc<SourceImage>>,
-    pub loading: bool,
-    /// Why the preview couldn't be decoded; opening the frame again retries.
-    pub load_error: Option<String>,
+    /// The decoded preview of `path`: loading, ready, or why it couldn't be
+    /// decoded (opening the frame again retries).
+    pub image: ProxyState,
     neg: Option<Negative>,
     neg_small: Option<Negative>,
     neg_key: Option<NegKey>,
@@ -116,11 +115,12 @@ pub struct Editor {
     pub before: bool,
     color_tab: ColorTab,
     hist_view: HistView,
-    film_open: bool,
+    pub(super) film_open: bool,
     /// Counts the photos opened in this session: the sidebar's section ids
     /// include it, so each photo starts with its default sections.
     epoch: u32,
-    pub(super) pick: Option<Pick>,
+    /// The tool that has the canvas (see [`Tool`]).
+    tool: Tool,
     committed: Option<Settings>,
     hist: [[u32; 256]; 3],
     /// The histogram is not following the preview (angle drag in progress).
@@ -129,14 +129,9 @@ pub struct Editor {
     /// Display scale (screen points per preview pixel); `None` = fit.
     zoom: Option<f32>,
     pan: egui::Vec2,
-    pub(super) crop: Option<CropEdit>,
     crop_grid: CropGrid,
-    /// The spot healing tool is on; it stays on from frame to frame.
-    pub(super) heal: Option<HealEdit>,
     /// What Visualize Spots shows of the current negative.
     spot_map: Option<SpotMap>,
-    /// The dodge & burn brush is on; it stays on from frame to frame.
-    pub(super) burn: Option<BurnEdit>,
     /// The brush's Show Overlay picture of the current map.
     burn_tex: Option<egui::TextureHandle>,
     /// The strokes the negatives' dodge & burn maps were made from.
@@ -144,15 +139,12 @@ pub struct Editor {
     gpu_local: Option<Arc<gpu::LocalData>>,
     /// The Finishing section, across frames (section states reset per frame).
     finishing_open: bool,
-    pub export_open: bool,
     zoom_req: Option<ZoomReq>,
     /// The frame edited last and its settings, and the edit before that on a
     /// different frame (what "Previous" applies). Kept across frames.
     last_edit: Option<(PathBuf, Settings)>,
     prev_edit: Option<Settings>,
     zoom_anim: Option<ZoomAnim>,
-    /// The Border buffer slider is held: outline the analysis area.
-    border_preview: bool,
     /// The rendered preview (display sRGB, 0..1) and its size, for the
     /// pixel readout and clipping view (a 1024 px render when the preview
     /// is drawn on the GPU).
@@ -171,14 +163,125 @@ pub struct Editor {
     pub filmstrip: bool,
 }
 
+/// The tool that has the canvas. The eyedropper, crop, heal and dodge & burn
+/// each take over the canvas, so one is on at a time.
+#[derive(Clone, Default)]
+pub(in crate::app) enum Tool {
+    #[default]
+    None,
+    Pick(Pick),
+    /// Crop & straighten, its edit pending until Close, Done or Enter.
+    Crop(CropEdit),
+    /// Spot healing; it stays on from frame to frame.
+    Heal(HealEdit),
+    /// The dodge & burn brush; it stays on from frame to frame.
+    Burn(BurnEdit),
+}
+
 impl Editor {
     /// Test hook: adjust the pending crop.
     #[cfg(test)]
     pub fn set_pending_crop(&mut self, insets: [f32; 4], angle: f32) {
-        if let Some(c) = &mut self.crop {
+        if let Some(c) = self.crop_mut() {
             c.insets = insets;
             c.angle = angle;
             self.dirty = true;
+        }
+    }
+
+    /// The decoded preview, once it has arrived.
+    pub fn src(&self) -> Option<&Arc<SourceImage>> {
+        match &self.image {
+            ProxyState::Ready(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn is_loading(&self) -> bool {
+        matches!(self.image, ProxyState::Loading)
+    }
+
+    pub fn load_error(&self) -> Option<&str> {
+        match &self.image {
+            ProxyState::Failed(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    pub(in crate::app) fn pick(&self) -> Option<Pick> {
+        match self.tool {
+            Tool::Pick(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub(in crate::app) fn crop(&self) -> Option<&CropEdit> {
+        match &self.tool {
+            Tool::Crop(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub(in crate::app) fn crop_mut(&mut self) -> Option<&mut CropEdit> {
+        match &mut self.tool {
+            Tool::Crop(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub(in crate::app) fn heal(&self) -> Option<&HealEdit> {
+        match &self.tool {
+            Tool::Heal(h) => Some(h),
+            _ => None,
+        }
+    }
+
+    pub(in crate::app) fn heal_mut(&mut self) -> Option<&mut HealEdit> {
+        match &mut self.tool {
+            Tool::Heal(h) => Some(h),
+            _ => None,
+        }
+    }
+
+    pub(in crate::app) fn burn(&self) -> Option<&BurnEdit> {
+        match &self.tool {
+            Tool::Burn(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    pub(in crate::app) fn burn_mut(&mut self) -> Option<&mut BurnEdit> {
+        match &mut self.tool {
+            Tool::Burn(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Switch tools. Leaving dodge & burn redraws the preview, which showed
+    /// its stroke in progress.
+    pub(in crate::app) fn set_tool(&mut self, tool: Tool) {
+        if matches!(self.tool, Tool::Burn(_)) {
+            self.dirty = true;
+        }
+        self.tool = tool;
+    }
+
+    /// Close whatever tool is on.
+    pub(in crate::app) fn close_tool(&mut self) {
+        self.set_tool(Tool::None);
+    }
+
+    /// Store a tool's state back after its panel, bar or overlay worked on a
+    /// copy; `open == false` closes it. Nothing happens if that UI switched to
+    /// another tool meanwhile, so it can't bring the old one back.
+    pub(in crate::app) fn put_back(&mut self, tool: Tool, open: bool) {
+        if std::mem::discriminant(&self.tool) != std::mem::discriminant(&tool) {
+            return;
+        }
+        if open {
+            self.tool = tool;
+        } else {
+            self.close_tool();
         }
     }
 }
@@ -187,9 +290,7 @@ impl Default for Editor {
     fn default() -> Self {
         Self {
             path: None,
-            src: None,
-            loading: false,
-            load_error: None,
+            image: ProxyState::NotLoaded,
             neg: None,
             neg_small: None,
             neg_key: None,
@@ -208,28 +309,23 @@ impl Default for Editor {
             hist_view: HistView::default(),
             film_open: false,
             epoch: 0,
-            pick: None,
+            tool: Tool::None,
             committed: None,
             hist: [[0; 256]; 3],
             hist_frozen: false,
             curves: Vec::new(),
             zoom: None,
             pan: egui::Vec2::ZERO,
-            crop: None,
             crop_grid: CropGrid::default(),
-            heal: None,
-            burn: None,
             burn_tex: None,
             local_key: None,
             gpu_local: None,
             spot_map: None,
             finishing_open: false,
-            export_open: false,
             zoom_req: None,
             last_edit: None,
             prev_edit: None,
             zoom_anim: None,
-            border_preview: false,
             px: Vec::new(),
             px_size: [0, 0],
             clip_view: false,
@@ -263,18 +359,22 @@ impl Editor {
             self.epoch + 1,
         );
         let edits = (self.last_edit.take(), self.prev_edit.take());
-        let heal = self.heal.map(HealEdit::for_next_frame);
-        let burn = self.burn.take().map(BurnEdit::for_next_frame);
+        // Heal and dodge & burn stay on; the eyedropper and a pending crop
+        // belong to the frame left.
+        let tool = match std::mem::take(&mut self.tool) {
+            Tool::Heal(h) => Tool::Heal(h.for_next_frame()),
+            Tool::Burn(b) => Tool::Burn(b.for_next_frame()),
+            _ => Tool::None,
+        };
         let crop_grid = self.crop_grid;
         *self = Editor {
             last_edit: edits.0,
             prev_edit: edits.1,
             path: Some(path.to_path_buf()),
-            loading: true,
+            image: ProxyState::Loading,
             committed: Some(settings),
             epoch,
-            heal,
-            burn,
+            tool,
             crop_grid,
             ..Default::default()
         };
@@ -360,24 +460,19 @@ impl NlpApp {
     /// over the canvas, so one is on at a time: picking closes heal, and
     /// waits for the crop to close.
     pub(super) fn set_pick(&mut self, pick: Option<Pick>) {
-        if pick.is_some() {
-            if self.editor.crop.is_some() {
-                return;
-            }
-            self.editor.heal = None;
-            self.editor.burn = None;
+        match pick {
+            Some(_) if self.editor.crop().is_some() => {}
+            Some(p) => self.editor.set_tool(Tool::Pick(p)),
+            None if self.editor.pick().is_some() => self.editor.close_tool(),
+            None => {}
         }
-        self.editor.pick = pick;
     }
 
     fn leave_editor(&mut self) {
         if let Some(i) = self.editor_index() {
             self.save_frame(i);
         }
-        self.editor.pick = None;
-        self.editor.crop = None;
-        self.editor.heal = None;
-        self.editor.burn = None;
+        self.editor.close_tool();
         self.view = View::Folder;
         if self.single_mode {
             // Lone image: return to the welcome screen.
@@ -426,10 +521,10 @@ impl NlpApp {
     /// live-straightened frame).
     fn preview_settings(&self, i: usize) -> Settings {
         let mut s = self.frames[i].sc.settings.clone();
-        if let Some(stroke) = self.editor.burn.as_ref().and_then(|b| b.pending()) {
+        if let Some(stroke) = self.editor.burn().and_then(|b| b.pending()) {
             s.burn.push(stroke.clone());
         }
-        if let Some(c) = &self.editor.crop {
+        if let Some(c) = self.editor.crop() {
             s.crop = [0.0; 4];
             s.straighten = c.angle;
             s.rotation = c.rotation;
@@ -444,7 +539,7 @@ impl NlpApp {
     /// CPU renders the preview itself (from the 1024 px copy while a slider
     /// is dragged).
     fn update_preview(&mut self, ctx: &egui::Context, i: usize, dragging: bool) {
-        let Some(src) = self.editor.src.clone() else {
+        let Some(src) = self.editor.src().cloned() else {
             return;
         };
         if !self.editor.dirty && self.editor.size.is_some() {
@@ -458,7 +553,7 @@ impl NlpApp {
         // Dragging the angle re-straightens on every frame, so do it on a
         // small copy and redo it at full size once the drag ends.
         let low = dragging
-            && self.editor.crop.is_some()
+            && self.editor.crop().is_some()
             && s.flat_field.is_none()
             && src.long_edge() > 1100;
         let prep_src = if low {
@@ -598,7 +693,7 @@ impl NlpApp {
                 to_color_image(&px, w, h),
             );
         }
-        let cropping = self.editor.crop.is_some();
+        let cropping = self.editor.crop().is_some();
         if self.editor.clip_view && !self.editor.before && !cropping {
             let img = clip_image(&px, w, h);
             set_texture(ctx, &mut self.editor.clip_tex, "editor-clipping", img);
@@ -705,11 +800,11 @@ impl NlpApp {
                     .inner_margin(egui::Margin::symmetric(10, 0)),
             )
             .show(ui, |ui| {
-                if self.editor.crop.is_some() {
+                if self.editor.crop().is_some() {
                     self.crop_bar(ui, i);
-                } else if self.editor.heal.is_some() {
+                } else if self.editor.heal().is_some() {
                     self.heal_bar(ui);
-                } else if self.editor.burn.is_some() {
+                } else if self.editor.burn().is_some() {
                     self.burn_bar(ui);
                 } else {
                     self.view_bar(ui, i);
@@ -737,7 +832,7 @@ impl NlpApp {
             )
             .show(ui, |ui| self.sidebar(ui, i, &mut s));
 
-        if self.editor_index() == Some(i) && self.editor.crop.is_none() {
+        if self.editor_index() == Some(i) && self.editor.crop().is_none() {
             self.apply_change(i, &before, s);
         } else if self.editor_index() == Some(i) {
             // In crop mode only geometry-independent edits apply directly.
@@ -758,14 +853,14 @@ impl NlpApp {
     /// The text toggled with I, at the canvas's top left: name, roll and the
     /// frame's conversion state, as in Lightroom's info overlay.
     fn info_overlay(&self, ui: &egui::Ui, i: usize) {
-        if !self.editor.info || self.editor.crop.is_some() {
+        if !self.editor.info || self.editor.crop().is_some() {
             return;
         }
         let f = &self.frames[i];
         let s = &f.sc.settings;
         let mut lines: Vec<String> = vec![f.name.clone()];
         lines.extend(self.roll_name());
-        if let Some(src) = &self.editor.src {
+        if let Some(src) = self.editor.src() {
             let info = &src.info;
             lines.push(format!("{} × {} px", info.full_width, info.full_height));
         }
@@ -798,8 +893,7 @@ impl NlpApp {
     /// Display scale of 100 % relative to the preview's own size.
     fn full_scale(&self) -> f32 {
         self.editor
-            .src
-            .as_ref()
+            .src()
             .map(|s| {
                 s.info.full_width.max(s.info.full_height) as f32 / s.width.max(s.height) as f32
             })
@@ -1040,7 +1134,7 @@ impl NlpApp {
 
     /// Returns true when the view changed and drawing should stop.
     fn editor_shortcuts(&mut self, ctx: &egui::Context, i: usize) -> bool {
-        if ctx.egui_wants_keyboard_input() || self.shortcuts_open {
+        if ctx.egui_wants_keyboard_input() || self.modal_open() {
             return false;
         }
         let mac = ctx.os() == egui::os::OperatingSystem::Mac;
@@ -1117,7 +1211,7 @@ impl NlpApp {
         if sync {
             self.paste_settings_to((0..self.frames.len()).collect());
         }
-        if (rot_left || rot_right || flip) && self.editor.crop.is_some() {
+        if (rot_left || rot_right || flip) && self.editor.crop().is_some() {
             self.crop_transform(if flip { None } else { Some(rot_right) });
         } else if rot_left || rot_right || flip {
             let s = &mut self.frames[i].sc.settings;
@@ -1140,7 +1234,7 @@ impl NlpApp {
         if info {
             self.editor.info = !self.editor.info;
         }
-        if export && self.export_targets.is_none() {
+        if export {
             self.open_export_dialog(vec![i]);
         }
         if let Some(flag) = Self::flag_key(ctx) {
@@ -1180,18 +1274,17 @@ impl NlpApp {
             self.editor.zoom_req = Some(ZoomReq::Factor(1.0 / 1.5));
         }
         if c {
-            if self.editor.crop.is_some() {
+            if self.editor.crop().is_some() {
                 self.apply_crop(i);
             } else {
                 self.enter_crop(i);
             }
         }
-        if enter && self.editor.crop.is_some() {
+        if enter && self.editor.crop().is_some() {
             self.apply_crop(i);
         } else if enter {
-            self.editor.heal = None;
-            if self.editor.burn.take().is_some() {
-                self.editor.dirty = true;
+            if self.editor.heal().is_some() || self.editor.burn().is_some() {
+                self.editor.close_tool();
             }
         }
         if q {
@@ -1200,15 +1293,15 @@ impl NlpApp {
         if kk {
             self.toggle_burn(i);
         }
-        if self.editor.burn.is_some() {
+        if self.editor.burn().is_some() {
             if smaller || larger {
                 self.step_burn_size(larger);
             }
-            if o && let Some(b) = self.editor.burn.as_mut() {
+            if o && let Some(b) = self.editor.burn_mut() {
                 b.overlay = !b.overlay;
             }
         }
-        if self.editor.heal.is_some() {
+        if self.editor.heal().is_some() {
             if smaller || larger {
                 self.step_heal_size(i, larger);
             }
@@ -1217,34 +1310,29 @@ impl NlpApp {
             }
         }
         if w {
-            self.set_pick(if self.editor.pick == Some(Pick::WhiteBalance) {
+            self.set_pick(if self.editor.pick() == Some(Pick::WhiteBalance) {
                 None
             } else {
                 Some(Pick::WhiteBalance)
             });
         }
         if esc {
-            if self.editor.pick.is_some() {
-                self.editor.pick = None;
-            } else if let Some(c) = self.editor.crop.as_mut().filter(|c| c.level) {
-                (c.level, c.level_line) = (false, None);
-            } else if self.editor.crop.is_some() {
+            if let Some(c) = self.editor.crop_mut().filter(|c| c.level.on()) {
+                c.level = crop::Level::Off;
+            } else if self.editor.crop().is_some() {
                 self.cancel_crop();
-            } else if self.editor.heal.is_some() {
-                self.editor.heal = None;
-            } else if self.editor.burn.is_some() {
-                self.editor.burn = None;
-                self.editor.dirty = true;
+            } else if !matches!(self.editor.tool, Tool::None) {
+                self.editor.close_tool();
             } else {
                 self.leave_editor();
                 return true;
             }
         }
-        if left && self.editor.crop.is_none() {
+        if left && self.editor.crop().is_none() {
             self.goto(i, -1);
             return true;
         }
-        if right && self.editor.crop.is_none() {
+        if right && self.editor.crop().is_none() {
             self.goto(i, 1);
             return true;
         }
@@ -1272,7 +1360,7 @@ impl NlpApp {
     /// what goes out of the roll in the far corner.
     fn toolbar(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
         let ctx = ui.ctx().clone();
-        let cropping = self.editor.crop.is_some();
+        let cropping = self.editor.crop().is_some();
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let back_tip = if self.single_mode {
@@ -1411,7 +1499,7 @@ impl NlpApp {
                     );
                     egui::Popup::menu(&more).show(|ui| self.defaults_menu(ui, i, s));
                 }
-                if self.editor.loading || self.jobs.busy() > 0 {
+                if self.editor.is_loading() || self.jobs.busy() > 0 {
                     ui.add_space(8.0);
                     ui.add(egui::Spinner::new().size(14.0).color(theme::MUTED));
                 }
@@ -1482,7 +1570,7 @@ impl NlpApp {
             .clicked()
         {
             // Like the plugin's saved defaults, leave out the frame's
-            // source, colour model, pre-saturation and border.
+            // source, colour model and crosstalk.
             let mut d = s.clone();
             d.keep_frame_fields(&Settings {
                 image_type: d.image_type,
@@ -1513,6 +1601,19 @@ impl NlpApp {
             .clicked()
         {
             self.editor.film_open = true;
+            ui.close();
+        }
+        let curves = self.editor.hist_view == HistView::Curves;
+        if ui
+            .selectable_label(curves, "Show print curves")
+            .on_hover_text("Plot the per-channel print curves in place of the histogram")
+            .clicked()
+        {
+            self.editor.hist_view = if curves {
+                HistView::Histogram
+            } else {
+                HistView::Curves
+            };
             ui.close();
         }
         if ui
@@ -1551,7 +1652,7 @@ impl NlpApp {
     fn canvas(&mut self, ui: &mut egui::Ui, i: usize) {
         let avail = ui.max_rect();
         let Some([tw, th]) = self.editor.size else {
-            if let Some(e) = self.editor.load_error.clone() {
+            if let Some(e) = self.editor.load_error().map(str::to_owned) {
                 let mut retry = false;
                 ui.vertical_centered(|ui| {
                     ui.add_space((avail.height() * 0.5 - 40.0).max(0.0));
@@ -1571,7 +1672,7 @@ impl NlpApp {
             });
             return;
         };
-        let cropping = self.editor.crop.is_some();
+        let cropping = self.editor.crop().is_some();
         let margin = vec2(32.0, 32.0);
         let ts = vec2(tw as f32, th as f32);
         let fit = ((avail.width() - margin.x) / ts.x)
@@ -1750,44 +1851,9 @@ impl NlpApp {
             }
         }
 
-        if self.editor.border_preview && !cropping {
-            // Mirror `pipeline::analysis_buffer`: equal % insets per side.
-            let pct = self.frames[i].sc.settings.border_buffer.clamp(0.0, 40.0);
-            let b = pct / 100.0;
-            let d = vec2(rect.width() * b, rect.height() * b);
-            let inner = Rect::from_min_max(rect.min + d, rect.max - d);
-            let dim = Color32::from_black_alpha(160);
-            for strip in [
-                Rect::from_min_max(rect.min, pos2(rect.right(), inner.top())),
-                Rect::from_min_max(pos2(rect.left(), inner.bottom()), rect.max),
-                Rect::from_min_max(
-                    pos2(rect.left(), inner.top()),
-                    pos2(inner.left(), inner.bottom()),
-                ),
-                Rect::from_min_max(
-                    pos2(inner.right(), inner.top()),
-                    pos2(rect.right(), inner.bottom()),
-                ),
-            ] {
-                p.rect_filled(strip, 0.0, dim);
-            }
-            p.rect_stroke(
-                inner,
-                0.0,
-                Stroke::new(1.0, theme::ACCENT),
-                egui::StrokeKind::Inside,
-            );
-            pill(
-                &p,
-                pos2(avail.center().x, avail.top() + 22.0),
-                &format!("Analysis area · {pct:.0}% border"),
-            );
-            ui.ctx().request_repaint();
-        }
-
         if cropping {
             self.crop_overlay(ui, &resp, rect, avail);
-        } else if let Some(pick) = self.editor.pick {
+        } else if let Some(pick) = self.editor.pick() {
             let label = match pick {
                 Pick::WhiteBalance => "Click a neutral grey area · Esc to cancel",
                 Pick::FilmBase => "Click the unexposed film border · Esc to cancel",
@@ -1804,11 +1870,11 @@ impl NlpApp {
                         self.do_pick(i, pick, u, v);
                     }
                 }
-                self.editor.pick = None;
+                self.editor.close_tool();
             }
-        } else if self.editor.heal.is_some() {
+        } else if self.editor.heal().is_some() {
             self.heal_overlay(ui, &resp, rect, avail, i);
-        } else if self.editor.burn.is_some() {
+        } else if self.editor.burn().is_some() {
             self.burn_overlay(ui, &resp, rect, avail, i);
         } else {
             if resp.dragged() && self.editor.zoom.is_some() {
@@ -1826,9 +1892,9 @@ impl NlpApp {
             }
         }
         if !cropping
-            && self.editor.pick.is_none()
-            && self.editor.heal.is_none()
-            && self.editor.burn.is_none()
+            && self.editor.pick().is_none()
+            && self.editor.heal().is_none()
+            && self.editor.burn().is_none()
         {
             resp.context_menu(|ui| self.canvas_menu(ui, i));
         }
@@ -2000,7 +2066,7 @@ impl NlpApp {
                 }
             }
             Pick::FilmBase => {
-                let Some(src) = &self.editor.src else { return };
+                let Some(src) = self.editor.src() else { return };
                 let (d, w, h) = decode::geometry(
                     &src.data,
                     src.width,

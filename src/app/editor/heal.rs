@@ -6,6 +6,7 @@
 
 use eframe::egui::{self, Color32, Rect, Stroke, pos2};
 
+use super::Tool;
 use crate::app::NlpApp;
 use crate::app::widgets::{self, pill, theme};
 use crate::engine::decode::{GeometryMap, SourceImage};
@@ -237,21 +238,20 @@ fn arrow(p: &egui::Painter, from: egui::Pos2, to: egui::Pos2, from_r: f32, to_r:
 
 impl NlpApp {
     pub(super) fn toggle_heal(&mut self, i: usize) {
-        if self.editor.heal.take().is_some() {
+        if self.editor.heal().is_some() {
+            self.editor.close_tool();
             return;
         }
-        if self.editor.crop.is_some() {
+        if self.editor.crop().is_some() {
             self.apply_crop(i);
         }
-        self.editor.pick = None;
-        self.editor.burn = None;
         // The tool works on the edited picture, side by side only gets in the way.
         if self.editor.before || self.editor.split {
             self.editor.before = false;
             self.editor.split = false;
             self.editor.dirty = true;
         }
-        self.editor.heal = Some(HealEdit::default());
+        self.editor.set_tool(Tool::Heal(HealEdit::default()));
     }
 
     fn edit_spots(&mut self, i: usize, edit: impl FnOnce(&mut Vec<HealSpot>)) {
@@ -263,7 +263,7 @@ impl NlpApp {
 
     /// `[` and `]`: the size of the selected spot, and of the next one.
     pub(super) fn step_heal_size(&mut self, i: usize, larger: bool) {
-        let Some(h) = self.editor.heal.as_mut() else {
+        let Some(h) = self.editor.heal_mut() else {
             return;
         };
         let k = if larger { SIZE_STEP } else { 1.0 / SIZE_STEP };
@@ -280,7 +280,7 @@ impl NlpApp {
 
     /// Delete / Backspace, and the bar's button: remove the selected spot.
     pub(super) fn delete_heal_spot(&mut self, i: usize) {
-        let Some(h) = self.editor.heal.as_mut() else {
+        let Some(h) = self.editor.heal_mut() else {
             return;
         };
         let Some(n) = h.selected.take() else {
@@ -295,7 +295,7 @@ impl NlpApp {
 
     /// Under the tool strip while healing: Clone / Heal, Size, Opacity, Reset, Close.
     pub(super) fn heal_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
-        let Some(mut h) = self.editor.heal else {
+        let Some(mut h) = self.editor.heal().copied() else {
             return;
         };
         let (mut reset, mut close) = (false, false);
@@ -371,12 +371,12 @@ impl NlpApp {
             h.selected = None;
             h.drag = None;
         }
-        self.editor.heal = (!close).then_some(h);
+        self.editor.put_back(Tool::Heal(h), !close);
     }
 
     /// The bar under the canvas while healing: Tool Overlay, Visualize Spots, Done.
     pub(super) fn heal_bar(&mut self, ui: &mut egui::Ui) {
-        let Some(mut h) = self.editor.heal else {
+        let Some(mut h) = self.editor.heal().copied() else {
             return;
         };
         let mut done = false;
@@ -412,7 +412,7 @@ impl NlpApp {
                     .clicked();
             });
         });
-        self.editor.heal = (!done).then_some(h);
+        self.editor.put_back(Tool::Heal(h), !done);
     }
 
     /// Draw Visualize Spots over the picture, working the map out when it's gone.
@@ -446,7 +446,7 @@ impl NlpApp {
 
     /// A new spot at `at`, its source found on the picture as healed so far.
     fn place_spot(&mut self, i: usize, at: [f32; 2], h: HealEdit, canvas: &CanvasMap) {
-        let Some(src) = self.editor.src.clone() else {
+        let Some(src) = self.editor.src().cloned() else {
             return;
         };
         let settings = &self.frames[i].sc.settings;
@@ -466,7 +466,7 @@ impl NlpApp {
                 opacity: h.opacity,
             })
         });
-        if let Some(h) = self.editor.heal.as_mut() {
+        if let Some(h) = self.editor.heal_mut() {
             h.selected = Some(n);
         }
     }
@@ -479,10 +479,10 @@ impl NlpApp {
         avail: Rect,
         i: usize,
     ) {
-        let Some(src) = self.editor.src.clone() else {
+        let Some(src) = self.editor.src().cloned() else {
             return;
         };
-        let Some(mut h) = self.editor.heal else {
+        let Some(mut h) = self.editor.heal().copied() else {
             return;
         };
         let s = &self.frames[i].sc.settings;
@@ -633,7 +633,7 @@ impl NlpApp {
         if let Some((n, ..)) = click_hit {
             h.select(n, &spots[n]);
         }
-        self.editor.heal = Some(h);
+        self.editor.put_back(Tool::Heal(h), true);
         if let Some(d) = released {
             self.edit_spots(i, |list| {
                 if let Some(slot) = list.get_mut(d.index) {

@@ -203,7 +203,7 @@ pub fn base_multipliers(src: &SourceImage, s: &Settings, base: [f32; 3]) -> [f32
     }
 }
 
-/// Colour model calibration and pre-saturation, applied in density: hue
+/// Colour model calibration and the base density saturation, applied in density: hue
 /// shifts mix each primary towards a neighbour, saturation scales the
 /// distance from the neutral axis (channel separation).
 fn calibration_matrix(s: &Settings) -> [[f32; 3]; 3] {
@@ -241,7 +241,7 @@ fn calibration_matrix(s: &Settings) -> [[f32; 3]; 3] {
             }
         }
     }
-    let f = (1.0 + presets::pre_saturation(s.pre_saturation) / 100.0) * DENSITY_SATURATION;
+    let f = DENSITY_SATURATION;
     let sat_m: [[f32; 3]; 3] = std::array::from_fn(|r| {
         std::array::from_fn(|c| yw[c] * (1.0 - f) + if r == c { f } else { 0.0 })
     });
@@ -406,9 +406,14 @@ pub fn prepare_density(src: &SourceImage, s: &Settings, base: [f32; 3]) -> Negat
 
 // ---- analysis ------------------------------------------------------------------
 
+/// Percent of each side the analysis leaves out after [`frame_insets`]
+/// (the plugin's `filmBorder` default, once a setting). Below 5 % the chart
+/// tests' shaded scenes and flat-field falloff lose their neutrality.
+const ANALYSIS_MARGIN: f32 = 5.0;
+
 /// The 600px, border-cropped, blurred analysis buffer. Film rebate, holder
 /// and light past the film are trimmed off the edges first (see
-/// [`frame_insets`]), then the border buffer.
+/// [`frame_insets`]), then [`ANALYSIS_MARGIN`].
 pub fn analysis_buffer(neg: &Negative, s: &Settings) -> Negative {
     let (d, w, h) = decode::downscale(&neg.data, neg.width, neg.height, ANALYSIS_SIZE);
     let (d, w, h) = if s.image_type == ImageType::EditOnly {
@@ -416,9 +421,7 @@ pub fn analysis_buffer(neg: &Negative, s: &Settings) -> Negative {
     } else {
         decode::crop(&d, w, h, frame_insets(&d, w, h))
     };
-    let b = s.border_buffer.clamp(0.0, 40.0);
-    let ins = [b, b, b, b];
-    let (d, w, h) = decode::crop(&d, w, h, ins);
+    let (d, w, h) = decode::crop(&d, w, h, [ANALYSIS_MARGIN; 4]);
     let d = look::gaussian_blur_3(&d, w, h, 2.0);
     Negative::new(w, h, d)
 }
@@ -2217,16 +2220,13 @@ mod tests {
         sum / 24.0
     }
 
-    /// With no border buffer the analysis still finds the image inside the
-    /// film rebate instead of treating unexposed film as the shadows.
+    /// The analysis finds the image inside the film rebate instead of
+    /// treating unexposed film as the shadows.
     #[test]
     fn rebate_is_kept_out_of_the_analysis() {
         use crate::engine::testchart::{measure, negative};
         let chart = negative(0.0);
-        let s = Settings {
-            border_buffer: 0.0,
-            ..chart_settings()
-        };
+        let s = chart_settings();
         let a = analyse_chart(&chart, &s);
         assert!(a.levels.iter().all(|c| c.lo > 0.15), "{:?}", a.levels);
         let m = measure(&chart, &convert_chart(&chart, &s, &a, None));
@@ -2239,11 +2239,7 @@ mod tests {
     #[test]
     fn holder_and_light_sources_keep_the_scene_bright() {
         use crate::engine::testchart::{negative, patch_lab, with_holder, with_light};
-        // No border buffer: real scans' holders are wider than the chart's.
-        let s = Settings {
-            border_buffer: 0.0,
-            ..chart_settings()
-        };
+        let s = chart_settings();
         let grey_l = |chart: &crate::engine::testchart::Chart| {
             let a = analyse_chart(chart, &s);
             patch_lab(chart, &convert_chart(chart, &s, &a, None))[21][0]

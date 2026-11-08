@@ -11,6 +11,9 @@
 //!
 //! The radius is set in full-resolution pixels and scaled to the buffer, so
 //! a downscaled preview smooths the same share of the picture as the export.
+//! It stays fractional (the box's outermost taps weighted by the fraction),
+//! so a small preview follows the slider smoothly instead of in whole-pixel
+//! steps.
 
 use rayon::prelude::*;
 
@@ -23,6 +26,9 @@ const RADIUS_MAX: f32 = 8.0;
 /// amounts smooth colour across fainter luma detail.
 const EDGE_MIN: f32 = 0.03;
 const EDGE_MAX: f32 = 0.06;
+/// Buffer radius below which the filter is skipped: its effect is
+/// negligible there (it vanishes as the radius goes to 0).
+const RADIUS_SKIP: f32 = 0.05;
 /// Amount up to which the filtered colour fades in (at the smallest radii);
 /// above it the radius grows.
 const FADE_IN: f32 = 25.0;
@@ -35,11 +41,10 @@ pub fn chroma(neg: &mut Negative, amount: f32, scale: f32) {
     if t <= 0.0 || w == 0 || h == 0 {
         return;
     }
-    let r = ((RADIUS_MIN + (RADIUS_MAX - RADIUS_MIN) * t) * scale).round() as usize;
-    if r == 0 {
+    let r = ((RADIUS_MIN + (RADIUS_MAX - RADIUS_MIN) * t) * scale).min((w.max(h) / 2) as f32);
+    if !(r >= RADIUS_SKIP) {
         return;
     }
-    let r = r.min(w.max(h) / 2).max(1);
     let edge = EDGE_MIN + (EDGE_MAX - EDGE_MIN) * t;
     let eps = edge * edge;
     let mix = (amount / FADE_IN).min(1.0);
@@ -78,28 +83,34 @@ pub fn chroma(neg: &mut Negative, amount: f32, scale: f32) {
     });
 }
 
-/// Mean over a (2r+1)² box, edges replicated, of every channel.
-fn box_blur<const N: usize>(data: &[[f32; N]], w: usize, h: usize, r: usize) -> Vec<[f32; N]> {
-    let n = (2 * r + 1) as f32;
+/// Mean over a box of radius `r` (fractional), edges replicated, of every
+/// channel. Taps within `⌊r⌋` weigh 1 and the two at `⌊r⌋ + 1` weigh the
+/// fraction, so the box grows continuously from a single pixel at 0.
+fn box_blur<const N: usize>(data: &[[f32; N]], w: usize, h: usize, r: f32) -> Vec<[f32; N]> {
+    let (r, f) = (r.floor() as usize, r.fract());
+    let n = (2 * r + 1) as f32 + 2.0 * f;
     let at = |i: isize, len: usize| i.clamp(0, len as isize - 1) as usize;
+    let (ri, ro) = (r as isize, r as isize + 1);
     // Rows: running sum.
     let mut tmp = vec![[0.0f32; N]; w * h];
     tmp.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
         let row = &data[y * w..(y + 1) * w];
         let mut acc = [0.0f32; N];
-        for k in -(r as isize)..=r as isize {
+        for k in -ri..=ri {
             let v = row[at(k, w)];
             for c in 0..N {
                 acc[c] += v[c];
             }
         }
         for x in 0..w {
+            let xi = x as isize;
+            let (lo, hi) = (row[at(xi - ro, w)], row[at(xi + ro, w)]);
             for c in 0..N {
-                out[x][c] = acc[c] / n;
+                out[x][c] = (acc[c] + f * (lo[c] + hi[c])) / n;
             }
             let (add, sub) = (
-                row[at(x as isize + r as isize + 1, w)],
-                row[at(x as isize - r as isize, w)],
+                row[at(xi + ro, w)],
+                row[at(xi - ri, w)],
             );
             for c in 0..N {
                 acc[c] += add[c] - sub[c];
@@ -109,11 +120,15 @@ fn box_blur<const N: usize>(data: &[[f32; N]], w: usize, h: usize, r: usize) -> 
     // Columns: sum of the rows in the window, row by row (contiguous).
     let mut out = vec![[0.0f32; N]; w * h];
     out.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
-        for k in -(r as isize)..=r as isize {
+        for k in -ro..=ro {
+            let wk = if k.abs() == ro { f } else { 1.0 };
+            if wk == 0.0 {
+                continue;
+            }
             let yy = at(y as isize + k, h);
             for (o, v) in out.iter_mut().zip(&tmp[yy * w..(yy + 1) * w]) {
                 for c in 0..N {
-                    o[c] += v[c];
+                    o[c] += wk * v[c];
                 }
             }
         }
@@ -226,7 +241,56 @@ mod tests {
         let mut a = before.clone();
         chroma(&mut a, 0.0, 1.0);
         let mut b = before.clone();
-        chroma(&mut b, 100.0, 0.05);
+        chroma(&mut b, 100.0, 0.005);
         assert!(a.data == before.data && b.data == before.data);
+    }
+
+    /// The box blur at a whole radius is the plain (2r+1)² mean, and between
+    /// whole radii it moves smoothly from one to the next.
+    #[test]
+    fn fractional_box_is_continuous() {
+        let (w, h) = (23, 17);
+        let d: Vec<[f32; 1]> = (0..w * h).map(|i| [noise(i, 7)]).collect();
+        let naive = |r: usize| -> Vec<f32> {
+            let n = ((2 * r + 1) * (2 * r + 1)) as f32;
+            let ri = r as isize;
+            (0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as isize, (i / w) as isize);
+                    let mut s = 0.0;
+                    for dy in -ri..=ri {
+                        for dx in -ri..=ri {
+                            let xx = (x + dx).clamp(0, w as isize - 1) as usize;
+                            let yy = (y + dy).clamp(0, h as isize - 1) as usize;
+                            s += d[yy * w + xx][0];
+                        }
+                    }
+                    s / n
+                })
+                .collect()
+        };
+        let diff = |a: &[[f32; 1]], b: &[f32]| {
+            a.iter().zip(b).map(|(a, b)| (a[0] - b).abs()).fold(0.0f32, f32::max)
+        };
+        for r in 0..4 {
+            assert!(diff(&box_blur(&d, w, h, r as f32), &naive(r)) < 1e-5, "r = {r}");
+            let just_below = box_blur(&d, w, h, r as f32 + 0.999);
+            assert!(diff(&just_below, &naive(r + 1)) < 0.01, "r = {r}.999");
+        }
+    }
+
+    /// Small buffers (the editor preview) follow the slider: more amount
+    /// always smooths more, with no flat runs between whole-pixel radii.
+    #[test]
+    fn preview_follows_the_amount() {
+        let before = patch();
+        let mut last = chroma_var(&before, 8, 40);
+        for amount in [3.0, 6.0, 10.0, 20.0, 25.0, 30.0, 40.0, 60.0, 80.0, 100.0] {
+            let mut n = before.clone();
+            chroma(&mut n, amount, 0.34);
+            let v = chroma_var(&n, 8, 40);
+            assert!(v < last * 0.99, "amount {amount}: {v} after {last}");
+            last = v;
+        }
     }
 }

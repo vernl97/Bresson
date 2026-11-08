@@ -6,6 +6,7 @@
 use eframe::egui::{self, Color32, Rect, pos2};
 
 use super::heal::{CanvasMap, ring};
+use super::Tool;
 use crate::app::NlpApp;
 use crate::app::widgets::{self, pill, theme};
 use crate::engine::settings::{BurnStroke, Settings};
@@ -112,26 +113,24 @@ pub(super) fn overlay_image(map: &[f32], w: usize, h: usize) -> egui::ColorImage
 
 impl NlpApp {
     pub(super) fn toggle_burn(&mut self, i: usize) {
-        if self.editor.burn.take().is_some() {
-            self.editor.dirty = true;
+        if self.editor.burn().is_some() {
+            self.editor.close_tool();
             return;
         }
-        if self.editor.crop.is_some() {
+        if self.editor.crop().is_some() {
             self.apply_crop(i);
         }
-        self.editor.pick = None;
-        self.editor.heal = None;
         if self.editor.before || self.editor.split {
             self.editor.before = false;
             self.editor.split = false;
             self.editor.dirty = true;
         }
-        self.editor.burn = Some(BurnEdit::default());
+        self.editor.set_tool(Tool::Burn(BurnEdit::default()));
     }
 
     /// `[` and `]`: the brush size.
     pub(super) fn step_burn_size(&mut self, larger: bool) {
-        if let Some(b) = self.editor.burn.as_mut() {
+        if let Some(b) = self.editor.burn_mut() {
             let k = if larger { SIZE_STEP } else { 1.0 / SIZE_STEP };
             b.radius = (b.radius * k).clamp(MIN_RADIUS, MAX_RADIUS);
         }
@@ -139,7 +138,7 @@ impl NlpApp {
 
     /// Under the tool strip while the brush is on.
     pub(super) fn burn_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
-        let Some(mut b) = self.editor.burn.clone() else {
+        let Some(mut b) = self.editor.burn().cloned() else {
             return;
         };
         let (mut reset, mut close) = (false, false);
@@ -231,15 +230,12 @@ impl NlpApp {
             s.burn.clear();
             b.stroke = None;
         }
-        if close {
-            self.editor.dirty = true;
-        }
-        self.editor.burn = (!close).then_some(b);
+        self.editor.put_back(Tool::Burn(b), !close);
     }
 
     /// The bar under the canvas while the brush is on: Show Overlay, Done.
     pub(super) fn burn_bar(&mut self, ui: &mut egui::Ui) {
-        let Some(mut b) = self.editor.burn.clone() else {
+        let Some(mut b) = self.editor.burn().cloned() else {
             return;
         };
         let mut done = false;
@@ -254,10 +250,7 @@ impl NlpApp {
                     .clicked();
             });
         });
-        if done {
-            self.editor.dirty = true;
-        }
-        self.editor.burn = (!done).then_some(b);
+        self.editor.put_back(Tool::Burn(b), !done);
     }
 
     /// The strokes' tint over the picture, made again whenever the map changes.
@@ -287,10 +280,10 @@ impl NlpApp {
         avail: Rect,
         i: usize,
     ) {
-        let Some(src) = self.editor.src.clone() else {
+        let Some(src) = self.editor.src().cloned() else {
             return;
         };
-        let Some(mut b) = self.editor.burn.clone() else {
+        let Some(mut b) = self.editor.burn().cloned() else {
             return;
         };
         let canvas = CanvasMap::new(&src, &self.frames[i].sc.settings, rect);
@@ -379,7 +372,7 @@ impl NlpApp {
                 "Drag to dodge or burn · Alt swaps them · [ ] change the size",
             );
         }
-        self.editor.burn = Some(b);
+        self.editor.put_back(Tool::Burn(b), true);
         if let Some(stroke) = commit {
             let before = self.frames[i].sc.settings.clone();
             let mut s = before.clone();

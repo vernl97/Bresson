@@ -220,9 +220,8 @@ For every pixel, in this order:
      neighbour by `0.25 % × hue`; saturation scales its distance from the
      weighted grey (`DENSITY_WEIGHTS = [0.30, 0.55, 0.15]`). Rows are
      normalised to sum 1.
-   - **Saturation in density**: `f = (1 + pre_saturation%) × 0.85`, matrix
-     `yw·(1 − f) + f·I`. Pre‑saturation steps 1..5 map to −20, −10, 0, +5,
-     +8 %. The fixed `DENSITY_SATURATION = 0.85` compensates for the ~20 %
+   - **Saturation in density**: matrix `yw·(1 − f) + f·I` with
+     `f = DENSITY_SATURATION = 0.85`, which compensates for the ~20 %
      extra chroma that crosstalk removal plus steep per‑channel curves would
      otherwise print.
 7. **Black & white** (colour model B+W): all three channels become the
@@ -237,8 +236,11 @@ For every pixel, in this order:
    `√ε` the colour follows the step, so it doesn't bleed. `r = (1 + 7 t)`
    full‑resolution pixels, `√ε = 0.03 + 0.03 t` D (`t = amount / 100`), and
    `r` is scaled by the buffer's long edge over the full frame's, so
-   previews smooth the same share of the picture as exports (and skip it
-   when `r` rounds to 0, as on small proxies). Up to 25 the filtered colour
+   previews smooth the same share of the picture as exports. `r` stays
+   fractional: taps within `⌊r⌋` weigh 1 and the two at `⌊r⌋ + 1` weigh
+   `r − ⌊r⌋`, so a small preview follows the slider smoothly rather than in
+   whole‑pixel steps (the filter is skipped below `r = 0.05`, where it does
+   nothing visible). Up to 25 the filtered colour
    fades in at the smallest radius; above, the radius grows. The channels
    are rebuilt with `Y` unchanged, so luma grain and detail are untouched.
    `pipeline::prepare_density` is everything before this step; the editor
@@ -266,7 +268,7 @@ made with, the capture `ev`, the fitted `axis` and the `skin` found.
    density (holder: 0.2 D below the frame's 99.9th‑percentile minimum‑channel
    density, at least 1.4 D). Edge rows/columns where at least half the
    pixels are not image are trimmed (up to 20 % per side) plus 2 extra lines.
-3. Crop the **border buffer** (`border_buffer`, default 5 %) from every side.
+3. Leave out a fixed **margin** (`ANALYSIS_MARGIN`, 5 %) on every side.
 4. Gaussian blur, σ = 2 px.
 
 ### 5.2 Levels — `levels_from_buffer`
@@ -754,9 +756,8 @@ Where it runs:
 ## 11. What triggers a re‑analysis
 
 `Settings::analysis_key()` → `AnalysisKey`: engine version
-(`ENGINE_VERSION = 5`), source, image type, colour model, pre‑saturation,
-crosstalk matrix and strength, border buffer, film base mode and sample,
-flat field. These change the
+(`ENGINE_VERSION = 6`), source, image type, colour model, crosstalk matrix
+and strength, film base mode and sample, flat field. These change the
 density image or how it is measured, so changing any of them needs
 **Convert** again. Everything else — tone, WB, filtration, print exposure,
 looks, dodge & burn, sharpening, geometry, roll mode — only rebuilds the

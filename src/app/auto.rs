@@ -2,7 +2,6 @@
 //! their proxies load, then balanced together as a roll, and exports wait
 //! for their frame's conversion.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::engine::settings::{ExportSettings, FilmBase, Source};
@@ -24,42 +23,73 @@ pub enum RollPass {
     Done,
 }
 
+/// Whether a frame converts by itself. A frame is in flight while its
+/// [`ConvertTicket`](super::ConvertTicket) is an automatic one.
+#[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum AutoConvert {
+    /// Converted when the folder opened, or converted or unconverted by
+    /// hand: it waits for the user.
+    #[default]
+    Off,
+    /// Converts by itself once its proxy loads, and stays so afterwards: the
+    /// roll pass balances these frames together.
+    On,
+    /// On, and waiting for the next batch (`auto_tick`).
+    Queued,
+}
+
 #[derive(Default)]
 pub struct AutoState {
-    /// Frames waiting for their automatic conversion, oldest first.
-    pub queue: Vec<PathBuf>,
+    /// When the oldest frame now [`AutoConvert::Queued`] was queued.
     pub queued_since: Option<f64>,
-    /// Frames sent to an automatic conversion that hasn't come back yet.
-    pub in_flight: HashSet<PathBuf>,
     pub roll_pass: RollPass,
     /// The roll pass ignored the exposure metadata: the frames' spread in EV.
     pub exposure_note: Option<f64>,
     /// Frames sent to conversion and come back, for the progress bar.
-    pub convert_total: usize,
-    pub convert_done: usize,
+    pub progress: super::Progress,
     /// Files of this folder that couldn't be read, for the shared toast.
     pub read_failures: Vec<String>,
     /// Exports waiting for their frame to be converted: frame, target, settings.
     pub export_waiting: Vec<(PathBuf, PathBuf, ExportSettings)>,
 }
 
-impl AutoState {
-    pub fn busy(&self) -> bool {
-        !self.queue.is_empty() || !self.in_flight.is_empty() || self.roll_pass == RollPass::Running
-    }
-}
-
 impl NlpApp {
-    /// A proxy arrived: queue the frame if it converts automatically.
+    /// Frames waiting for the next automatic batch.
+    fn auto_queued(&self) -> Vec<usize> {
+        (0..self.frames.len())
+            .filter(|&i| self.frames[i].auto == AutoConvert::Queued)
+            .collect()
+    }
+
+    /// Frames are queued for, or in, an automatic conversion, or the roll
+    /// pass runs.
+    pub fn auto_busy(&self) -> bool {
+        self.auto.roll_pass == RollPass::Running
+            || self.frames.iter().any(|f| {
+                f.auto == AutoConvert::Queued || f.convert_ticket.is_some_and(|t| t.auto)
+            })
+    }
+
+    /// The app has work of its own lined up that Stop would cancel.
+    pub fn auto_pending(&self) -> bool {
+        self.auto.roll_pass == RollPass::Running
+            || self.frames.iter().any(|f| f.auto == AutoConvert::Queued)
+    }
+
+    /// A proxy arrived (or a conversion came back stale): queue the frame if
+    /// it converts automatically and nothing is converting it already.
     pub fn auto_queue(&mut self, i: usize) {
-        let f = &self.frames[i];
-        if self.defaults.manual_convert || !f.auto_convert || f.sc.is_converted() {
+        let f = &mut self.frames[i];
+        if self.defaults.manual_convert
+            || f.auto != AutoConvert::On
+            || f.sc.is_converted()
+            || f.convert_ticket.is_some()
+            || matches!(f.proxy, ProxyState::Failed(_))
+        {
             return;
         }
-        if !self.auto.queue.contains(&f.path) && !self.auto.in_flight.contains(&f.path) {
-            self.auto.queue.push(f.path.clone());
-            self.auto.queued_since.get_or_insert(self.time);
-        }
+        f.auto = AutoConvert::Queued;
+        self.auto.queued_since.get_or_insert(self.time);
     }
 
     /// Whether every frame the grid shows has its proxy (or failed to load).
@@ -79,20 +109,20 @@ impl NlpApp {
     /// Run queued conversions in batches, then the roll pass once the
     /// whole folder has loaded.
     pub fn auto_tick(&mut self) {
-        let due = self
-            .auto
-            .queued_since
-            .is_some_and(|t| self.time - t > BATCH_WAIT || self.auto.queue.len() >= BATCH_SIZE);
-        // Conversion shares the pool with decoding: let the frames on screen
-        // load first.
-        if due && self.visible_loaded() {
-            self.auto.queued_since = None;
-            let paths = std::mem::take(&mut self.auto.queue);
-            let idx: Vec<usize> = paths.iter().filter_map(|p| self.index_of(p)).collect();
-            self.spawn_auto_convert(idx, false);
+        if let Some(t) = self.auto.queued_since {
+            let queued = self.auto_queued();
+            let due = self.time - t > BATCH_WAIT || queued.len() >= BATCH_SIZE;
+            // Conversion shares the pool with decoding: let the frames on
+            // screen load first.
+            if queued.is_empty() {
+                self.auto.queued_since = None;
+            } else if due && self.visible_loaded() {
+                self.auto.queued_since = None;
+                self.spawn_auto_convert(queued, false);
+            }
         }
         if self.auto.roll_pass != RollPass::Waiting
-            || self.auto.busy()
+            || self.auto_busy()
             || self.defaults.manual_convert
         {
             return;
@@ -105,7 +135,7 @@ impl NlpApp {
             return;
         }
         let roll: Vec<usize> = (0..self.frames.len())
-            .filter(|&i| self.frames[i].auto_convert && self.frames[i].sc.is_converted())
+            .filter(|&i| self.frames[i].auto != AutoConvert::Off && self.frames[i].sc.is_converted())
             .collect();
         if roll.len() < 2 || self.single_mode {
             self.auto.roll_pass = RollPass::Done;
@@ -124,8 +154,8 @@ impl NlpApp {
             .map(|&i| {
                 let f = &mut self.frames[i];
                 f.sc.settings.auto_crop = true;
-                self.auto.in_flight.insert(f.path.clone());
-                self.convert_item(i)
+                f.auto = AutoConvert::On;
+                self.convert_item(i, true)
             })
             .collect();
         self.convert_started(idx.len());
@@ -134,21 +164,17 @@ impl NlpApp {
 
     /// Count frames into the conversion progress.
     pub fn convert_started(&mut self, n: usize) {
-        if self.auto.convert_done >= self.auto.convert_total {
-            (self.auto.convert_total, self.auto.convert_done) = (0, 0);
-        }
-        self.auto.convert_total += n;
+        self.auto.progress.start(n);
     }
 
-    /// Stop converting by itself: queued frames stay as they are.
+    /// Stop converting by itself: queued frames stay as they are. (They
+    /// were never counted into the progress, so it stays as it is.)
     pub fn stop_auto(&mut self) {
-        self.auto.convert_total -= self.auto.queue.len().min(self.auto.convert_total);
-        self.auto.queue.clear();
         self.auto.queued_since = None;
         self.auto.roll_pass = RollPass::Done;
         for f in &mut self.frames {
             if !f.sc.is_converted() {
-                f.auto_convert = false;
+                f.auto = AutoConvert::Off;
             }
         }
     }
@@ -160,11 +186,7 @@ impl NlpApp {
         items: Vec<ConvertItem>,
         spread: f64,
     ) -> Option<Vec<ConvertItem>> {
-        if self.auto.roll_pass != RollPass::Running
-            || !items
-                .iter()
-                .all(|it| self.auto.in_flight.contains(&it.path))
-        {
+        if self.auto.roll_pass != RollPass::Running || !items.iter().all(|it| it.auto) {
             return Some(items);
         }
         self.auto.exposure_note = Some(spread);
@@ -173,24 +195,11 @@ impl NlpApp {
         None
     }
 
-    /// A conversion came back: returns whether it was an automatic one
-    /// (no toast for those).
-    pub fn auto_converted(&mut self, paths: &[PathBuf], roll: bool) -> bool {
-        let mut auto = !paths.is_empty();
-        for p in paths {
-            auto &= self.auto.in_flight.remove(p);
-        }
-        if auto && roll && self.auto.roll_pass == RollPass::Running {
-            self.auto.roll_pass = RollPass::Done;
-        }
-        auto
-    }
-
     /// The user converted or unconverted these frames: they no longer
-    /// convert by themselves.
+    /// convert by themselves (a queued one leaves the queue).
     pub fn auto_release(&mut self, idx: &[usize]) {
         for &i in idx {
-            self.frames[i].auto_convert = false;
+            self.frames[i].auto = AutoConvert::Off;
         }
     }
 
@@ -207,9 +216,11 @@ impl NlpApp {
             f.sc.analysis = None;
             f.sc.roll = None;
             f.sc.settings.use_roll = false;
-            f.auto_convert = true;
-            // A conversion still running used the old source; it is queued
-            // again when it comes back (`stale_conversion`).
+            if f.auto == AutoConvert::Off {
+                f.auto = AutoConvert::On;
+            }
+            // A conversion still running used the old source: its result
+            // will be stale, and the frame queues again now.
             f.convert_ticket = None;
             self.mark_changed(i);
             if self.frames[i].proxy().is_some() {
@@ -230,16 +241,16 @@ impl NlpApp {
             return;
         }
         self.auto_queue(i);
-        let path = self.frames[i].path.clone();
-        if self.auto.queue.contains(&path) {
+        if self.frames[i].auto == AutoConvert::Queued {
             return;
         }
+        let path = self.frames[i].path.clone();
         let before = self.auto.export_waiting.len();
         self.auto.export_waiting.retain(|(p, _, _)| *p != path);
         let dropped = before - self.auto.export_waiting.len();
         if dropped > 0 {
             self.frames[i].exporting = false;
-            self.export_done += dropped;
+            self.export_progress.finish(dropped);
             let name = self.frames[i].name.clone();
             self.toast(format!("Cancelled the export of {name}: it is no longer converted"), true);
         }
@@ -254,11 +265,11 @@ impl NlpApp {
                 // The frame can't be read: the conversion reported it already.
                 Some(i) if matches!(self.frames[i].proxy, ProxyState::Failed(_)) => {
                     self.frames[i].exporting = false;
-                    self.export_done += 1;
+                    self.export_progress.finish(1);
                 }
                 Some(_) => self.auto.export_waiting.push((path, target, ex)),
                 // The frame left with its roll: count the export out.
-                None => self.export_done += 1,
+                None => self.export_progress.finish(1),
             }
         }
     }

@@ -33,17 +33,6 @@ pub fn calibration(model: ColorModel, source: Source) -> Calibration {
     }
 }
 
-/// Lightroom `Saturation` applied to the negative for each pre-saturation step.
-pub fn pre_saturation(level: u8) -> f32 {
-    match level {
-        0 | 1 => -20.0,
-        2 => -10.0,
-        3 => 0.0,
-        4 => 5.0,
-        _ => 8.0,
-    }
-}
-
 /// Static WB presets (film character) as (magenta, yellow) filtration in CC.
 pub fn film_character(mode: WbMode) -> Option<(f32, f32)> {
     match mode {

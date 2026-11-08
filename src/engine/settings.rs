@@ -206,7 +206,7 @@ choice_enum!(
 );
 
 /// Version of the conversion engine; part of [`AnalysisKey`].
-pub const ENGINE_VERSION: u32 = 5;
+pub const ENGINE_VERSION: u32 = 6;
 
 /// How a spot uses its source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -286,15 +286,11 @@ pub struct Settings {
     pub source: Source,
     pub image_type: ImageType,
     pub color_model: ColorModel,
-    /// 1..=5, "3 - Default".
-    pub pre_saturation: u8,
     /// Dye crosstalk matrix: a bundled film's id (`presets::crosstalk_profile`),
     /// or empty for the generic C-41 crosstalk.
     pub crosstalk: String,
     /// How much of the crosstalk correction applies, in percent (100 = all).
     pub crosstalk_strength: f32,
-    /// Border buffer in percent (`filmBorder`).
-    pub border_buffer: f32,
     pub film_base: FilmBase,
     /// Linear camera-space multipliers when `film_base == Sampled`.
     pub film_base_sample: [f32; 3],
@@ -386,10 +382,8 @@ impl Default for Settings {
             source: Source::DigitalCamera,
             image_type: ImageType::Negative,
             color_model: ColorModel::Basic,
-            pre_saturation: 3,
             crosstalk: String::new(),
             crosstalk_strength: 100.0,
-            border_buffer: 5.0,
             film_base: FilmBase::Auto,
             film_base_sample: [1.0, 1.0, 1.0],
             auto_crop: false,
@@ -465,10 +459,8 @@ impl Settings {
             source: self.source,
             image_type: self.image_type,
             color_model: self.color_model,
-            pre_saturation: self.pre_saturation,
             crosstalk: self.crosstalk.clone(),
             crosstalk_strength: (self.crosstalk_strength * 10.0).round() as i32,
-            border_buffer: (self.border_buffer * 100.0).round() as i32,
             film_base: self.film_base,
             film_base_sample: self.film_base_sample.map(|v| (v * 10000.0).round() as i32),
             flat_field: self.flat_field.clone(),
@@ -482,8 +474,6 @@ impl Settings {
             self.source,
             self.image_type,
             self.color_model,
-            self.pre_saturation,
-            self.border_buffer,
             self.film_base,
             self.film_base_sample,
             self.auto_crop,
@@ -492,8 +482,6 @@ impl Settings {
             k.source,
             k.image_type,
             k.color_model,
-            k.pre_saturation,
-            k.border_buffer,
             k.film_base,
             k.film_base_sample,
             k.auto_crop,
@@ -510,7 +498,7 @@ impl Settings {
 
     /// Copy only the adjustment parameters (used by paste/sync). Like the
     /// plugin's sync list, the conversion inputs (source, image type, colour
-    /// model, pre-saturation, border) stay with the frame, as do its film
+    /// model, crosstalk) stay with the frame, as do its film
     /// base, roll choice and geometry.
     pub fn copy_edit_from(&mut self, o: &Settings) {
         let keep = self.clone();
@@ -529,14 +517,12 @@ pub struct AnalysisKey {
     pub source: Source,
     pub image_type: ImageType,
     pub color_model: ColorModel,
-    pub pre_saturation: u8,
     /// Crosstalk matrix and strength (tenths of a percent); sidecars from
     /// before them used the generic matrix at full strength.
     #[serde(default)]
     pub crosstalk: String,
     #[serde(default = "full_strength")]
     pub crosstalk_strength: i32,
-    pub border_buffer: i32,
     pub film_base: FilmBase,
     pub film_base_sample: [i32; 3],
     #[serde(default)]
@@ -714,8 +700,6 @@ mod tests {
         let mut dst = Settings {
             source: Source::VueScanRaw,
             color_model: ColorModel::Noritsu,
-            pre_saturation: 5,
-            border_buffer: 8.0,
             crop: [1.0, 2.0, 3.0, 4.0],
             ..Settings::default()
         };
@@ -723,7 +707,6 @@ mod tests {
         let src = Settings {
             brightness: 12.0,
             color_model: ColorModel::Frontier,
-            border_buffer: 2.0,
             ..Settings::default()
         };
         dst.copy_edit_from(&src);

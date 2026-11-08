@@ -15,7 +15,7 @@ NLP_FAKE_SCANNERS=1 cargo run --release -- /path/to/roll   # Scan panel with sim
 
 ```bash
 cargo run --release -- convert [--roll] [--roll-process NAME] [--tone NAME] [--wb NAME] \
-    [--lut NAME] [--border PCT] [--auto-crop] [--aspect NAME] [--flat FILE] [--jpg] [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
+    [--lut NAME] [--auto-crop] [--aspect NAME] [--flat FILE] [--jpg] [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
 cargo run --release -- scan-prep FILES              # gamma-encode linear TIF scans (no longer needed: set the source to Linear Scan)
 cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorChecker negative (ev = stops over)
 ```
@@ -27,7 +27,7 @@ cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorCh
 **Folder View**
 - Browse a folder of RAW and TIFF files as a thumbnail grid. Select with click, ⌘/Ctrl-click, Shift-click or ⌘A; double-click (or Enter) opens the editor.
 - Actions take the selection, or else the frames on show (with nothing selected, Export and the contact sheet leave rejected frames out):
-  - **Convert** (⋯ menu or right-click) opens a dialog with the conversion inputs: source, colour model, film base, flat field, pre-saturation, border buffer, white balance, *Auto-crop frames* and, with *Balance as a roll* on (2+ frames), the roll process (Lab: each frame's own colour and density, or Darkroom: one setting for the roll).
+  - **Convert** (⋯ menu or right-click) opens a dialog with the conversion inputs: source, colour model, film base, flat field, white balance, *Auto-crop frames* and, with *Balance as a roll* on (2+ frames), the roll process (Lab: each frame's own colour and density, or Darkroom: one setting for the roll).
   - **Copy settings** / **Paste settings** (⋯ menu or right-click): copy the edit from the selected frame and paste it onto the selection (⌘C / ⌘V).
   - **Export** (top right): positive copies as TIF (8/16-bit, ZIP) or JPG, in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile and EXIF.
     - Presets: *Lab JPEG M/L* (3000/6000 px) and *Archive TIFF*, plus your own (*Save as…*).
@@ -91,7 +91,7 @@ The engine started as a port of the Lightroom plugin and now models the film its
 | `pipeline.rs` | Film base, density, crosstalk, analysis, auto colour, roll aggregation, renderer |
 | `skin.rs` | Skin detection and skin-keyed print density |
 | `dodge.rs` | Hyper Tone dodging and burning |
-| `presets.rs` | Colour models, pre-saturation, film WB presets, sharpening |
+| `presets.rs` | Colour models, film WB presets, sharpening |
 | `look.rs` | Native looks (`assets/looks.json`, measured from the plugin's looks), grain-aware sharpening |
 | `color.rs` | Working and output spaces, CIELAB / CIEDE2000, generated ICC profiles |
 | `flat.rs` | Flat-field gain maps |

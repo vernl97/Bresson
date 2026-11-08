@@ -31,6 +31,24 @@ enum Drag {
     },
 }
 
+/// What the panel is waiting for from the worker. Every [`ScanCmd`] ends in
+/// one event (see its doc), which brings the panel back to `Idle`; one
+/// command runs at a time.
+#[derive(Default, Clone, PartialEq, Debug)]
+pub enum ScanPhase {
+    #[default]
+    Idle,
+    /// Refresh: the scanner list.
+    Listing,
+    Opening,
+    /// SetSource: the source asked for. It is remembered for the scanner once
+    /// `Opened` confirms the switch, and forgotten if the switch fails.
+    Switching(String),
+    Prescanning,
+    /// Scan: the framed areas not saved yet.
+    Scanning { left: usize },
+}
+
 #[derive(Default)]
 pub struct ScanState {
     pub open: bool,
@@ -39,10 +57,7 @@ pub struct ScanState {
     devices: Option<Vec<DeviceEntry>>,
     sane_note: Option<String>,
     pub info: Option<ScannerInfo>,
-    /// A command is running on the worker.
-    pub busy: bool,
-    /// Frames of the running scan not saved yet.
-    pending: usize,
+    pub phase: ScanPhase,
     pub status: String,
     pub progress: Option<f64>,
     prescan: Option<egui::TextureHandle>,
@@ -53,11 +68,20 @@ pub struct ScanState {
     pub error: Option<String>,
     /// Frames saved since the panel opened.
     pub saved: usize,
-    /// The source asked for and not confirmed yet (see `set_scan_source`).
-    source_req: Option<String>,
 }
 
 impl ScanState {
+    /// A command is running on the worker.
+    pub fn busy(&self) -> bool {
+        self.phase != ScanPhase::Idle
+    }
+
+    /// The command ended.
+    fn idle(&mut self) {
+        self.phase = ScanPhase::Idle;
+        self.progress = None;
+    }
+
     /// The worker the panel is talking to; events from any other are stale.
     pub fn worker_id(&self) -> Option<u64> {
         self.worker.as_ref().map(|w| w.id)
@@ -107,7 +131,24 @@ impl NlpApp {
         };
     }
 
-    fn scan_send(&mut self, cmd: ScanCmd) {
+    /// Send a command, unless one is running: the panel would lose track of
+    /// the running one (an open would also wait behind it with the panel
+    /// already cleared). Returns whether it was sent.
+    fn scan_send(&mut self, cmd: ScanCmd) -> bool {
+        if self.scan.busy() {
+            return false;
+        }
+        let phase = match &cmd {
+            ScanCmd::Refresh => ScanPhase::Listing,
+            ScanCmd::Open(_) => ScanPhase::Opening,
+            ScanCmd::SetSource(s) => ScanPhase::Switching(s.clone()),
+            ScanCmd::Prescan => ScanPhase::Prescanning,
+            ScanCmd::Scan(job) => ScanPhase::Scanning {
+                left: job.areas.len(),
+            },
+            // Sent only by dropping the worker, which ends the panel's session.
+            ScanCmd::Close => ScanPhase::Idle,
+        };
         let worker = self.scan.worker.get_or_insert_with(|| {
             ScanWorker::spawn(
                 self.jobs.sender(),
@@ -116,19 +157,19 @@ impl NlpApp {
             )
         });
         self.scan.error = None;
-        self.scan.busy = true;
+        self.scan.phase = phase;
         self.scan.progress = None;
         worker.send(cmd);
+        true
     }
 
     pub fn refresh_scanners(&mut self) {
         self.scan_send(ScanCmd::Refresh);
     }
 
-    /// Open another scanner. Not while a command runs: the open would wait
-    /// behind it with the panel already cleared, hiding the running scan.
+    /// Open another scanner (not while a command runs).
     pub fn open_scanner(&mut self, choice: ScannerChoice) {
-        if self.scan.busy {
+        if self.scan.busy() {
             return;
         }
         self.scan.info = None;
@@ -145,10 +186,6 @@ impl NlpApp {
     /// scanner has switched (`ScanEvent::Opened`), so a source that fails isn't
     /// tried again on every open.
     pub fn set_scan_source(&mut self, source: String) {
-        if self.scan.busy {
-            return;
-        }
-        self.scan.source_req = Some(source.clone());
         self.scan_send(ScanCmd::SetSource(source));
     }
 
@@ -181,9 +218,7 @@ impl NlpApp {
             source: info.source.clone(),
             gamma_encoded: d.gamma_encoded.contains(&info.choice.key()),
         };
-        let n = job.areas.len();
         self.scan_send(ScanCmd::Scan(Box::new(job)));
-        self.scan.pending = n;
     }
 
     pub fn on_scan_event(&mut self, ctx: &egui::Context, ev: ScanEvent) {
@@ -194,7 +229,7 @@ impl NlpApp {
             ScanEvent::Devices { devices, sane_note } => {
                 s.devices = Some(devices);
                 s.sane_note = sane_note;
-                s.busy = false;
+                s.idle();
             }
             ScanEvent::Opened(info) => {
                 let info = *info;
@@ -209,7 +244,11 @@ impl NlpApp {
                         info.label
                     )
                 };
-                s.busy = false;
+                let asked = match std::mem::take(&mut s.phase) {
+                    ScanPhase::Switching(req) => Some(req),
+                    _ => None,
+                };
+                s.idle();
                 // A flatbed opens on its film source; switch to the one picked last time.
                 let wanted = self.defaults.scan.source.get(&info.choice.key()).cloned();
                 let switch = wanted.filter(|w| {
@@ -218,7 +257,7 @@ impl NlpApp {
                         && info.sources.contains(w)
                 });
                 // A source switch went through: remember it for this scanner.
-                if let Some(req) = s.source_req.take()
+                if let Some(req) = asked
                     && info.source.as_ref() == Some(&req)
                     && self.defaults.scan.source.get(&info.choice.key()) != Some(&req)
                 {
@@ -227,7 +266,6 @@ impl NlpApp {
                 }
                 s.info = Some(info);
                 if let Some(w) = switch {
-                    s.source_req = Some(w.clone());
                     self.scan_send(ScanCmd::SetSource(w));
                 }
             }
@@ -244,12 +282,16 @@ impl NlpApp {
                     "Drag on the prescan to frame the scan."
                 }
                 .into();
-                s.busy = false;
-                s.progress = None;
+                s.idle();
             }
             ScanEvent::Saved { path, ir_path } => {
                 s.saved += 1;
-                s.pending = s.pending.saturating_sub(1);
+                if let ScanPhase::Scanning { left } = &mut s.phase {
+                    *left = left.saturating_sub(1);
+                    if *left == 0 {
+                        s.idle();
+                    }
+                }
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
@@ -259,26 +301,22 @@ impl NlpApp {
                 } else {
                     format!("Saved {name}")
                 };
-                if s.pending == 0 {
-                    s.busy = false;
-                    s.progress = None;
-                }
                 self.add_scanned_frame(path);
             }
             ScanEvent::Cancelled => {
                 s.status = "Cancelled".into();
-                s.busy = false;
-                s.pending = 0;
-                s.progress = None;
+                s.idle();
             }
             ScanEvent::Failed(m) => {
                 s.status.clear();
                 s.error = Some(m.clone());
-                s.busy = false;
-                s.pending = 0;
-                s.progress = None;
+                let asked = match std::mem::take(&mut s.phase) {
+                    ScanPhase::Switching(req) => Some(req),
+                    _ => None,
+                };
+                s.idle();
                 // A source that fails to switch isn't one to come back to on the next open.
-                if let (Some(req), Some(info)) = (s.source_req.take(), &s.info) {
+                if let (Some(req), Some(info)) = (asked, &s.info) {
                     let key = info.choice.key();
                     if self.defaults.scan.source.get(&key) == Some(&req) {
                         self.defaults.scan.source.remove(&key);
@@ -289,7 +327,7 @@ impl NlpApp {
             }
             ScanEvent::Closed => {
                 s.info = None;
-                s.busy = false;
+                s.idle();
             }
         }
     }
@@ -346,7 +384,7 @@ impl NlpApp {
         self.prescan_view(ui, &info);
         ui.add_space(10.0);
 
-        let busy = self.scan.busy;
+        let busy = self.scan.busy();
         let ready = info.scan_ready && !busy && self.folder.is_some();
         let n = self.scan.crops.len();
         let next_key = widgets::shortcut(ui.ctx(), egui::Modifiers::COMMAND, egui::Key::R);
@@ -394,7 +432,7 @@ impl NlpApp {
         let mut picked = None;
         ui.horizontal(|ui| {
             // Switching scanners mid-command would hide the running scan's Cancel.
-            ui.add_enabled_ui(!self.scan.busy, |ui| {
+            ui.add_enabled_ui(!self.scan.busy(), |ui| {
                 widgets::combo("scan_scanner")
                     .width(230.0)
                     .selected_text(text)
@@ -410,7 +448,7 @@ impl NlpApp {
                     });
             });
             if ui
-                .add_enabled(!self.scan.busy, widgets::ghost("Refresh"))
+                .add_enabled(!self.scan.busy(), widgets::ghost("Refresh"))
                 .on_hover_text("Look for connected scanners")
                 .clicked()
             {
@@ -442,7 +480,7 @@ impl NlpApp {
                 ui.label(RichText::new("Source").color(theme::MUTED));
                 let current = info.source.clone().unwrap_or_default();
                 // A source change would wait behind the running command and then reset the boxes.
-                ui.add_enabled_ui(!self.scan.busy, |ui| {
+                ui.add_enabled_ui(!self.scan.busy(), |ui| {
                     widgets::combo("scan_source").selected_text(&current).show_ui(ui, |ui| {
                         for s in &info.sources {
                             if ui.selectable_label(*s == current, s).clicked() && *s != current {
@@ -751,9 +789,9 @@ impl NlpApp {
 
     fn scan_status(&self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        if let Some(p) = self.scan.progress.filter(|_| self.scan.busy) {
+        if let Some(p) = self.scan.progress.filter(|_| self.scan.busy()) {
             ui.add(egui::ProgressBar::new(p as f32).desired_height(6.0));
-        } else if self.scan.busy {
+        } else if self.scan.busy() {
             ui.spinner();
         }
         if !self.scan.status.is_empty() {

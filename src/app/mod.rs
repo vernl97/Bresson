@@ -38,6 +38,52 @@ pub enum View {
     Editor,
 }
 
+/// A progress bar's count over batches that may overlap: a batch started
+/// while one runs joins its count, and one started after it finished begins
+/// a fresh count.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub total: usize,
+    pub done: usize,
+}
+
+impl Progress {
+    pub fn start(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        if !self.running() {
+            *self = Self::default();
+        }
+        self.total += n;
+    }
+
+    pub fn finish(&mut self, n: usize) {
+        self.done += n;
+    }
+
+    pub fn running(&self) -> bool {
+        self.done < self.total
+    }
+
+    pub fn fraction(&self) -> f32 {
+        self.done.min(self.total) as f32 / self.total.max(1) as f32
+    }
+}
+
+/// What fills the window: worked out from the view and what is open, in
+/// [`NlpApp::screen`], so the routing lives in one place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Screen {
+    /// First run, or nothing open and no rolls yet.
+    Welcome,
+    /// The Rolls start screen.
+    Projects,
+    /// A roll's grid, even while it is empty; also a set of lone files.
+    Roll,
+    Editor,
+}
+
 pub enum ProxyState {
     NotLoaded,
     Loading,
@@ -59,9 +105,8 @@ pub struct Frame {
     pub exporting: bool,
     /// No saved settings yet: the scan source is set from the file.
     pub source_auto: bool,
-    /// Not converted when the folder opened: cropped and converted by
-    /// itself (see `auto.rs`) until the user converts it by hand.
-    pub auto_convert: bool,
+    /// Whether it converts by itself (see `auto.rs`).
+    pub auto: auto::AutoConvert,
     /// The thumbnail as the scanned negative (unconverted), made on demand.
     pub thumb_neg: Option<egui::TextureHandle>,
     /// The conversion this frame waits for, if any (see [`ConvertTicket`]).
@@ -78,6 +123,8 @@ pub struct ConvertTicket {
     /// applies only if the frame still has it, so a crop made meanwhile stays.
     pub crop: [f32; 4],
     pub straighten: f32,
+    /// An automatic conversion: while it runs the frame is in flight.
+    pub auto: bool,
 }
 
 impl Frame {
@@ -160,8 +207,8 @@ pub struct NlpApp {
     pub toasts: Vec<Toast>,
     /// The keyboard shortcut sheet is showing.
     pub shortcuts_open: bool,
-    pub export_total: usize,
-    pub export_done: usize,
+    /// Exports sent and finished, for the progress bar.
+    pub export_progress: Progress,
     pub thumb_size: f32,
     /// Grid filter, quick look and the other grid view state.
     pub grid: folder::GridState,
@@ -215,8 +262,7 @@ impl NlpApp {
             editor: editor::Editor::default(),
             toasts: Vec::new(),
             shortcuts_open: false,
-            export_total: 0,
-            export_done: 0,
+            export_progress: Progress::default(),
             thumb_size: 180.0,
             grid: Default::default(),
             time: 0.0,
@@ -242,6 +288,32 @@ impl NlpApp {
             }
         }
         app
+    }
+
+    pub fn screen(&self) -> Screen {
+        if self.view == View::Editor {
+            return Screen::Editor;
+        }
+        // An open roll shows its (maybe still empty) grid, so its Scan button is reachable.
+        let open_roll = self.folder.is_some() && !self.single_mode && !self.roll.projects_open;
+        if !self.frames.is_empty() || open_roll {
+            Screen::Roll
+        } else if self.roll.projects_open && !self.defaults.projects.is_empty() {
+            Screen::Projects
+        } else {
+            Screen::Welcome
+        }
+    }
+
+    /// A modal dialog is up: the keyboard shortcuts of the screen under it
+    /// wait. Every modal belongs here.
+    pub fn modal_open(&self) -> bool {
+        self.shortcuts_open
+            || self.export_targets.is_some()
+            || self.convert_dialog.is_some()
+            || self.exposure_prompt.is_some()
+            || self.roll.dialog.is_some()
+            || self.editor.film_open
     }
 
     pub fn toast(&mut self, text: impl Into<String>, error: bool) {
@@ -356,7 +428,13 @@ impl NlpApp {
             sc.settings.film_base = crate::engine::settings::FilmBase::Off;
             sc.settings.source = crate::engine::settings::Source::TifScan;
         }
-        let auto_convert = !sc.is_converted();
+        // Not converted when the folder opened: cropped and converted by
+        // itself until the user converts it by hand.
+        let auto = if sc.is_converted() {
+            auto::AutoConvert::Off
+        } else {
+            auto::AutoConvert::On
+        };
         Frame {
             name: path
                 .file_name()
@@ -371,7 +449,7 @@ impl NlpApp {
             dirty_since: None,
             exporting: false,
             source_auto,
-            auto_convert,
+            auto,
             thumb_neg: None,
             convert_ticket: None,
         }
@@ -379,7 +457,7 @@ impl NlpApp {
 
     /// What a conversion of frame `i` needs, with a new ticket that makes any
     /// conversion of it still running stale.
-    pub fn convert_item(&mut self, i: usize) -> jobs::ConvertItem {
+    pub fn convert_item(&mut self, i: usize, auto: bool) -> jobs::ConvertItem {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let f = &mut self.frames[i];
@@ -387,12 +465,14 @@ impl NlpApp {
             id,
             crop: f.sc.settings.crop,
             straighten: f.sc.settings.straighten,
+            auto,
         });
         jobs::ConvertItem {
             path: f.path.clone(),
             proxy: f.proxy(),
             settings: f.sc.settings.clone(),
             ticket: id,
+            auto,
         }
     }
 
@@ -422,7 +502,7 @@ impl NlpApp {
         // count them out so the progress bar ends.
         let dropped = self.auto.export_waiting.len();
         if dropped > 0 {
-            self.export_done += dropped;
+            self.export_progress.finish(dropped);
             self.toast(
                 format!("Cancelled {dropped} export(s) waiting for their conversion"),
                 true,
@@ -585,7 +665,7 @@ impl NlpApp {
             return;
         }
         self.auto_release(&idx);
-        let items: Vec<_> = idx.iter().map(|&i| self.convert_item(i)).collect();
+        let items: Vec<_> = idx.iter().map(|&i| self.convert_item(i, false)).collect();
         self.convert_started(idx.len());
         self.jobs.spawn(move || jobs::convert(items, as_roll, true));
     }
@@ -676,7 +756,6 @@ impl NlpApp {
         if targets.is_empty() {
             return;
         }
-        self.editor.export_open = true;
         self.export_targets = Some(targets);
     }
 
@@ -707,13 +786,7 @@ impl NlpApp {
             }
         }
         self.convert(unconverted, false);
-        if n > 0 {
-            if self.export_done >= self.export_total {
-                self.export_total = 0;
-                self.export_done = 0;
-            }
-            self.export_total += n;
-        }
+        self.export_progress.start(n);
     }
 
     pub fn spawn_export(&mut self, i: usize, target: PathBuf, ex: ExportSettings) {
@@ -742,17 +815,11 @@ impl NlpApp {
 
     pub fn export_dialog(&mut self, ctx: &egui::Context) {
         use widgets::theme;
-        if self.editor.export_open && self.export_targets.is_none() {
-            if let Some(i) = self.active {
-                self.export_targets = Some(vec![i]);
-            }
-        }
         let Some(targets) = self.export_targets.clone() else {
             return;
         };
         if targets.is_empty() {
             self.export_targets = None;
-            self.editor.export_open = false;
             return;
         }
 
@@ -1128,12 +1195,10 @@ impl NlpApp {
         }
         if r.should_close() || should_close {
             self.export_targets = None;
-            self.editor.export_open = false;
         }
 
         if go {
             self.export_targets = None;
-            self.editor.export_open = false;
 
             let mut ex = self.defaults.export.clone();
             ex.output_dir = custom_dir;
@@ -1153,19 +1218,33 @@ impl NlpApp {
         &mut self,
         frames: Vec<jobs::ConvertedFrame>,
         roll: Option<sidecar::RollData>,
-        errors: Vec<String>,
+        errors: Vec<jobs::ConvertError>,
+        auto: bool,
     ) {
         // A conversion of a roll that has since closed: its frames are
         // gone, and it is not part of this roll's progress.
-        if !frames.is_empty() && frames.iter().all(|f| self.index_of(&f.path).is_none()) {
+        let mut paths = frames.iter().map(|f| &f.path).chain(errors.iter().map(|e| &e.path));
+        if !(frames.is_empty() && errors.is_empty()) && paths.all(|p| self.index_of(p).is_none()) {
             return;
         }
-        for e in &errors {
-            self.toast(e.clone(), true);
+        self.auto.progress.finish(frames.len() + errors.len());
+        if auto && roll.is_some() && self.auto.roll_pass == auto::RollPass::Running {
+            self.auto.roll_pass = auto::RollPass::Done;
         }
-        self.auto.convert_done += frames.len() + errors.len();
-        let paths: Vec<PathBuf> = frames.iter().map(|f| f.path.clone()).collect();
-        let auto = self.auto_converted(&paths, roll.is_some());
+        // Frames that couldn't be read: nothing is in flight for them any
+        // more, and exports waiting for them are cancelled below.
+        for e in errors {
+            if let Some(i) = self.index_of(&e.path) {
+                let f = &mut self.frames[i];
+                if f.convert_ticket.is_some_and(|t| t.id == e.ticket) {
+                    f.convert_ticket = None;
+                }
+                if !matches!(f.proxy, ProxyState::Ready(_)) {
+                    f.proxy = ProxyState::Failed(e.message.clone());
+                }
+            }
+            self.toast(e.message, true);
+        }
         let mut n = 0;
         for cf in frames {
             let Some(i) = self.index_of(&cf.path) else {
@@ -1237,7 +1316,7 @@ impl NlpApp {
                     if items.iter().all(|it| self.index_of(&it.path).is_none()) {
                         continue;
                     }
-                    self.auto.convert_done += items.len();
+                    self.auto.progress.finish(items.len());
                     if let Some(items) = self.auto_exposure_variance(items, spread) {
                         self.exposure_prompt = Some((items, spread));
                     }
@@ -1286,17 +1365,16 @@ impl NlpApp {
                 }
                 JobResult::Editor { path, result } => {
                     if self.editor.path.as_ref() == Some(&path) {
-                        self.editor.loading = false;
                         match result {
                             Ok(src) => {
                                 if let Some(i) = self.index_of(&path) {
                                     self.auto_source(i, &src);
                                 }
-                                self.editor.src = Some(src);
+                                self.editor.image = ProxyState::Ready(src);
                                 self.editor.invalidate();
                             }
                             Err(e) => {
-                                self.editor.load_error = Some(e.clone());
+                                self.editor.image = ProxyState::Failed(e.clone());
                                 self.toast(e, true);
                             }
                         }
@@ -1306,22 +1384,23 @@ impl NlpApp {
                     frames,
                     roll,
                     errors,
+                    auto,
                 } => {
-                    self.on_converted(frames, roll, errors);
+                    self.on_converted(frames, roll, errors, auto);
                 }
                 JobResult::Exported { path, result } => {
-                    self.export_done += 1;
+                    self.export_progress.finish(1);
                     if let Some(i) = self.index_of(&path) {
                         self.frames[i].exporting = false;
                     }
                     match result {
                         Ok(p) => {
-                            if self.export_done >= self.export_total {
+                            if !self.export_progress.running() {
+                                let n = self.export_progress.total;
                                 let dir = p.parent().unwrap_or(&p).display().to_string();
                                 let msg = format!(
-                                    "Exported {} positive cop{} to {dir}",
-                                    self.export_total,
-                                    if self.export_total == 1 { "y" } else { "ies" },
+                                    "Exported {n} positive cop{} to {dir}",
+                                    if n == 1 { "y" } else { "ies" },
                                 );
                                 self.toast(msg, false);
                                 if let Some(t) = self.toasts.last_mut() {
@@ -1394,7 +1473,7 @@ impl NlpApp {
         if self.editor.path.as_ref() != Some(&path) {
             self.editor.load(&path, self.frames[i].sc.settings.clone());
             self.load_editor_image(i);
-        } else if self.editor.load_error.is_some() {
+        } else if self.editor.load_error().is_some() {
             // It failed last time (a network folder that was away, say): try again.
             self.load_editor_image(i);
         }
@@ -1404,8 +1483,7 @@ impl NlpApp {
 
     /// Decode frame `i`'s editor preview in the background.
     pub fn load_editor_image(&mut self, i: usize) {
-        self.editor.loading = true;
-        self.editor.load_error = None;
+        self.editor.image = ProxyState::Loading;
         let p = self.frames[i].path.clone();
         self.jobs.spawn(move || {
             let result = jobs::load_editor(&p)
@@ -1541,9 +1619,17 @@ impl eframe::App for NlpApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        match self.view {
-            View::Folder => self.folder_ui(ui),
-            View::Editor => self.editor_ui(ui),
+        match self.screen() {
+            Screen::Welcome => {
+                self.open_shortcut(&ctx);
+                self.welcome_ui(ui);
+            }
+            Screen::Projects => {
+                self.open_shortcut(&ctx);
+                self.projects_ui(ui);
+            }
+            Screen::Roll => self.folder_ui(ui),
+            Screen::Editor => self.editor_ui(ui),
         }
         self.toasts_ui(&ctx);
         self.export_dialog(&ctx);
@@ -1613,7 +1699,7 @@ mod tests {
             dirty_since: None,
             exporting: false,
             source_auto: false,
-            auto_convert: false,
+            auto: auto::AutoConvert::Off,
             thumb_neg: None,
             convert_ticket: None,
         };
@@ -1652,8 +1738,8 @@ mod ui_tests {
                     .frames
                     .iter()
                     .any(|f| f.thumb_dirty && f.thumb_src.is_some())
-                || h.state().editor.loading
-                || h.state().auto.busy();
+                || h.state().editor.is_loading()
+                || h.state().auto_busy();
             if (!busy && t0.elapsed().as_secs_f32() > 0.5) || t0.elapsed().as_secs_f32() > secs {
                 break;
             }
@@ -2072,10 +2158,10 @@ mod ui_tests {
         }
         h.key_press(egui::Key::C);
         h.run_steps(5);
-        assert!(h.state().editor.crop.is_some(), "Crop opens crop mode");
+        assert!(h.state().editor.crop().is_some(), "Crop opens crop mode");
         h.key_press(egui::Key::Escape);
         h.run_steps(5);
-        assert!(h.state().editor.crop.is_none());
+        assert!(h.state().editor.crop().is_none());
         h.key_press(egui::Key::ArrowRight);
         h.run_steps(5);
         assert_eq!(h.state().active, Some(1));
@@ -2293,7 +2379,7 @@ mod ui_tests {
         }
         h.key_press(egui::Key::Escape);
         h.run_steps(3);
-        assert!(h.state().editor.crop.is_none(), "Esc leaves crop mode");
+        assert!(h.state().editor.crop().is_none(), "Esc leaves crop mode");
         assert_eq!(
             h.state().frames[i].sc.settings.crop,
             start.crop,
@@ -2307,7 +2393,7 @@ mod ui_tests {
         h.get_by_label("Done").click();
         h.run_steps(3);
         let s = &h.state().frames[i].sc.settings;
-        assert!(h.state().editor.crop.is_none(), "Done leaves crop mode");
+        assert!(h.state().editor.crop().is_none(), "Done leaves crop mode");
         assert_eq!((s.crop, s.straighten), (pending, 2.5), "Done applies");
 
         h.key_press(egui::Key::C);
@@ -2317,7 +2403,7 @@ mod ui_tests {
         h.get_by_label("Close").click();
         h.run_steps(3);
         let s = &h.state().frames[i].sc.settings;
-        assert!(h.state().editor.crop.is_none(), "Close leaves crop mode");
+        assert!(h.state().editor.crop().is_none(), "Close leaves crop mode");
         assert_eq!((s.crop, s.straighten), ([0.0; 4], 0.0), "Reset, then Close");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2364,7 +2450,7 @@ mod ui_tests {
 
         h.key_press(egui::Key::Q);
         h.run_steps(3);
-        assert!(h.state().editor.heal.is_some(), "Q turns the tool on");
+        assert!(h.state().editor.heal().is_some(), "Q turns the tool on");
         h.hover_at(egui::pos2(500.0, 400.0));
         h.run_steps(3);
         snap(&mut h, "heal_1_empty");
@@ -2404,7 +2490,7 @@ mod ui_tests {
         snap(&mut h, "heal_3_two_spots");
 
         // The panel acts on the selected spot: Clone at once, Opacity on release.
-        click(&mut h, egui::pos2(1292.0, 269.0));
+        click(&mut h, egui::pos2(1292.0, 229.0));
         let last = |h: &Harness<'_, NlpApp>| *spots(h).last().unwrap();
         assert_eq!(
             last(&h).mode,
@@ -2412,24 +2498,24 @@ mod ui_tests {
             "Clone applies to the selected spot"
         );
         assert_eq!(spots(&h).len(), 2, "the panel placed no spot");
-        h.hover_at(egui::pos2(1407.0, 336.0));
+        h.hover_at(egui::pos2(1407.0, 296.0));
         h.step();
-        h.drag_at(egui::pos2(1407.0, 336.0));
+        h.drag_at(egui::pos2(1407.0, 296.0));
         h.step();
-        h.hover_at(egui::pos2(1330.0, 336.0));
+        h.hover_at(egui::pos2(1330.0, 296.0));
         h.run_steps(2);
         assert_eq!(last(&h).opacity, 100.0, "not applied while held");
-        h.drop_at(egui::pos2(1330.0, 336.0));
+        h.drop_at(egui::pos2(1330.0, 296.0));
         h.run_steps(3);
         assert!(last(&h).opacity < 60.0, "Opacity applied on release");
         settle(&mut h, 10.0);
         snap(&mut h, "heal_3b_clone_opacity");
-        if let Some(edit) = h.state_mut().editor.heal.as_mut() {
+        if let Some(edit) = h.state_mut().editor.heal_mut() {
             edit.set_visualize(true);
         }
         h.run_steps(3);
         snap(&mut h, "heal_4_visualize");
-        if let Some(edit) = h.state_mut().editor.heal.as_mut() {
+        if let Some(edit) = h.state_mut().editor.heal_mut() {
             edit.set_visualize(false);
         }
 
@@ -2462,10 +2548,10 @@ mod ui_tests {
         // The tool follows to the next frame, and Esc leaves the tool, not the editor.
         h.key_press(egui::Key::ArrowRight);
         h.run_steps(3);
-        assert!(h.state().editor.heal.is_some(), "the tool stayed on");
+        assert!(h.state().editor.heal().is_some(), "the tool stayed on");
         h.key_press(egui::Key::Escape);
         h.run_steps(3);
-        assert!(h.state().editor.heal.is_none());
+        assert!(h.state().editor.heal().is_none());
         assert!(matches!(h.state().view, View::Editor));
 
         // Crop and heal don't run together.
@@ -2473,23 +2559,23 @@ mod ui_tests {
         h.run_steps(2);
         h.key_press(egui::Key::C);
         h.run_steps(2);
-        assert!(h.state().editor.crop.is_some() && h.state().editor.heal.is_none());
+        assert!(h.state().editor.crop().is_some() && h.state().editor.heal().is_none());
         h.key_press(egui::Key::Q);
         h.run_steps(2);
-        assert!(h.state().editor.crop.is_none() && h.state().editor.heal.is_some());
+        assert!(h.state().editor.crop().is_none() && h.state().editor.heal().is_some());
         // The eyedropper closes heal, and waits for the crop to close.
         h.key_press(egui::Key::W);
         h.run_steps(2);
-        assert!(h.state().editor.heal.is_none());
-        assert!(h.state().editor.pick == Some(editor::Pick::WhiteBalance));
+        assert!(h.state().editor.heal().is_none());
+        assert!(h.state().editor.pick() == Some(editor::Pick::WhiteBalance));
         h.key_press(egui::Key::Escape);
         h.run_steps(2);
-        assert!(h.state().editor.pick.is_none());
+        assert!(h.state().editor.pick().is_none());
         h.key_press(egui::Key::C);
         h.run_steps(2);
         h.key_press(egui::Key::W);
         h.run_steps(2);
-        assert!(h.state().editor.crop.is_some() && h.state().editor.pick.is_none());
+        assert!(h.state().editor.crop().is_some() && h.state().editor.pick().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2537,7 +2623,7 @@ mod ui_tests {
 
         h.key_press(egui::Key::K);
         h.run_steps(3);
-        assert!(h.state().editor.burn.is_some(), "K turns the brush on");
+        assert!(h.state().editor.burn().is_some(), "K turns the brush on");
         h.hover_at(egui::pos2(500.0, 400.0));
         h.run_steps(3);
         snap(&mut h, "burn_1_brush");
@@ -2556,7 +2642,7 @@ mod ui_tests {
         assert_eq!(strokes(&h).len(), 1);
         assert!(strokes(&h)[0].points.len() > 3 && strokes(&h)[0].ev > 0.0);
 
-        if let Some(b) = h.state_mut().editor.burn.as_mut() {
+        if let Some(b) = h.state_mut().editor.burn_mut() {
             b.mode = editor::BurnMode::Burn;
             b.overlay = true;
         }
@@ -2569,7 +2655,7 @@ mod ui_tests {
         assert!(lo < -0.3, "it burns: {lo}");
         settle(&mut h, 10.0);
         snap(&mut h, "burn_2_overlay");
-        if let Some(b) = h.state_mut().editor.burn.as_mut() {
+        if let Some(b) = h.state_mut().editor.burn_mut() {
             b.overlay = false;
         }
         h.run_steps(3);
@@ -2587,19 +2673,19 @@ mod ui_tests {
         // Heal, crop and the brush take turns; Esc leaves the brush, not the editor.
         h.key_press(egui::Key::Q);
         h.run_steps(2);
-        assert!(h.state().editor.heal.is_some() && h.state().editor.burn.is_none());
+        assert!(h.state().editor.heal().is_some() && h.state().editor.burn().is_none());
         h.key_press(egui::Key::K);
         h.run_steps(2);
-        assert!(h.state().editor.heal.is_none() && h.state().editor.burn.is_some());
+        assert!(h.state().editor.heal().is_none() && h.state().editor.burn().is_some());
         h.key_press(egui::Key::C);
         h.run_steps(2);
-        assert!(h.state().editor.crop.is_some() && h.state().editor.burn.is_none());
+        assert!(h.state().editor.crop().is_some() && h.state().editor.burn().is_none());
         h.key_press(egui::Key::K);
         h.run_steps(2);
-        assert!(h.state().editor.crop.is_none() && h.state().editor.burn.is_some());
+        assert!(h.state().editor.crop().is_none() && h.state().editor.burn().is_some());
         h.key_press(egui::Key::Escape);
         h.run_steps(3);
-        assert!(h.state().editor.burn.is_none());
+        assert!(h.state().editor.burn().is_none());
         assert!(matches!(h.state().view, View::Editor));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2607,7 +2693,7 @@ mod ui_tests {
     /// Step until `done` holds and the Scan panel's worker is idle.
     fn wait_scan(h: &mut Harness<'_, NlpApp>, done: impl Fn(&NlpApp) -> bool) {
         let t0 = std::time::Instant::now();
-        while (h.state().scan.busy || !done(h.state())) && t0.elapsed().as_secs() < 60 {
+        while (h.state().scan.busy() || !done(h.state())) && t0.elapsed().as_secs() < 60 {
             h.step();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -2617,7 +2703,7 @@ mod ui_tests {
             h.state().scan.error
         );
         assert!(
-            !h.state().scan.busy && done(h.state()),
+            !h.state().scan.busy() && done(h.state()),
             "scanner still busy: {}",
             h.state().scan.status
         );
@@ -2754,7 +2840,7 @@ mod ui_tests {
         }
         let before = h.state().scan.info.clone().unwrap();
         h.state_mut().scan_frames();
-        assert!(h.state().scan.busy);
+        assert!(h.state().scan.busy());
         h.state_mut()
             .open_scanner(scanner::ScannerChoice::Simulated(
                 "plustek-opticfilm-8200i-se".into(),
@@ -2790,7 +2876,7 @@ mod ui_tests {
 
         h.state_mut().set_scan_source("Bogus".into());
         let t0 = std::time::Instant::now();
-        while h.state().scan.busy && t0.elapsed().as_secs() < 30 {
+        while h.state().scan.busy() && t0.elapsed().as_secs() < 30 {
             h.step();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -2829,7 +2915,7 @@ mod ui_tests {
         for f in &app.frames {
             assert!(f.sc.is_converted(), "{} converted", f.name);
             assert!(f.sc.roll.is_some(), "{} balanced as a roll", f.name);
-            assert!(f.auto_convert);
+            assert!(f.auto != auto::AutoConvert::Off);
         }
         assert_eq!(app.auto.roll_pass, auto::RollPass::Done);
         assert!(app.convert_dialog.is_none() && app.exposure_prompt.is_none());
@@ -2924,8 +3010,7 @@ mod ui_tests {
             editor: editor::Editor::default(),
             toasts: Vec::new(),
             shortcuts_open: false,
-            export_total: 0,
-            export_done: 0,
+            export_progress: Progress::default(),
             thumb_size: 180.0,
             grid: Default::default(),
             time: 0.0,
@@ -2974,8 +3059,7 @@ mod ui_tests {
             editor: editor::Editor::default(),
             toasts: Vec::new(),
             shortcuts_open: false,
-            export_total: 0,
-            export_done: 0,
+            export_progress: Progress::default(),
             thumb_size: 180.0,
             grid: Default::default(),
             time: 0.0,
@@ -2994,12 +3078,10 @@ mod ui_tests {
         // Empty targets is a no-op
         app.open_export_dialog(vec![]);
         assert!(app.export_targets.is_none());
-        assert!(!app.editor.export_open);
 
         // Open dialog for indices
         app.open_export_dialog(vec![0, 2]);
         assert_eq!(app.export_targets, Some(vec![0, 2]));
-        assert!(app.editor.export_open);
     }
 
     #[test]
@@ -3017,8 +3099,7 @@ mod ui_tests {
             editor: editor::Editor::default(),
             toasts: Vec::new(),
             shortcuts_open: false,
-            export_total: 0,
-            export_done: 0,
+            export_progress: Progress::default(),
             thumb_size: 180.0,
             grid: Default::default(),
             time: 0.0,
@@ -3100,8 +3181,7 @@ mod ui_tests {
             editor: editor::Editor::default(),
             toasts: Vec::new(),
             shortcuts_open: false,
-            export_total: 0,
-            export_done: 0,
+            export_progress: Progress::default(),
             thumb_size: 180.0,
             grid: Default::default(),
             time: 0.0,
@@ -3166,8 +3246,7 @@ mod ui_tests {
             editor: editor::Editor::default(),
             toasts: Vec::new(),
             shortcuts_open: false,
-            export_total: 0,
-            export_done: 0,
+            export_progress: Progress::default(),
             thumb_size: 180.0,
             grid: Default::default(),
             time: 0.0,
@@ -3204,7 +3283,8 @@ mod ui_tests {
                 frames,
                 roll,
                 errors,
-            } => app.on_converted(frames, roll, errors),
+                auto,
+            } => app.on_converted(frames, roll, errors, auto),
             _ => panic!("expected a conversion result"),
         }
     }
@@ -3212,11 +3292,11 @@ mod ui_tests {
     /// Handle job results until the editor's preview load has come back.
     fn wait_editor(app: &mut NlpApp) {
         let t0 = std::time::Instant::now();
-        while app.editor.loading && t0.elapsed().as_secs() < 30 {
+        while app.editor.is_loading() && t0.elapsed().as_secs() < 30 {
             app.poll_jobs();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(!app.editor.loading, "editor load never came back");
+        assert!(!app.editor.is_loading(), "editor load never came back");
     }
 
     /// A frame the editor can't read says so, and opening it again retries.
@@ -3231,16 +3311,16 @@ mod ui_tests {
         app.load_frames(vec![img.clone()], &dir);
         app.open_editor(0);
         wait_editor(&mut app);
-        assert!(app.editor.src.is_none() && app.editor.load_error.is_some());
+        assert!(app.editor.src().is_none() && app.editor.load_error().is_some());
 
         // The file is readable now (a network folder came back): back to the
         // grid and in again loads it.
         crate::cli::synth_negative(&img, 0.0).unwrap();
         app.view = View::Folder;
         app.open_editor(0);
-        assert!(app.editor.loading, "opening the frame again retries");
+        assert!(app.editor.is_loading(), "opening the frame again retries");
         wait_editor(&mut app);
-        assert!(app.editor.src.is_some() && app.editor.load_error.is_none());
+        assert!(app.editor.src().is_some() && app.editor.load_error().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3249,7 +3329,7 @@ mod ui_tests {
     fn conversion_result_keeps_a_crop_made_meanwhile() {
         let (dir, mut app) = roll_of_one("crop");
         app.frames[0].sc.settings.auto_crop = true;
-        let item = app.convert_item(0);
+        let item = app.convert_item(0, false);
         let s = &mut app.frames[0].sc.settings;
         s.crop = [5.0, 6.0, 7.0, 8.0];
         s.straighten = 1.5;
@@ -3274,7 +3354,7 @@ mod ui_tests {
         s.auto_crop = true;
         s.crop = [4.0; 4];
         s.crop_aspect = CropAspect::TwoThree;
-        let item = app.convert_item(0);
+        let item = app.convert_item(0, false);
         finish_convert(&mut app, vec![item]);
         let f = &app.frames[0];
         assert!(f.sc.is_converted());
@@ -3288,9 +3368,9 @@ mod ui_tests {
     #[test]
     fn unconvert_during_a_conversion_sticks() {
         let (dir, mut app) = roll_of_one("unconvert");
-        let item = app.convert_item(0);
+        let item = app.convert_item(0, false);
         app.frames[0].exporting = true;
-        app.export_total = 1;
+        app.export_progress.start(1);
         let ex = app.defaults.export.clone();
         app.auto
             .export_waiting
@@ -3300,7 +3380,7 @@ mod ui_tests {
         let f = &app.frames[0];
         assert!(!f.sc.is_converted(), "the old conversion came back");
         assert!(!f.exporting && app.auto.export_waiting.is_empty());
-        assert_eq!(app.export_done, 1, "the export is counted out");
+        assert_eq!(app.export_progress.done, 1, "the export is counted out");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3308,9 +3388,9 @@ mod ui_tests {
     #[test]
     fn older_conversion_does_not_overwrite_a_newer_one() {
         let (dir, mut app) = roll_of_one("newer");
-        let old = app.convert_item(0);
-        app.frames[0].sc.settings.border_buffer += 5.0;
-        let new = app.convert_item(0);
+        let old = app.convert_item(0, false);
+        app.frames[0].sc.settings.crosstalk_strength -= 10.0;
+        let new = app.convert_item(0, false);
         let key = app.frames[0].sc.settings.analysis_key();
         finish_convert(&mut app, vec![new]);
         finish_convert(&mut app, vec![old]);
@@ -3319,23 +3399,23 @@ mod ui_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Changing the roll's source while an automatic conversion runs: its
-    /// result is dropped and the frame queues again with the new source.
+    /// Changing the roll's source while an automatic conversion runs: the
+    /// frame queues again with the new source at once, and the old result is
+    /// dropped when it comes back.
     #[test]
     fn source_change_during_auto_conversion_requeues() {
         let (dir, mut app) = roll_of_one("source");
-        app.frames[0].auto_convert = true;
-        let path = app.frames[0].path.clone();
-        app.auto.in_flight.insert(path.clone());
-        let item = app.convert_item(0);
+        app.frames[0].auto = auto::AutoConvert::On;
+        let item = app.convert_item(0, true);
+        assert!(app.auto_busy(), "in flight");
         app.set_roll_source(crate::engine::settings::Source::LinearScan);
-        assert!(app.auto.queue.is_empty(), "still in flight");
+        assert_eq!(app.frames[0].auto, auto::AutoConvert::Queued);
         finish_convert(&mut app, vec![item]);
         assert!(
             !app.frames[0].sc.is_converted(),
             "old-source analysis dropped"
         );
-        assert_eq!(app.auto.queue, vec![path]);
+        assert_eq!(app.frames[0].auto, auto::AutoConvert::Queued);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

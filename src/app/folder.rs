@@ -253,7 +253,7 @@ impl NlpApp {
     }
 
     /// Start screen shown when there are no projects yet.
-    fn welcome_ui(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn welcome_ui(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG))
             .show(ui, |ui| {
@@ -338,16 +338,6 @@ impl NlpApp {
 
     pub fn folder_ui(&mut self, ui: &mut egui::Ui) {
         self.open_shortcut(ui.ctx());
-        // An open roll shows its (maybe still empty) grid, so its Scan button is reachable.
-        let empty_roll = self.folder.is_some() && !self.single_mode && !self.roll.projects_open;
-        if self.frames.is_empty() && !empty_roll {
-            if self.roll.projects_open && !self.defaults.projects.is_empty() {
-                self.projects_ui(ui);
-            } else {
-                self.welcome_ui(ui);
-            }
-            return;
-        }
         let ctx = ui.ctx().clone();
         self.folder_shortcuts(&ctx);
         let cmd = egui::Modifiers::COMMAND;
@@ -647,7 +637,7 @@ impl NlpApp {
                         self.selection_strip_ui(ui);
                     } else if !self.frames.is_empty() {
                         let waiting = self.frames.iter().filter(|f| !f.sc.is_converted()).count();
-                        let hint = if waiting > 0 && !self.auto.busy() {
+                        let hint = if waiting > 0 && !self.auto_busy() {
                             format!("{waiting} not converted · Space to preview · ? for shortcuts")
                         } else {
                             "Space to preview · ? for shortcuts".to_string()
@@ -661,12 +651,10 @@ impl NlpApp {
                         widgets::mini_slider(ui, &mut self.thumb_size, 110.0..=340.0, 90.0)
                             .on_hover_text("Thumbnail size");
                         ui.label(tiny("Size"));
-                        let (done, total) = (self.auto.convert_done, self.auto.convert_total);
-                        if self.auto.busy() || done < total {
+                        let conv = self.auto.progress;
+                        if self.auto_busy() || conv.running() {
                             ui.add_space(12.0);
-                            let auto = !self.auto.queue.is_empty()
-                                || self.auto.roll_pass == super::auto::RollPass::Running;
-                            if auto
+                            if self.auto_pending()
                                 && ui
                                     .add(egui::Button::new(tiny("Stop")).frame(false))
                                     .on_hover_text("Stop converting new frames by themselves")
@@ -677,22 +665,21 @@ impl NlpApp {
                             let label = if self.auto.roll_pass == super::auto::RollPass::Running {
                                 "Balancing the roll…".to_string()
                             } else {
-                                format!("Converting {}/{}", done.min(total), total.max(1))
+                                format!("Converting {}/{}", conv.done.min(conv.total), conv.total.max(1))
                             };
                             ui.add(
-                                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                                egui::ProgressBar::new(conv.fraction())
                                     .desired_width(120.0)
                                     .desired_height(4.0)
                                     .fill(theme::ACCENT),
                             );
                             ui.label(RichText::new(label).small().color(theme::MUTED));
                         }
-                        if self.export_total > 0 && self.export_done < self.export_total {
+                        let ex = self.export_progress;
+                        if ex.running() {
                             ui.add_space(12.0);
                             ui.add(
-                                egui::ProgressBar::new(
-                                    self.export_done as f32 / self.export_total as f32,
-                                )
+                                egui::ProgressBar::new(ex.fraction())
                                 .desired_width(120.0)
                                 .desired_height(4.0)
                                 .fill(theme::ACCENT),
@@ -700,7 +687,7 @@ impl NlpApp {
                             ui.label(
                                 RichText::new(format!(
                                     "Exporting {}/{}",
-                                    self.export_done, self.export_total
+                                    ex.done, ex.total
                                 ))
                                 .small()
                                 .color(theme::MUTED),
@@ -738,20 +725,15 @@ impl NlpApp {
     }
 
     /// Cmd+O, on the start screens as well as in a roll.
-    fn open_shortcut(&mut self, ctx: &egui::Context) {
-        let busy = ctx.egui_wants_keyboard_input()
-            || self.shortcuts_open
-            || self.scan.open
-            || self.export_targets.is_some()
-            || self.convert_dialog.is_some()
-            || self.roll.dialog.is_some();
+    pub(super) fn open_shortcut(&mut self, ctx: &egui::Context) {
+        let busy = ctx.egui_wants_keyboard_input() || self.modal_open() || self.scan.open;
         if !busy && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.choose_anything();
         }
     }
 
     fn folder_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() || self.shortcuts_open {
+        if ctx.egui_wants_keyboard_input() || self.modal_open() {
             return;
         }
         let mac = ctx.os() == egui::os::OperatingSystem::Mac;
@@ -777,8 +759,7 @@ impl NlpApp {
                 !i.modifiers.any() && i.key_pressed(egui::Key::Space),
             )
         });
-        let dialog = self.export_targets.is_some();
-        if space && !dialog {
+        if space {
             if self.grid.quick_look {
                 self.grid.quick_look = false;
             } else if !self.frames.is_empty() {
@@ -795,7 +776,7 @@ impl NlpApp {
                 self.grid.quick_look = self.active.is_some();
             }
         }
-        if let Some(flag) = Self::flag_key(ctx).filter(|_| !dialog) {
+        if let Some(flag) = Self::flag_key(ctx) {
             self.flag_selection(flag);
         }
         let rotate = ctx.input(|i| {
@@ -808,21 +789,21 @@ impl NlpApp {
                 None
             }
         });
-        if let Some(cw) = rotate.filter(|_| self.export_targets.is_none()) {
+        if let Some(cw) = rotate {
             self.rotate_frames(&self.sel_vec(), cw);
         }
         if all {
             self.selected = self.shown_frames().into_iter().collect();
         }
         self.grid_arrows(ctx);
-        if none && !dialog {
+        if none {
             if self.grid.quick_look {
                 self.grid.quick_look = false;
             } else {
                 self.selected.clear();
             }
         }
-        if enter && !dialog {
+        if enter {
             let lead = self
                 .active
                 .filter(|a| self.selected.contains(a))
@@ -1013,24 +994,6 @@ pub fn conversion_fields(ui: &mut egui::Ui, s: &mut Settings, start: Option<&std
     );
     flat_field_ui(ui, &mut s.flat_field, start);
     ui.add_space(4.0);
-    widgets::fl_slider_u8(
-        ui,
-        "Pre-saturation",
-        &mut s.pre_saturation,
-        1..=5,
-        3,
-        "1–2: fewer distinct hues, warmer · 4–5: more separation, cooler",
-    );
-    widgets::fl_slider(
-        ui,
-        "Border buffer",
-        &mut s.border_buffer,
-        0.0..=25.0,
-        5.0,
-        0,
-        "Percent of the frame edge ignored by the analysis",
-        None,
-    );
     widgets::fl_combo(
         ui,
         "White balance",
@@ -1148,19 +1111,7 @@ impl NlpApp {
             (o.image_type, o.source, o.color_model, o.film_base);
         s.flat_field = o.flat_field.clone();
         (s.crosstalk, s.crosstalk_strength) = (o.crosstalk.clone(), o.crosstalk_strength);
-        (
-            s.pre_saturation,
-            s.border_buffer,
-            s.wb_mode,
-            s.roll_mode,
-            s.auto_crop,
-        ) = (
-            o.pre_saturation,
-            o.border_buffer,
-            o.wb_mode,
-            o.roll_mode,
-            o.auto_crop,
-        );
+        (s.wb_mode, s.roll_mode, s.auto_crop) = (o.wb_mode, o.roll_mode, o.auto_crop);
         if s.image_type != was_type && s.image_type != ImageType::Negative {
             s.apply_positive_defaults();
             s.wb_mode = o.wb_mode;

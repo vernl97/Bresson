@@ -101,26 +101,15 @@ fn section(ui: &mut egui::Ui, sec: Section, s: &mut Settings, r: &Settings, open
 }
 
 impl NlpApp {
-    /// The histogram or curves, under their toggle. Like Lightroom's, the five regions are drag
-    /// handles for Blacks, Shadows, Exposure, Highlights and Whites, and the corner
+    /// The histogram, or the print curves when the ⋯ menu has them on. Like Lightroom's, the
+    /// five regions are drag handles for Blacks, Shadows, Exposure, Highlights and Whites, and the corner
     /// triangles toggle the clipping view.
     fn histogram_panel(&mut self, ui: &mut egui::Ui, i: usize, s: &mut Settings) {
         ui.add_space(10.0);
-        if !self.editor.curves.is_empty() {
-            widgets::segmented(
-                ui,
-                &mut self.editor.hist_view,
-                &[
-                    (HistView::Histogram, "Histogram"),
-                    (HistView::Curves, "Curves"),
-                ],
-            );
-            ui.add_space(4.0);
-            if self.editor.hist_view == HistView::Curves {
-                widgets::curves_plot(ui, &self.editor.curves, vec2(ui.available_width(), 96.0));
-                ui.add_space(2.0);
-                return;
-            }
+        if self.editor.hist_view == HistView::Curves && !self.editor.curves.is_empty() {
+            widgets::curves_plot(ui, &self.editor.curves, vec2(ui.available_width(), 96.0));
+            ui.add_space(2.0);
+            return;
         }
         use widgets::HistRegion as R;
         let editable = self.frames[i].sc.is_converted() && !self.editor.before;
@@ -179,7 +168,7 @@ impl NlpApp {
             ui.spacing_mut().item_spacing.x = 2.0;
             let n = 4.0;
             let size = vec2((ui.available_width() - 2.0 * (n - 1.0)) / n, 36.0);
-            let cropping = self.editor.crop.is_some();
+            let cropping = self.editor.crop().is_some();
             if widgets::sized_icon_button(
                 ui,
                 Icon::Crop,
@@ -198,7 +187,7 @@ impl NlpApp {
                     self.enter_crop(i);
                 }
             }
-            let healing = self.editor.heal.is_some();
+            let healing = self.editor.heal().is_some();
             if widgets::sized_icon_button(
                 ui,
                 Icon::Heal,
@@ -213,7 +202,7 @@ impl NlpApp {
             {
                 self.toggle_heal(i);
             }
-            let burning = self.editor.burn.is_some();
+            let burning = self.editor.burn().is_some();
             if widgets::sized_icon_button(
                 ui,
                 Icon::Burn,
@@ -498,8 +487,8 @@ impl NlpApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             widgets::combo_row(ui, caption, v, all, name, PICKER_W);
-            let picking = self.editor.pick == Some(pick);
-            let enabled = enabled && self.editor.crop.is_none();
+            let picking = self.editor.pick() == Some(pick);
+            let enabled = enabled && self.editor.crop().is_none();
             if icon_button(ui, Icon::Eyedropper, tip, picking, enabled).clicked() {
                 self.set_pick(if picking { None } else { Some(pick) });
             }

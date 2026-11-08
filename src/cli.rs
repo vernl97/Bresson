@@ -23,7 +23,6 @@ CONVERT OPTIONS:
   --tone NAME          Tone profile, e.g. \"Print - Standard\" (or Standard), \"Cinematic - Rich\"
   --wb NAME            White balance (Auto-Neutral, Kodak, Fuji, ...)
   --lut NAME           None | Natural | Frontier | Crystal | Pakon
-  --border PCT         Border buffer percent (default 5)
   --crosstalk NAME     Dye crosstalk matrix: a film from crosstalk/ (e.g. kodak_gold_200,
                        \"Kodak Gold 200\"), default the generic C-41 matrix
   --crosstalk-strength PCT  Share of the crosstalk correction (default 100)
@@ -118,7 +117,6 @@ fn convert(args: Vec<String>) -> Result<()> {
             }
             "--wb" => s.wb_mode = find(WbMode::ALL, WbMode::label, &val()?)?,
             "--lut" => s.lut = find(Lut::ALL, Lut::label, &val()?)?,
-            "--border" => s.border_buffer = val()?.parse()?,
             "--crosstalk" => s.crosstalk = crosstalk_id(&val()?)?,
             "--crosstalk-strength" => s.crosstalk_strength = val()?.parse()?,
             "--auto-crop" => s.auto_crop = true,

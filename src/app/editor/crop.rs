@@ -4,6 +4,7 @@
 
 use eframe::egui::{self, Color32, Rect, Stroke, pos2, vec2};
 
+use super::Tool;
 use crate::app::NlpApp;
 use crate::app::widgets::{self, Icon, icon_button, pill, theme};
 use crate::engine::settings::*;
@@ -48,6 +49,21 @@ impl CropGrid {
     }
 }
 
+/// The level tool: off, armed for the next drag, or drawing its line.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub(in crate::app) enum Level {
+    #[default]
+    Off,
+    Armed,
+    Drawing([egui::Pos2; 2]),
+}
+
+impl Level {
+    pub(in crate::app) fn on(self) -> bool {
+        self != Self::Off
+    }
+}
+
 /// Uncommitted crop / straighten state while crop mode is open.
 #[derive(Clone, Copy)]
 pub(in crate::app) struct CropEdit {
@@ -62,9 +78,8 @@ pub(in crate::app) struct CropEdit {
     pub(super) rotation: u8,
     pub(super) flip_h: bool,
     drag: Option<Handle>,
-    /// The level tool is armed: the next drag draws a line that should be horizontal or vertical.
-    pub(super) level: bool,
-    pub(super) level_line: Option<[egui::Pos2; 2]>,
+    /// The next drag draws a line that should be horizontal or vertical.
+    pub(super) level: Level,
     /// The Angle slider is being dragged, which counts as changing the crop for the grid.
     straightening: bool,
 }
@@ -157,8 +172,7 @@ impl NlpApp {
             rotation: s.rotation,
             flip_h: s.flip_h,
             drag: None,
-            level: false,
-            level_line: None,
+            level: Level::Off,
             straightening: false,
         };
         // A fixed ratio saved the other way round reopens that way round.
@@ -169,18 +183,16 @@ impl NlpApp {
             let shape = (100.0 - l - rr) * frame / (100.0 - t - b).max(0.01);
             c.swapped = (shape >= 1.0) != (r >= 1.0) && (r - 1.0).abs() > 1e-3;
         }
-        self.editor.crop = Some(c);
-        self.editor.heal = None;
-        self.editor.burn = None;
+        self.editor.set_tool(Tool::Crop(c));
         self.fit_pending_crop();
-        self.editor.pick = None;
         self.editor.zoom = None;
         self.editor.pan = egui::Vec2::ZERO;
         self.editor.dirty = true;
     }
 
     pub(super) fn apply_crop(&mut self, i: usize) {
-        if let Some(c) = self.editor.crop.take() {
+        if let Some(c) = self.editor.crop().copied() {
+            self.editor.close_tool();
             let before = self.frames[i].sc.settings.clone();
             let mut s = before.clone();
             s.crop = c.insets;
@@ -196,7 +208,7 @@ impl NlpApp {
     /// Aspect (w / h) of the frame after its quarter turns, which the crop
     /// insets are relative to.
     fn frame_aspect(&self) -> Option<f32> {
-        let rotation = match &self.editor.crop {
+        let rotation = match self.editor.crop() {
             Some(c) => c.rotation,
             None => self
                 .active
@@ -207,7 +219,7 @@ impl NlpApp {
     }
 
     fn frame_aspect_for(&self, rotation: u8) -> Option<f32> {
-        let src = self.editor.src.as_ref()?;
+        let src = self.editor.src()?;
         let (w, h) = (src.width as f32, src.height as f32);
         Some(if rotation % 2 == 1 { h / w } else { w / h })
     }
@@ -217,7 +229,7 @@ impl NlpApp {
         let Some(frame) = self.frame_aspect() else {
             return;
         };
-        if let Some(c) = &mut self.editor.crop {
+        if let Some(c) = self.editor.crop_mut() {
             if let Some(ratio) = c.ratio(frame) {
                 c.insets = crate::engine::frame::fit_aspect(c.insets, frame, ratio);
             }
@@ -227,7 +239,7 @@ impl NlpApp {
     /// Quarter turn or mirror inside Crop & straighten. It is pending like the
     /// crop, so the insets turn with the picture and Cancel puts both back.
     pub(super) fn crop_transform(&mut self, turn: Option<bool>) {
-        if let Some(c) = &mut self.editor.crop {
+        if let Some(c) = self.editor.crop_mut() {
             match turn {
                 Some(cw) => {
                     c.rotation = (c.rotation + if cw { 1 } else { 3 }) % 4;
@@ -246,13 +258,13 @@ impl NlpApp {
     /// Propose the detected frame as the pending crop. The frame is found
     /// free-form and the aspect lock released, so the crop follows the frame.
     pub(super) fn detect_frame(&mut self, i: usize) {
-        let Some(src) = self.editor.src.clone() else {
+        let Some(src) = self.editor.src().cloned() else {
             return;
         };
         let f = &self.frames[i];
         let mut settings = f.sc.settings.clone();
         settings.crop_aspect = CropAspect::Free;
-        if let Some(c) = &self.editor.crop {
+        if let Some(c) = self.editor.crop() {
             settings.rotation = c.rotation;
             settings.flip_h = c.flip_h;
         }
@@ -262,7 +274,7 @@ impl NlpApp {
             .of(crate::engine::frame::is_landscape(&src, &settings));
         match crate::engine::frame::settle(found, shared) {
             Some(d) => {
-                if let Some(c) = &mut self.editor.crop {
+                if let Some(c) = self.editor.crop_mut() {
                     (c.insets, c.angle) = (d.crop, d.straighten);
                     c.aspect = CropAspect::Free;
                     c.swapped = false;
@@ -274,14 +286,16 @@ impl NlpApp {
     }
 
     pub(super) fn cancel_crop(&mut self) {
-        self.editor.crop = None;
+        if self.editor.crop().is_some() {
+            self.editor.close_tool();
+        }
         self.editor.dirty = true;
     }
 
     /// Under the tool strip while cropping: Aspect and its lock, turns, level, Auto,
     /// Angle, Reset and Close.
     pub(super) fn crop_panel(&mut self, ui: &mut egui::Ui, i: usize) {
-        let Some(mut c) = self.editor.crop else {
+        let Some(mut c) = self.editor.crop().copied() else {
             return;
         };
         let mut changed = false;
@@ -354,13 +368,12 @@ impl NlpApp {
                             ui,
                             Icon::Level,
                             "Draw a line along something that should be level",
-                            c.level,
+                            c.level.on(),
                             true,
                         )
                         .clicked()
                         {
-                            c.level = !c.level;
-                            c.level_line = None;
+                            c.level = if c.level.on() { Level::Off } else { Level::Armed };
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             auto = ui
@@ -405,7 +418,7 @@ impl NlpApp {
             c.angle = 0.0;
             changed = true;
         }
-        self.editor.crop = Some(c);
+        self.editor.put_back(Tool::Crop(c), true);
         if changed {
             self.fit_pending_crop();
             self.editor.dirty = true;
@@ -465,7 +478,7 @@ impl NlpApp {
         img: Rect,
         avail: Rect,
     ) {
-        let Some(mut c) = self.editor.crop else {
+        let Some(mut c) = self.editor.crop().copied() else {
             return;
         };
         let to_px = |ins: [f32; 4]| {
@@ -506,19 +519,19 @@ impl NlpApp {
                 _ => return None,
             })
         };
-        if c.level {
+        if c.level.on() {
             // Level tool: the drag is a line, not a crop edit.
             if let Some(pos) = resp.interact_pointer_pos() {
                 if resp.drag_started() {
-                    c.level_line = Some([pos, pos]);
+                    c.level = Level::Drawing([pos, pos]);
                 } else if resp.dragged()
-                    && let Some(line) = &mut c.level_line
+                    && let Level::Drawing(line) = &mut c.level
                 {
                     line[1] = pos;
                 }
             }
             if resp.drag_stopped() {
-                if let Some([a, b]) = c.level_line.take() {
+                if let Level::Drawing([a, b]) = c.level {
                     let d = b - a;
                     if d.length() > 24.0 {
                         // Tilt from the nearest axis, so a vertical edge levels as well.
@@ -529,7 +542,7 @@ impl NlpApp {
                         self.editor.dirty = true;
                     }
                 }
-                c.level = false;
+                c.level = Level::Off;
             }
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -537,7 +550,7 @@ impl NlpApp {
         } else if resp.drag_started() {
             c.drag = resp.interact_pointer_pos().and_then(hit);
         }
-        if let (true, Some(h)) = (resp.dragged(), c.drag.filter(|_| !c.level)) {
+        if let (true, Some(h)) = (resp.dragged(), c.drag.filter(|_| !c.level.on())) {
             let d = resp.drag_delta();
             let (dx, dy) = (d.x / img.width() * 100.0, d.y / img.height() * 100.0);
             let ins = &mut c.insets;
@@ -574,7 +587,7 @@ impl NlpApp {
         if resp.drag_stopped() {
             c.drag = None;
         }
-        if let Some(pos) = resp.hover_pos().filter(|_| !c.level) {
+        if let Some(pos) = resp.hover_pos().filter(|_| !c.level.on()) {
             let icon = match c.drag.or_else(|| hit(pos)) {
                 Some(Handle::L | Handle::R) => egui::CursorIcon::ResizeHorizontal,
                 Some(Handle::T | Handle::B) => egui::CursorIcon::ResizeVertical,
@@ -587,10 +600,10 @@ impl NlpApp {
         }
         let angle_changed = self
             .editor
-            .crop
+            .crop()
             .map(|o| o.angle != c.angle)
             .unwrap_or(false);
-        self.editor.crop = Some(c);
+        self.editor.put_back(Tool::Crop(c), true);
         if angle_changed {
             self.editor.dirty = true;
         }
@@ -661,13 +674,13 @@ impl NlpApp {
             }
         }
         // The level line being drawn.
-        if let Some([a, b]) = c.level_line {
+        if let Level::Drawing([a, b]) = c.level {
             p.line_segment([a, b], Stroke::new(3.5, ink));
             p.line_segment([a, b], Stroke::new(1.5, theme::ACCENT));
             for e in [a, b] {
                 p.circle(e, 4.0, theme::ACCENT, Stroke::new(1.5, Color32::WHITE));
             }
-        } else if c.level {
+        } else if c.level.on() {
             pill(
                 &p,
                 pos2(avail.center().x, avail.top() + 22.0),

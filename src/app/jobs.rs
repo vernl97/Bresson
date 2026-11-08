@@ -40,7 +40,9 @@ pub enum JobResult {
         /// The frame geometry, for frames converted with auto-crop.
         frames: Vec<ConvertedFrame>,
         roll: Option<RollData>,
-        errors: Vec<String>,
+        errors: Vec<ConvertError>,
+        /// The app asked for it by itself (see `auto.rs`).
+        auto: bool,
     },
     Exported {
         path: PathBuf,
@@ -424,6 +426,15 @@ pub struct ConvertItem {
     /// The frame's `Frame::convert_ticket` when this conversion was asked
     /// for; the result applies only while it is still the frame's ticket.
     pub ticket: u64,
+    /// An automatic conversion (see `auto.rs`), not one the user asked for.
+    pub auto: bool,
+}
+
+/// A frame of a conversion that couldn't be read.
+pub struct ConvertError {
+    pub path: PathBuf,
+    pub ticket: u64,
+    pub message: String,
 }
 
 /// One frame of a finished conversion.
@@ -442,14 +453,18 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
     use rayon::prelude::*;
     let tickets: HashMap<PathBuf, u64> = items.iter().map(|it| (it.path.clone(), it.ticket)).collect();
     let ticket = |p: &PathBuf| tickets.get(p).copied().unwrap_or_default();
-    let loaded: Vec<Result<(PathBuf, Arc<SourceImage>, Settings), String>> = items
+    let auto = !items.is_empty() && items.iter().all(|it| it.auto);
+    type Loaded = (PathBuf, Arc<SourceImage>, Settings);
+    let loaded: Vec<Result<Loaded, ConvertError>> = items
         .into_par_iter()
         .map(|it| {
             let src = match it.proxy {
                 Some(p) => p,
-                None => Arc::new(
-                    load_proxy(&it.path).map_err(|e| format!("{}: {e:#}", it.path.display()))?,
-                ),
+                None => Arc::new(load_proxy(&it.path).map_err(|e| ConvertError {
+                    message: format!("{}: {e:#}", it.path.display()),
+                    path: it.path.clone(),
+                    ticket: it.ticket,
+                })?),
             };
             Ok((it.path, src, it.settings))
         })
@@ -464,6 +479,7 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
             frames: vec![],
             roll: None,
             errors,
+            auto,
         };
     }
     // Crop before analysing, so the analysis sees only the image. A frame
@@ -532,6 +548,7 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
                     path,
                     proxy: Some(src),
                     settings,
+                    auto,
                 })
                 .collect();
             return JobResult::ExposureVariance { items, spread };
@@ -579,6 +596,7 @@ pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> Jo
         frames,
         roll,
         errors,
+        auto,
     }
 }
 

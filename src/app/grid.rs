@@ -231,7 +231,7 @@ impl NlpApp {
             (k, i.modifiers.shift)
         });
         let Some(key) = key else { return };
-        if self.grid.cells.is_empty() || self.export_targets.is_some() {
+        if self.grid.cells.is_empty() {
             return;
         }
         let cells = &self.grid.cells;
@@ -676,7 +676,8 @@ impl NlpApp {
         // Header: frame number, status markers on the right, the name while hovered.
         let row_y = cell.top() + HEADER_H / 2.0;
         let mut x = cell.right() - 8.0;
-        let converting = self.auto.in_flight.contains(&f.path) || self.auto.queue.contains(&f.path);
+        let converting = f.auto == super::auto::AutoConvert::Queued
+            || f.convert_ticket.is_some_and(|t| t.auto);
         let markers_right = x;
         if f.exporting {
             let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;
