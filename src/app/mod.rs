@@ -2411,7 +2411,7 @@ mod ui_tests {
     }
 
     /// The heal tool from the keyboard and the mouse: a click places a spot, a drag moves
-    /// it, undo takes it back, and a spot leaves the pixels only where it lies. With
+    /// it, a drag elsewhere paints a stroke, undo takes it back, and a spot leaves the pixels only where it lies. With
     /// `NLP_UI_OUT` set it saves screenshots.
     #[test]
     fn heal_tool_places_moves_and_removes_spots() {
@@ -2459,7 +2459,7 @@ mod ui_tests {
 
         click(&mut h, egui::pos2(500.0, 400.0));
         assert_eq!(spots(&h).len(), 1, "a click places a spot");
-        let first = spots(&h)[0];
+        let first = spots(&h)[0].clone();
         assert_ne!(first.at, first.from, "the spot found a source");
         settle(&mut h, 10.0);
         snap(&mut h, "heal_2_placed");
@@ -2477,7 +2477,7 @@ mod ui_tests {
         h.drop_at(egui::pos2(620.0, 360.0));
         h.run_steps(3);
         assert_eq!(spots(&h).len(), 1, "the drag made no new spot");
-        let moved = spots(&h)[0];
+        let moved = spots(&h)[0].clone();
         assert!(moved.at[0] > first.at[0], "the spot moved");
         assert_eq!(moved.from, first.from, "its source stayed");
 
@@ -2493,7 +2493,7 @@ mod ui_tests {
 
         // The panel acts on the selected spot: Clone at once, Opacity on release.
         click(&mut h, egui::pos2(1292.0, 229.0));
-        let last = |h: &Harness<'_, NlpApp>| *spots(h).last().unwrap();
+        let last = |h: &Harness<'_, NlpApp>| spots(h).last().unwrap().clone();
         assert_eq!(
             last(&h).mode,
             crate::engine::settings::HealMode::Clone,
@@ -2541,6 +2541,29 @@ mod ui_tests {
         h.key_press(egui::Key::Delete);
         h.run_steps(3);
         assert_eq!(spots(&h).len(), 1, "Delete removed the selected spot");
+
+        // A drag away from the spots paints a stroke, healed as one spot.
+        h.hover_at(egui::pos2(260.0, 520.0));
+        h.step();
+        h.drag_at(egui::pos2(260.0, 520.0));
+        h.step();
+        for k in 1..=8 {
+            let t = k as f32 / 8.0;
+            h.hover_at(egui::pos2(260.0 + 160.0 * t, 520.0 + 40.0 * t * t));
+            h.step();
+        }
+        assert_eq!(spots(&h).len(), 1, "the stroke isn't applied until released");
+        snap(&mut h, "heal_5_painting");
+        h.drop_at(egui::pos2(420.0, 560.0));
+        h.run_steps(3);
+        assert_eq!(spots(&h).len(), 2, "the stroke is one spot");
+        let stroke = last(&h);
+        assert!(stroke.path.len() > 2, "the spot keeps the stroke's path");
+        assert_ne!(stroke.at, stroke.from, "the stroke found a source");
+        settle(&mut h, 10.0);
+        snap(&mut h, "heal_6_stroke");
+        undo(&mut h);
+        assert_eq!(spots(&h).len(), 1, "one undo takes the stroke back");
 
         // Pasting an edit leaves a frame's spots alone: dust belongs to its frame.
         let mut other = h.state().frames[1].sc.settings.clone();

@@ -1,8 +1,10 @@
 //! The spot healing tool, laid out like Lightroom's: a Spot Edit panel under the tool
 //! strip (Clone / Heal, Size, Opacity, Reset, Close) and a bar under the canvas (Tool
 //! Overlay, Visualize Spots, Done). A click heals a speck from the best clean place
-//! nearby; circles on the canvas move the spot, its source and its size. A change only
-//! reaches the frame's settings on release, since each one prepares the negative again.
+//! nearby, and a drag paints a stroke over a hair or a scratch, healed as one spot;
+//! the shapes on the canvas move the spot and its source, and a round spot's rim its
+//! size. Space-drag pans a zoomed picture. A change only reaches the frame's settings
+//! on release, since each one prepares the negative again.
 
 use eframe::egui::{self, Color32, Rect, Stroke, pos2};
 
@@ -20,6 +22,8 @@ const MAX_RADIUS: f32 = 0.08;
 const SIZE_STEP: f32 = 1.2;
 /// How near the rim (screen points) a drag resizes rather than moves.
 const RIM_GRAB: f32 = 5.0;
+/// A press that wanders less than this (screen points) is a click: one round spot.
+const CLICK_SLOP: f32 = 4.0;
 
 /// When the spots' circles show.
 #[derive(Clone, Copy, PartialEq)]
@@ -76,7 +80,7 @@ enum Grab {
     Rim,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct HealDrag {
     index: usize,
     grab: Grab,
@@ -86,7 +90,19 @@ struct HealDrag {
     offset: egui::Vec2,
 }
 
-#[derive(Clone, Copy)]
+/// A stroke being painted.
+#[derive(Clone)]
+struct HealPaint {
+    /// The brush centres, normalised source coordinates.
+    points: Vec<[f32; 2]>,
+    /// Where it was pressed, and the last point added, on screen.
+    start: egui::Pos2,
+    last: egui::Pos2,
+    /// It went further than a click's wobble.
+    moved: bool,
+}
+
+#[derive(Clone)]
 pub(crate) struct HealEdit {
     /// The next spot's settings, and the selected spot's.
     radius: f32,
@@ -94,6 +110,8 @@ pub(crate) struct HealEdit {
     mode: HealMode,
     selected: Option<usize>,
     drag: Option<HealDrag>,
+    /// A stroke being painted, committed on release.
+    paint: Option<HealPaint>,
     /// A panel control is held: applied to the selected spot on release.
     pending: bool,
     overlay: ToolOverlay,
@@ -111,6 +129,7 @@ impl Default for HealEdit {
             mode: spot.mode,
             selected: None,
             drag: None,
+            paint: None,
             pending: false,
             overlay: ToolOverlay::Always,
             visualize: false,
@@ -125,6 +144,7 @@ impl HealEdit {
         Self {
             selected: None,
             drag: None,
+            paint: None,
             pending: false,
             ..self
         }
@@ -295,7 +315,7 @@ impl NlpApp {
 
     /// Under the tool strip while healing: Clone / Heal, Size, Opacity, Reset, Close.
     pub(super) fn heal_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
-        let Some(mut h) = self.editor.heal().copied() else {
+        let Some(mut h) = self.editor.heal().cloned() else {
             return;
         };
         let (mut reset, mut close) = (false, false);
@@ -376,7 +396,7 @@ impl NlpApp {
 
     /// The bar under the canvas while healing: Tool Overlay, Visualize Spots, Done.
     pub(super) fn heal_bar(&mut self, ui: &mut egui::Ui) {
-        let Some(mut h) = self.editor.heal().copied() else {
+        let Some(mut h) = self.editor.heal().cloned() else {
             return;
         };
         let mut done = false;
@@ -444,28 +464,37 @@ impl NlpApp {
         p.image(m.tex.id(), rect, uv, Color32::WHITE);
     }
 
-    /// A new spot at `at`, its source found on the picture as healed so far.
-    fn place_spot(&mut self, i: usize, at: [f32; 2], h: HealEdit, canvas: &CanvasMap) {
+    /// A new spot through `points` (one for a round spot, more for a painted
+    /// stroke), its source found on the picture as healed so far.
+    fn place_spot(&mut self, i: usize, points: &[[f32; 2]], h: &HealEdit, canvas: &CanvasMap) {
         let Some(src) = self.editor.src().cloned() else {
             return;
+        };
+        let Some(&first) = points.first() else {
+            return;
+        };
+        let (at, path) = if points.len() > 1 {
+            HealSpot::stroke(points)
+        } else {
+            (first, Vec::new())
         };
         let settings = &self.frames[i].sc.settings;
         let healed = (!settings.heal.is_empty())
             .then(|| heal::apply(&src.data, src.width, src.height, &settings.heal));
         let data = healed.as_deref().unwrap_or(&src.data);
-        let from = heal::find_source(data, src.width, src.height, at, h.radius, &|uv| {
+        let from = heal::find_source(data, src.width, src.height, at, &path, h.radius, &|uv| {
             canvas.visible(uv)
         });
         let n = settings.heal.len();
-        self.edit_spots(i, |spots| {
-            spots.push(HealSpot {
-                at,
-                from,
-                radius: h.radius,
-                mode: h.mode,
-                opacity: h.opacity,
-            })
-        });
+        let spot = HealSpot {
+            at,
+            from,
+            radius: h.radius,
+            mode: h.mode,
+            opacity: h.opacity,
+            path,
+        };
+        self.edit_spots(i, |spots| spots.push(spot));
         if let Some(h) = self.editor.heal_mut() {
             h.selected = Some(n);
         }
@@ -482,7 +511,7 @@ impl NlpApp {
         let Some(src) = self.editor.src().cloned() else {
             return;
         };
-        let Some(mut h) = self.editor.heal().copied() else {
+        let Some(mut h) = self.editor.heal().cloned() else {
             return;
         };
         let s = &self.frames[i].sc.settings;
@@ -490,11 +519,11 @@ impl NlpApp {
         let mut spots = s.heal.clone();
         // An undo can take the selected spot away.
         h.selected = h.selected.filter(|n| *n < spots.len());
-        if h.drag.is_some_and(|d| d.index >= spots.len()) {
+        if h.drag.as_ref().is_some_and(|d| d.index >= spots.len()) {
             h.drag = None;
         }
 
-        // Which circles are on show, and so can be picked up.
+        // Which shapes are on show, and so can be picked up.
         let overlay_on = resp.hovered() || resp.dragged();
         let overlay = h.overlay;
         let shown = |n: usize, selected: Option<usize>| match overlay {
@@ -505,9 +534,10 @@ impl NlpApp {
         };
         let hit = |spots: &[HealSpot], selected: Option<usize>, pos: egui::Pos2| {
             if let Some(n) = selected.filter(|n| shown(*n, selected)) {
-                let c = canvas.to_screen(spots[n].from);
-                if (pos - c).length() <= canvas.screen_radius(spots[n].radius).max(6.0) {
-                    return Some((n, Grab::Source, c));
+                let spot = &spots[n];
+                let r = canvas.screen_radius(spot.radius);
+                if shape_dist(&source_on_screen(&canvas, spot), pos) <= r.max(6.0) {
+                    return Some((n, Grab::Source, canvas.to_screen(spot.from)));
                 }
             }
             // The latest spot lies on top.
@@ -515,8 +545,12 @@ impl NlpApp {
                 if !shown(n, selected) {
                     return None;
                 }
-                let c = canvas.to_screen(spot.at);
                 let r = canvas.screen_radius(spot.radius);
+                let c = canvas.to_screen(spot.at);
+                if spot.path.len() > 1 {
+                    let d = shape_dist(&spot_on_screen(&canvas, spot), pos);
+                    return (d < r.max(4.0)).then_some((n, Grab::Spot, c));
+                }
                 let d = (pos - c).length();
                 if (d - r).abs() <= RIM_GRAB {
                     Some((n, Grab::Rim, c))
@@ -528,21 +562,37 @@ impl NlpApp {
             })
         };
 
+        // Space-drag pans a zoomed picture, as in the dodge & burn brush.
+        let space = ui.input(|inp| inp.key_down(egui::Key::Space));
+        let panning =
+            space && self.editor.zoom.is_some() && h.drag.is_none() && h.paint.is_none();
+        let brush = canvas.screen_radius(h.radius);
         if resp.drag_started()
+            && !panning
             && let Some(origin) = ui.input(|inp| inp.pointer.press_origin())
-            && let Some((n, grab, c)) = hit(&spots, h.selected, origin)
         {
-            h.select(n, &spots[n]);
-            h.drag = Some(HealDrag {
-                index: n,
-                grab,
-                spot: spots[n],
-                offset: c - origin,
-            });
+            if let Some((n, grab, c)) = hit(&spots, h.selected, origin) {
+                h.select(n, &spots[n]);
+                h.drag = Some(HealDrag {
+                    index: n,
+                    grab,
+                    spot: spots[n].clone(),
+                    offset: c - origin,
+                });
+            } else if rect.contains(origin) {
+                // A drag away from the spots paints a stroke.
+                h.selected = None;
+                h.paint = Some(HealPaint {
+                    points: vec![canvas.to_uv(origin)],
+                    start: origin,
+                    last: origin,
+                    moved: false,
+                });
+            }
         }
         if resp.dragged() {
-            match (&mut h.drag, resp.interact_pointer_pos()) {
-                (Some(d), Some(pos)) => match d.grab {
+            match (&mut h.drag, &mut h.paint, resp.interact_pointer_pos()) {
+                (Some(d), _, Some(pos)) => match d.grab {
                     Grab::Spot => d.spot.at = canvas.to_uv(pos + d.offset),
                     Grab::Source => d.spot.from = canvas.to_uv(pos + d.offset),
                     Grab::Rim => {
@@ -552,23 +602,30 @@ impl NlpApp {
                         h.radius = d.spot.radius;
                     }
                 },
-                _ if self.editor.zoom.is_some() => {
+                (None, Some(paint), Some(pos)) => {
+                    let pos = pos.clamp(rect.min, rect.max);
+                    paint.moved |= (pos - paint.start).length() > CLICK_SLOP;
+                    if (pos - paint.last).length() >= (brush / 3.0).max(2.0) {
+                        paint.points.push(canvas.to_uv(pos));
+                        paint.last = pos;
+                    }
+                }
+                _ if panning => {
                     self.editor.zoom_anim = None;
                     self.editor.pan += resp.drag_delta();
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                 }
                 _ => {}
             }
         }
-        let released = if resp.drag_stopped() {
-            h.drag.take()
+        let (released, painted) = if resp.drag_stopped() {
+            (h.drag.take(), h.paint.take())
         } else {
-            None
+            (None, None)
         };
 
         // The spots as they will be, painted before any commit reorders them.
-        if let Some(d) = h.drag.or(released) {
-            spots[d.index] = d.spot;
+        if let Some(d) = h.drag.as_ref().or(released.as_ref()) {
+            spots[d.index] = d.spot.clone();
         }
         if h.pending
             && let Some(n) = h.selected
@@ -576,8 +633,9 @@ impl NlpApp {
             spots[n].radius = h.radius;
         }
         let hover = resp.hover_pos().filter(|pos| rect.contains(*pos));
+        let busy = h.drag.is_some() || h.paint.is_some();
         let hovered = hover
-            .filter(|_| h.drag.is_none())
+            .filter(|_| !busy && !panning)
             .and_then(|pos| hit(&spots, h.selected, pos));
 
         let p = ui.painter_at(rect.intersect(avail));
@@ -589,39 +647,49 @@ impl NlpApp {
             if !shown(n, h.selected) {
                 continue;
             }
-            let c = canvas.to_screen(spot.at);
+            let pts = spot_on_screen(&canvas, spot);
             let r = canvas.screen_radius(spot.radius);
             if h.selected == Some(n) {
-                let from = canvas.to_screen(spot.from);
-                arrow(&p, c, from, r, r);
-                ring(&p, from, r, Color32::WHITE, 1.0);
-                ring(&p, c, r, Color32::WHITE, 2.0);
+                let (c, from) = (canvas.to_screen(spot.at), canvas.to_screen(spot.from));
+                if spot.path.len() > 1 {
+                    arrow(&p, c, from, 0.0, 0.0);
+                } else {
+                    arrow(&p, c, from, r, r);
+                }
+                outline(&p, &source_on_screen(&canvas, spot), r, Color32::WHITE, 1.0);
+                outline(&p, &pts, r, Color32::WHITE, 2.0);
             } else {
                 let on = hovered.is_some_and(|(k, ..)| k == n);
                 let alpha = if on { 230 } else { 120 };
-                ring(&p, c, r, Color32::from_white_alpha(alpha), 1.0);
+                outline(&p, &pts, r, Color32::from_white_alpha(alpha), 1.0);
             }
+        }
+        if let Some(paint) = &h.paint {
+            let pts: Vec<egui::Pos2> = paint.points.iter().map(|uv| canvas.to_screen(*uv)).collect();
+            outline(&p, &pts, brush, Color32::WHITE, 1.5);
         }
         match hovered.map(|(_, grab, _)| grab) {
             Some(Grab::Rim) => ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNeSw),
             Some(_) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
             None => {
-                if let Some(pos) = hover.filter(|_| h.drag.is_none()) {
+                if let Some(pos) = hover.filter(|_| h.drag.is_none() && !panning) {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-                    let r = canvas.screen_radius(h.radius);
-                    ring(&p, pos, r, Color32::from_white_alpha(200), 1.0);
+                    ring(&p, pos, brush, Color32::from_white_alpha(200), 1.0);
                 }
             }
         }
-        if h.drag.is_some() {
+        if h.drag.is_some() || (panning && resp.dragged()) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if panning && resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
-        if spots.is_empty() {
-            pill(
-                ui.painter(),
-                pos2(avail.center().x, avail.top() + 22.0),
-                "Click a speck to heal it · [ ] change the size",
-            );
+        if spots.is_empty() && h.paint.is_none() {
+            let hint = if self.editor.zoom.is_some() {
+                "Click a speck or paint over a hair to heal it · [ ] change the size · Space-drag to pan"
+            } else {
+                "Click a speck or paint over a hair to heal it · [ ] change the size"
+            };
+            pill(ui.painter(), pos2(avail.center().x, avail.top() + 22.0), hint);
         }
 
         let clicked = resp
@@ -633,7 +701,7 @@ impl NlpApp {
         if let Some((n, ..)) = click_hit {
             h.select(n, &spots[n]);
         }
-        self.editor.put_back(Tool::Heal(h), true);
+        self.editor.put_back(Tool::Heal(h.clone()), true);
         if let Some(d) = released {
             self.edit_spots(i, |list| {
                 if let Some(slot) = list.get_mut(d.index) {
@@ -642,8 +710,95 @@ impl NlpApp {
             });
         }
         if let (Some(pos), None) = (clicked, click_hit) {
-            let at = canvas.to_uv(pos);
-            self.place_spot(i, at, h, &canvas);
+            self.place_spot(i, &[canvas.to_uv(pos)], &h, &canvas);
         }
+        if let Some(paint) = painted {
+            if paint.moved && paint.points.len() > 1 {
+                self.place_spot(i, &paint.points, &h, &canvas);
+            } else {
+                self.place_spot(i, &[canvas.to_uv(paint.start)], &h, &canvas);
+            }
+        }
+    }
+}
+
+/// A spot's brush centres on screen.
+fn spot_on_screen(canvas: &CanvasMap, spot: &HealSpot) -> Vec<egui::Pos2> {
+    spot.points().iter().map(|uv| canvas.to_screen(*uv)).collect()
+}
+
+/// Where a spot is copied from: its shape moved to `from`.
+fn source_on_screen(canvas: &CanvasMap, spot: &HealSpot) -> Vec<egui::Pos2> {
+    let d = [spot.from[0] - spot.at[0], spot.from[1] - spot.at[1]];
+    spot.points()
+        .iter()
+        .map(|uv| canvas.to_screen([uv[0] + d[0], uv[1] + d[1]]))
+        .collect()
+}
+
+/// Distance from `pos` to the line through `pts` (to the point, for one).
+fn shape_dist(pts: &[egui::Pos2], pos: egui::Pos2) -> f32 {
+    let line = |a: egui::Pos2, b: egui::Pos2| {
+        let ab = b - a;
+        let t = if ab.length_sq() > 0.0 {
+            ((pos - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (pos - (a + ab * t)).length()
+    };
+    match pts {
+        [] => f32::INFINITY,
+        [a] => (pos - *a).length(),
+        _ => pts
+            .windows(2)
+            .map(|w| line(w[0], w[1]))
+            .fold(f32::INFINITY, f32::min),
+    }
+}
+
+/// The outline of a spot's shape: a circle, or a stroke's brush circles where they
+/// reach out of the stroke.
+fn outline(p: &egui::Painter, pts: &[egui::Pos2], r: f32, light: Color32, width: f32) {
+    if pts.len() < 2 {
+        if let Some(c) = pts.first() {
+            ring(p, *c, r, light, width);
+        }
+        return;
+    }
+    if r < 2.0 {
+        let line: Vec<egui::Pos2> = pts.to_vec();
+        p.add(egui::Shape::line(
+            line.clone(),
+            Stroke::new(width + 1.5, Color32::from_black_alpha(130)),
+        ));
+        p.add(egui::Shape::line(line, Stroke::new(width, light)));
+        return;
+    }
+    let raw: Vec<[f32; 2]> = pts.iter().map(|q| [q.x, q.y]).collect();
+    let centre = heal::Polyline::new(raw.clone(), r + 2.0);
+    const STEPS: usize = 32;
+    let mut segs = Vec::new();
+    let tol = 0.05 * r + 0.5;
+    for c in heal::resample(&raw, r / 3.0) {
+        let on: Vec<Option<egui::Pos2>> = (0..=STEPS)
+            .map(|k| {
+                let a = std::f32::consts::TAU * k as f32 / STEPS as f32;
+                let q = [c[0] + a.cos() * r, c[1] + a.sin() * r];
+                (centre.dist(q) >= r - tol).then_some(pos2(q[0], q[1]))
+            })
+            .collect();
+        for w in on.windows(2) {
+            if let (Some(a), Some(b)) = (w[0], w[1]) {
+                segs.push([a, b]);
+            }
+        }
+    }
+    let shadow = Stroke::new(width + 1.5, Color32::from_black_alpha(130));
+    for s in &segs {
+        p.line_segment(*s, shadow);
+    }
+    for s in &segs {
+        p.line_segment(*s, Stroke::new(width, light));
     }
 }

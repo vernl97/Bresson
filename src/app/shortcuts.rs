@@ -60,7 +60,7 @@ impl NlpApp {
                     ("[ ]".into(), "Spot or brush size"),
                     (k(none, Key::O), "Dodge & burn overlay, while brushing"),
                     ("Alt-drag".into(), "Burn while dodging, and back"),
-                    ("Space-drag".into(), "Pan while brushing, zoomed in"),
+                    ("Space-drag".into(), "Pan while healing or brushing, zoomed in"),
                     (k(none, Key::H), "Flip horizontally"),
                     (k(none, Key::F), "Show / hide the filmstrip"),
                     (k(none, Key::I), "Show / hide the image info"),

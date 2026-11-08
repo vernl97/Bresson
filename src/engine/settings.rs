@@ -220,11 +220,13 @@ pub enum HealMode {
 
 /// One healed spot, in the source image before any geometry: `at` and `from` are
 /// normalised to its width and height, `radius` to its long edge. So a spot keeps its
-/// place through rotation and cropping, and at any decode size.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// place through rotation and cropping, and at any decode size. A painted spot is a
+/// brush stroke: `path` holds its points as offsets from `at`, and the whole stroke is
+/// copied from the same offset, `from - at`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HealSpot {
-    /// The defect's centre.
+    /// The defect's centre; for a stroke, the middle of its points' bounds.
     pub at: [f32; 2],
     /// The centre of the area copied over it.
     pub from: [f32; 2],
@@ -232,6 +234,37 @@ pub struct HealSpot {
     pub mode: HealMode,
     /// 0..=100 %
     pub opacity: f32,
+    /// A painted stroke's points, relative to `at`; empty for a round spot.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<[f32; 2]>,
+}
+
+impl HealSpot {
+    /// The brush centres, normalised: just `at` for a round spot.
+    pub fn points(&self) -> Vec<[f32; 2]> {
+        if self.path.is_empty() {
+            vec![self.at]
+        } else {
+            self.path
+                .iter()
+                .map(|o| [self.at[0] + o[0], self.at[1] + o[1]])
+                .collect()
+        }
+    }
+
+    /// A stroke through `points` (normalised): `at` the middle of their bounds.
+    pub fn stroke(points: &[[f32; 2]]) -> ([f32; 2], Vec<[f32; 2]>) {
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for p in points {
+            for k in 0..2 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        let at = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        let path = points.iter().map(|p| [p[0] - at[0], p[1] - at[1]]).collect();
+        (at, path)
+    }
 }
 
 impl Default for HealSpot {
@@ -242,6 +275,7 @@ impl Default for HealSpot {
             radius: 0.006,
             mode: HealMode::Heal,
             opacity: 100.0,
+            path: Vec::new(),
         }
     }
 }

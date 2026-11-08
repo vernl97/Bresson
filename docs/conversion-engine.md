@@ -186,8 +186,16 @@ For every pixel, in this order:
    rim's log differences (`(1 − ρ²) / |u − p|²` over up to 96 rim samples just
    outside the disc), so no solver is needed. The outer fifth of the radius
    feathers, in log, and Opacity scales the blend. Clone mode leaves out the
-   rim's differences and copies the source as it is. Spots are stored normalised to the source before geometry,
-   so they hold through rotation and cropping and fit any decode size.
+   rim's differences and copies the source as it is. A painted spot
+   (`HealSpot::path`, a brush stroke's points relative to `at`) covers every
+   pixel within the radius of its centre line (`Polyline`), copied whole from
+   one offset; its rim samples lie on brush circles a third of a radius apart
+   where they reach out of the stroke (thinned to 768), and the differences are
+   spread by inverse square distance, which on a disc is the same Poisson
+   integral. `find_source` searches for a stroke as for a disc, over its whole
+   shape, keeping the source 2.5 radii clear of the stroke. Spots are stored
+   normalised to the source before geometry, so they hold through rotation and
+   cropping and fit any decode size.
 3. **Geometry** (`decode::geometry`): quarter turns → flip → straighten
    (bilinear, cropped to the largest border‑free rectangle of the same
    aspect) → crop insets.

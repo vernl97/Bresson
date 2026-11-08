@@ -5,6 +5,7 @@
 //! proxy and to a full-resolution export. Pixels are blended in log (density), and
 //! the source patch is taken whole pixels away so its grain stays sharp.
 
+use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 
 use rayon::prelude::*;
@@ -49,7 +50,11 @@ pub fn apply(data: &[[f32; 3]], w: usize, h: usize, spots: &[HealSpot]) -> Vec<[
     let mut out = data.to_vec();
     if w > 0 && h > 0 {
         for spot in spots {
-            heal_spot(&mut out, w, h, spot);
+            if spot.path.len() > 1 {
+                heal_stroke(&mut out, w, h, spot);
+            } else {
+                heal_spot(&mut out, w, h, spot);
+            }
         }
     }
     out
@@ -61,7 +66,8 @@ pub fn apply(data: &[[f32; 3]], w: usize, h: usize, spots: &[HealSpot]) -> Vec<[
 /// just outside the disc, where the defect isn't.
 fn heal_spot(out: &mut [[f32; 3]], w: usize, h: usize, spot: &HealSpot) {
     let r = (spot.radius * w.max(h) as f32).max(MIN_RADIUS);
-    let (cx, cy) = (spot.at[0] * w as f32 - 0.5, spot.at[1] * h as f32 - 0.5);
+    let c = spot.points()[0];
+    let (cx, cy) = (c[0] * w as f32 - 0.5, c[1] * h as f32 - 0.5);
     let ox = ((spot.from[0] - spot.at[0]) * w as f32).round() as isize;
     let oy = ((spot.from[1] - spot.at[1]) * h as f32).round() as isize;
     let opacity = (spot.opacity / 100.0).clamp(0.0, 1.0);
@@ -146,37 +152,263 @@ fn heal_spot(out: &mut [[f32; 3]], w: usize, h: usize, spot: &HealSpot) {
     }
 }
 
-/// The best place to copy a spot from: of the discs around it that lie fully inside the
-/// frame and in `allowed` (normalised source coordinates), the one whose surroundings
-/// match the spot's in shape and that holds no defect of its own.
+/// Distance from `p` to the segment `a`–`b`.
+fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
+}
+
+/// A brush stroke's centre line, for the distance to it: its segments are kept in
+/// cells, so a long stroke stays quick. Distances beyond `reach` come out as
+/// infinity or as their true value, never less.
+pub struct Polyline {
+    pts: Vec<[f32; 2]>,
+    cell: f32,
+    grid: HashMap<(i32, i32), Vec<u32>>,
+}
+
+impl Polyline {
+    pub fn new(pts: Vec<[f32; 2]>, reach: f32) -> Self {
+        let cell = reach.max(4.0);
+        let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        let segs = pts.len().saturating_sub(1).max(usize::from(!pts.is_empty()));
+        for k in 0..segs {
+            let (a, b) = (pts[k], pts[(k + 1).min(pts.len() - 1)]);
+            let cx0 = ((a[0].min(b[0]) - reach) / cell).floor() as i32;
+            let cx1 = ((a[0].max(b[0]) + reach) / cell).floor() as i32;
+            let cy0 = ((a[1].min(b[1]) - reach) / cell).floor() as i32;
+            let cy1 = ((a[1].max(b[1]) + reach) / cell).floor() as i32;
+            for cy in cy0..=cy1 {
+                for cx in cx0..=cx1 {
+                    grid.entry((cx, cy)).or_default().push(k as u32);
+                }
+            }
+        }
+        Self { pts, cell, grid }
+    }
+
+    pub fn dist(&self, p: [f32; 2]) -> f32 {
+        let key = (
+            (p[0] / self.cell).floor() as i32,
+            (p[1] / self.cell).floor() as i32,
+        );
+        let Some(segs) = self.grid.get(&key) else {
+            return f32::INFINITY;
+        };
+        let last = self.pts.len() - 1;
+        segs.iter()
+            .map(|&k| {
+                let k = k as usize;
+                seg_dist(p, self.pts[k], self.pts[(k + 1).min(last)])
+            })
+            .fold(f32::INFINITY, f32::min)
+    }
+}
+
+/// Points along the polyline `pts`, `step` apart, its ends included.
+pub fn resample(pts: &[[f32; 2]], step: f32) -> Vec<[f32; 2]> {
+    let Some(&first) = pts.first() else {
+        return Vec::new();
+    };
+    let step = step.max(1e-3);
+    let mut out = vec![first];
+    let mut left = step;
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let mut t = left;
+        while t <= len {
+            let f = t / len;
+            out.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+            t += step;
+        }
+        left = t - len;
+    }
+    let last = pts[pts.len() - 1];
+    if out.last() != Some(&last) {
+        out.push(last);
+    }
+    out
+}
+
+/// At most `max` of `v`, evenly picked.
+fn thin<T: Copy>(v: &[T], max: usize) -> Vec<T> {
+    if v.len() <= max {
+        return v.to_vec();
+    }
+    (0..max).map(|k| v[k * v.len() / max]).collect()
+}
+
+/// A painted stroke: seamless cloning on the stroke's shape, every pixel within the
+/// radius of its centre line. The rim's differences are spread inside by inverse
+/// square distance over rim points evenly spaced along the outline, which on a disc
+/// is the Poisson integral of [`heal_spot`]; the rim points lie on brush circles
+/// spaced a third of the radius apart, where they reach out of the stroke.
+fn heal_stroke(out: &mut [[f32; 3]], w: usize, h: usize, spot: &HealSpot) {
+    let r = (spot.radius * w.max(h) as f32).max(MIN_RADIUS);
+    let ox = ((spot.from[0] - spot.at[0]) * w as f32).round() as isize;
+    let oy = ((spot.from[1] - spot.at[1]) * h as f32).round() as isize;
+    let opacity = (spot.opacity / 100.0).clamp(0.0, 1.0);
+    if (ox == 0 && oy == 0) || opacity <= 0.0 {
+        return;
+    }
+    let pts: Vec<[f32; 2]> = spot
+        .points()
+        .iter()
+        .map(|p| [p[0] * w as f32 - 0.5, p[1] * h as f32 - 0.5])
+        .collect();
+    let line = Polyline::new(pts.clone(), r + 2.0);
+    let matched = spot.mode == HealMode::Heal;
+    let (fx, fy) = (ox as f32, oy as f32);
+    let n = ((r * PI / 2.0) as usize).clamp(24, 96);
+    let mut rim: Vec<([f32; 2], [f32; 3])> = Vec::new();
+    if matched {
+        for c in resample(&pts, (r / 3.0).max(0.5)) {
+            for k in 0..n {
+                let a = TAU * k as f32 / n as f32;
+                let u = [a.cos(), a.sin()];
+                let q = [c[0] + u[0] * r, c[1] + u[1] * r];
+                if line.dist(q) < r - 0.25 {
+                    continue;
+                }
+                let mut d = [0.0f32; 3];
+                for rr in [r + 0.5, r + 1.5] {
+                    let (x, y) = (c[0] + u[0] * rr, c[1] + u[1] * rr);
+                    let dst = log_bilinear(out, w, h, x, y);
+                    let src = log_bilinear(out, w, h, x + fx, y + fy);
+                    for i in 0..3 {
+                        d[i] += (dst[i] - src[i]) / 2.0;
+                    }
+                }
+                rim.push((q, d));
+            }
+        }
+        rim = thin(&rim, 768);
+    }
+
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for p in &pts {
+        for k in 0..2 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let x0 = ((lo[0] - r).floor().max(0.0)) as usize;
+    let x1 = ((hi[0] + r).ceil() as isize).clamp(0, w as isize - 1) as usize;
+    let y0 = ((lo[1] - r).floor().max(0.0)) as usize;
+    let y1 = ((hi[1] + r).ceil() as isize).clamp(0, h as isize - 1) as usize;
+    if x0 > x1 || y0 > y1 || lo[0] - r > w as f32 || lo[1] - r > h as f32 {
+        return;
+    }
+    let frame: &[[f32; 3]] = out;
+    let patch: Vec<(usize, [f32; 3])> = (y0..=y1)
+        .into_par_iter()
+        .flat_map_iter(|y| {
+            let (rim, line) = (&rim, &line);
+            (x0..=x1).filter_map(move |x| {
+                let p = [x as f32, y as f32];
+                let d = line.dist(p);
+                if d >= r {
+                    return None;
+                }
+                let t = ((1.0 - d / r) / (1.0 - FEATHER)).clamp(0.0, 1.0);
+                let weight = t * t * (3.0 - 2.0 * t) * opacity;
+                let mut diff = [0.0f32; 3];
+                let mut sum = 1.0f32;
+                if matched {
+                    sum = 0.0;
+                    for (q, dq) in rim {
+                        let (ex, ey) = (q[0] - p[0], q[1] - p[1]);
+                        let kernel = 1.0 / (ex * ex + ey * ey + 1e-3);
+                        sum += kernel;
+                        for c in 0..3 {
+                            diff[c] += kernel * dq[c];
+                        }
+                    }
+                }
+                let dst = log_px(frame[y * w + x]);
+                let src = log_at(frame, w, h, x as isize + ox, y as isize + oy);
+                let v = [0, 1, 2].map(|c| {
+                    (dst[c] * (1.0 - weight) + (src[c] + diff[c] / sum.max(1e-12)) * weight).exp()
+                });
+                Some((y * w + x, v))
+            })
+        })
+        .collect();
+    for (k, v) in patch {
+        out[k] = v;
+    }
+}
+
+/// The best place to copy a spot from: of the places around it where the spot (its
+/// disc, or for a painted stroke its whole shape, `path` relative to `at`) lies fully
+/// inside the frame and in `allowed` (normalised source coordinates) without
+/// touching itself, the one whose surroundings match the spot's in shape and that
+/// holds no defect of its own. Returns the new `from`.
 pub fn find_source(
     data: &[[f32; 3]],
     w: usize,
     h: usize,
     at: [f32; 2],
+    path: &[[f32; 2]],
     radius: f32,
     allowed: &dyn Fn([f32; 2]) -> bool,
 ) -> [f32; 2] {
     let r = (radius * w.max(h) as f32).max(1.5);
     let (cx, cy) = (at[0] * w as f32 - 0.5, at[1] * h as f32 - 0.5);
     let to_uv = |x: f32, y: f32| [(x + 0.5) / w as f32, (y + 0.5) / h as f32];
+    // The stroke's centre line in pixels, relative to `at`.
+    let rel: Vec<[f32; 2]> = if path.len() > 1 {
+        path.iter()
+            .map(|o| [o[0] * w as f32, o[1] * h as f32])
+            .collect()
+    } else {
+        vec![path.first().map_or([0.0; 2], |o| [o[0] * w as f32, o[1] * h as f32])]
+    };
+    let stroke = rel.len() > 1;
+    let line = Polyline::new(rel.clone(), 2.5 * r + 1.0);
 
-    // Sample points: alternating rings around the disc, and a sunflower inside it.
+    // Sample points: alternating rings around the disc, and a sunflower inside it;
+    // for a stroke, rings around brush circles along it, and points on its line.
     const POINTS: usize = 32;
-    let around: Vec<(f32, f32)> = (0..POINTS)
-        .map(|k| {
-            let a = TAU * k as f32 / POINTS as f32;
-            let rr = r * if k % 2 == 0 { 1.15 } else { 1.5 };
-            (a.cos() * rr, a.sin() * rr)
-        })
-        .collect();
-    let inside: Vec<(f32, f32)> = (0..POINTS)
-        .map(|k| {
-            let a = k as f32 * 2.399_963;
-            let rr = r * 0.9 * ((k as f32 + 0.5) / POINTS as f32).sqrt();
-            (a.cos() * rr, a.sin() * rr)
-        })
-        .collect();
+    let ring = |c: [f32; 2], k: usize| {
+        let a = TAU * k as f32 / POINTS as f32;
+        let rr = r * if k.is_multiple_of(2) { 1.15 } else { 1.5 };
+        (c[0] + a.cos() * rr, c[1] + a.sin() * rr, rr)
+    };
+    let (around, inside): (Vec<_>, Vec<_>) = if stroke {
+        let centres = resample(&rel, r / 2.0);
+        let around: Vec<(f32, f32)> = centres
+            .iter()
+            .flat_map(|&c| (0..POINTS).map(move |k| ring(c, k)))
+            .filter(|&(x, y, rr)| line.dist([x, y]) >= rr * 0.97)
+            .map(|(x, y, _)| (x, y))
+            .collect();
+        let inside: Vec<(f32, f32)> = centres.iter().map(|c| (c[0], c[1])).collect();
+        (thin(&around, 96), thin(&inside, POINTS))
+    } else {
+        let c = rel[0];
+        let around = (0..POINTS)
+            .map(|k| {
+                let (x, y, _) = ring(c, k);
+                (x, y)
+            })
+            .collect();
+        let inside = (0..POINTS)
+            .map(|k| {
+                let a = k as f32 * 2.399_963;
+                let rr = r * 0.9 * ((k as f32 + 0.5) / POINTS as f32).sqrt();
+                (c[0] + a.cos() * rr, c[1] + a.sin() * rr)
+            })
+            .collect();
+        (around, inside)
+    };
     let sample = |x: f32, y: f32, pts: &[(f32, f32)]| -> Vec<[f32; 3]> {
         pts.iter()
             .map(|(dx, dy)| log_bilinear(data, w, h, x + dx, y + dy))
@@ -192,22 +424,52 @@ pub fn find_source(
     };
     let target = sample(cx, cy, &around);
 
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for p in &rel {
+        for k in 0..2 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let extent = (hi[0] - lo[0]).max(hi[1] - lo[1]);
     let in_frame = |x: f32, y: f32| {
-        x - r >= 0.0 && y - r >= 0.0 && x + r <= w as f32 - 1.0 && y + r <= h as f32 - 1.0
+        x + lo[0] - r >= 0.0
+            && y + lo[1] - r >= 0.0
+            && x + hi[0] + r <= w as f32 - 1.0
+            && y + hi[1] + r <= h as f32 - 1.0
     };
+    let probes = thin(&rel, 16);
     let in_allowed = |x: f32, y: f32| {
-        [(0.0, 0.0), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)]
-            .iter()
-            .all(|(dx, dy)| allowed(to_uv(x + dx, y + dy)))
+        probes.iter().all(|p| {
+            [(0.0, 0.0), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)]
+                .iter()
+                .all(|(dx, dy)| allowed(to_uv(x + p[0] + dx, y + p[1] + dy)))
+        })
     };
+    // A stroke moved by (dx, dy) stays clear of itself.
+    let shifted = thin(&resample(&rel, r / 2.0), 256);
+    let clear = |dx: f32, dy: f32| {
+        !stroke
+            || shifted
+                .iter()
+                .all(|p| line.dist([p[0] + dx, p[1] + dy]) >= 2.5 * r)
+    };
+    let mut dists: Vec<f32> = [2.6f32, 3.2, 4.0, 5.5, 7.5, 10.0]
+        .iter()
+        .map(|d| d * r)
+        .collect();
+    if stroke {
+        dists.extend([extent + 2.6 * r, extent * 1.5 + 3.0 * r]);
+    }
     const ANGLES: usize = 16;
     let mut best: Option<(f32, f32, f32)> = None;
     let mut fallback: Option<(f32, f32)> = None;
-    for (ring, dist) in [2.6f32, 3.2, 4.0, 5.5, 7.5, 10.0].iter().enumerate() {
+    for (ring, dist) in dists.iter().enumerate() {
         for k in 0..ANGLES {
             let a = TAU * (k as f32 + ring as f32 * 0.5) / ANGLES as f32;
-            let (x, y) = (cx + a.cos() * dist * r, cy + a.sin() * dist * r);
-            if !in_frame(x, y) {
+            let (dx, dy) = (a.cos() * dist, a.sin() * dist);
+            let (x, y) = (cx + dx, cy + dy);
+            if !in_frame(x, y) || !clear(dx, dy) {
                 continue;
             }
             fallback.get_or_insert((x, y));
@@ -221,11 +483,11 @@ pub fn find_source(
                 .map(|(a, b)| [a[0] - b[0], a[1] - b[1], a[2] - b[2]])
                 .collect();
             let level = (0..3)
-                .map(|c| (diff.iter().map(|d| d[c]).sum::<f32>() / POINTS as f32).powi(2))
+                .map(|c| (diff.iter().map(|d| d[c]).sum::<f32>() / diff.len() as f32).powi(2))
                 .sum::<f32>();
             // More variation inside than around it: a defect, or an edge passing through.
             let defect = (spread(&sample(x, y, &inside)) - spread(&ring_px)).max(0.0);
-            let score = spread(&diff) + 0.05 * level + defect + 1e-5 * dist;
+            let score = spread(&diff) + 0.05 * level + defect + 1e-5 * dist / r;
             if best.is_none_or(|b| score < b.0) {
                 best = Some((score, x, y));
             }
@@ -237,10 +499,11 @@ pub fn find_source(
     if let Some((x, y)) = fallback {
         return to_uv(x, y);
     }
-    // A spot too large to fit a disc beside it: as far towards the frame's middle as it goes.
+    // A spot too large to fit beside it: as far towards the frame's middle as it goes.
     let toward = |c: f32, size: usize| {
         let mid = (size as f32 - 1.0) / 2.0;
-        if c < mid { c + 2.2 * r } else { c - 2.2 * r }.clamp(0.0, size as f32 - 1.0)
+        let step = extent + 2.2 * r;
+        if c < mid { c + step } else { c - step }.clamp(0.0, size as f32 - 1.0)
     };
     to_uv(toward(cx, w), toward(cy, h))
 }
@@ -335,17 +598,17 @@ mod tests {
         let source = 150 * W + 340;
         let mut s = spot(60.0, 150.0, 340.0, 150.0, 20.0);
         s.mode = HealMode::Clone;
-        let cloned = apply(&clean, W, H, &[s]);
+        let cloned = apply(&clean, W, H, std::slice::from_ref(&s));
         assert!((cloned[centre][0] / clean[source][0] - 1.0).abs() < 1e-4);
 
         s.opacity = 50.0;
-        let half = apply(&clean, W, H, &[s]);
+        let half = apply(&clean, W, H, std::slice::from_ref(&s));
         // Half way in density between the frame and the source.
         let expect = (clean[centre][0] * clean[source][0]).sqrt();
         assert!((half[centre][0] / expect - 1.0).abs() < 1e-3);
 
         s.opacity = 0.0;
-        assert_eq!(apply(&clean, W, H, &[s]), clean);
+        assert_eq!(apply(&clean, W, H, std::slice::from_ref(&s)), clean);
     }
 
     #[test]
@@ -452,7 +715,7 @@ mod tests {
         let at = [150.5 / W as f32, 150.5 / H as f32];
         let r = 10.0 / W as f32;
         let all = |_: [f32; 2]| true;
-        let from = find_source(&d, W, H, at, r, &all);
+        let from = find_source(&d, W, H, at, &[], r, &all);
         assert!(from[0] * (W as f32) < 190.0, "crossed the edge: {from:?}");
 
         // Dust where the search looks first is passed over.
@@ -463,12 +726,102 @@ mod tests {
                 d[k] = [0.01; 3];
             }
         }
-        let next = find_source(&d, W, H, at, r, &all);
+        let next = find_source(&d, W, H, at, &[], r, &all);
         assert_ne!(next, from, "chose the dusty place");
 
         // Only inside what `allowed` lets through.
         let left = |p: [f32; 2]| p[0] < 0.2;
-        let kept = find_source(&d, W, H, [0.1, 0.5], r, &left);
+        let kept = find_source(&d, W, H, [0.1, 0.5], &[], r, &left);
         assert!(kept[0] + r <= 0.2, "left the allowed area: {kept:?}");
+    }
+
+    /// A stroke through pixel points.
+    fn stroke(pts: &[(f32, f32)], sx: f32, sy: f32, r: f32) -> HealSpot {
+        let uv: Vec<[f32; 2]> = pts
+            .iter()
+            .map(|(x, y)| [(x + 0.5) / W as f32, (y + 0.5) / H as f32])
+            .collect();
+        let (at, path) = HealSpot::stroke(&uv);
+        HealSpot {
+            from: [at[0] + sx / W as f32, at[1] + sy / H as f32],
+            at,
+            path,
+            radius: r / W as f32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_painted_stroke_heals_a_scratch_and_nothing_else() {
+        let clean = scene();
+        let mut dirty = clean.clone();
+        // A bent hair from (80, 60) to (240, 120).
+        let pts: Vec<(f32, f32)> = (0..=16)
+            .map(|k| {
+                let t = k as f32 / 16.0;
+                (80.0 + 160.0 * t, 60.0 + 60.0 * t * t)
+            })
+            .collect();
+        for w in pts.windows(2) {
+            for k in 0..=20 {
+                let t = k as f32 / 20.0;
+                let x = (w[0].0 + (w[1].0 - w[0].0) * t).round() as usize;
+                let y = (w[0].1 + (w[1].1 - w[0].1) * t).round() as usize;
+                dirty[y * W + x] = [0.9; 3];
+            }
+        }
+        // Copied from below, where the gradient is the same, and from the right,
+        // where it is brighter: the seam follows the frame either way.
+        for (sx, sy) in [(0.0, 120.0), (60.0, 120.0)] {
+            let s = stroke(&pts, sx, sy, 6.0);
+            let healed = apply(&dirty, W, H, std::slice::from_ref(&s));
+            let line = Polyline::new(pts.iter().map(|p| [p.0, p.1]).collect(), 8.0);
+            for y in 0..H {
+                for x in 0..W {
+                    let k = y * W + x;
+                    let d = line.dist([x as f32, y as f32]);
+                    if d >= 6.5 {
+                        assert_eq!(healed[k], dirty[k], "changed outside the stroke at {x},{y}");
+                    } else if d < 4.0 {
+                        let ratio = healed[k][0] / clean[k][0];
+                        assert!((ratio - 1.0).abs() < 0.05, "at {x},{y} from {sx}: {ratio}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stroke_s_source_lies_clear_of_it() {
+        let d = scene();
+        let pts: Vec<[f32; 2]> = (0..=10)
+            .map(|k| {
+                let t = k as f32 / 10.0;
+                [(100.0 + 200.0 * t + 0.5) / W as f32, (150.5 + 30.0 * t) / H as f32]
+            })
+            .collect();
+        let (at, path) = HealSpot::stroke(&pts);
+        let r = 8.0 / W as f32;
+        let from = find_source(&d, W, H, at, &path, r, &|_| true);
+        let (dx, dy) = ((from[0] - at[0]) * W as f32, (from[1] - at[1]) * H as f32);
+        let px: Vec<[f32; 2]> = pts
+            .iter()
+            .map(|p| [p[0] * W as f32, p[1] * H as f32])
+            .collect();
+        let line = Polyline::new(px.clone(), 40.0);
+        for p in resample(&px, 2.0) {
+            assert!(line.dist([p[0] + dx, p[1] + dy]) >= 19.9, "the source overlaps the stroke");
+            let (x, y) = (p[0] + dx, p[1] + dy);
+            assert!(x >= 8.0 && y >= 8.0 && x <= W as f32 - 9.0 && y <= H as f32 - 9.0);
+        }
+    }
+
+    #[test]
+    fn old_sidecar_spots_load_as_round_spots() {
+        let s: HealSpot =
+            serde_json::from_str(r#"{"at":[0.1,0.2],"from":[0.3,0.2],"radius":0.01}"#).unwrap();
+        assert!(s.path.is_empty());
+        assert_eq!(s.points(), vec![[0.1, 0.2]]);
+        assert!(!serde_json::to_string(&s).unwrap().contains("path"));
     }
 }
