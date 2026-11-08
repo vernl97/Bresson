@@ -380,12 +380,12 @@ impl NlpApp {
             let id = crate::engine::presets::crosstalk_id_for_stock(
                 &self.frames[i].sc.metadata.film_stock,
             );
-            if let Some(id) = id {
-                if self.frames[i].sc.settings.crosstalk != id {
-                    self.frames[i].sc.settings.crosstalk = id.to_string();
-                    self.mark_changed(i);
-                    self.editor.invalidate();
-                }
+            if let Some(id) = id
+                && self.frames[i].sc.settings.crosstalk != id
+            {
+                self.frames[i].sc.settings.crosstalk = id.to_string();
+                self.mark_changed(i);
+                self.editor.invalidate();
             }
         }
         // Copy to the frame's roll, or to the whole folder.
@@ -469,6 +469,7 @@ impl NlpApp {
     }
 
     /// A dropdown row with an eyedropper button at its end.
+    #[allow(clippy::too_many_arguments)]
     fn combo_with_picker<T: Copy + PartialEq>(
         &mut self,
         ui: &mut egui::Ui,

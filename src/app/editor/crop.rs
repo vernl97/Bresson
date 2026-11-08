@@ -229,10 +229,10 @@ impl NlpApp {
         let Some(frame) = self.frame_aspect() else {
             return;
         };
-        if let Some(c) = self.editor.crop_mut() {
-            if let Some(ratio) = c.ratio(frame) {
-                c.insets = crate::engine::frame::fit_aspect(c.insets, frame, ratio);
-            }
+        if let Some(c) = self.editor.crop_mut()
+            && let Some(ratio) = c.ratio(frame)
+        {
+            c.insets = crate::engine::frame::fit_aspect(c.insets, frame, ratio);
         }
     }
 
@@ -373,7 +373,11 @@ impl NlpApp {
                         )
                         .clicked()
                         {
-                            c.level = if c.level.on() { Level::Off } else { Level::Armed };
+                            c.level = if c.level.on() {
+                                Level::Off
+                            } else {
+                                Level::Armed
+                            };
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             auto = ui

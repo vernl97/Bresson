@@ -650,10 +650,10 @@ impl NlpApp {
             self.toast(msg, true);
         }
         for i in 0..self.frames.len() {
-            if let Some(t) = self.frames[i].dirty_since {
-                if self.time - t > 0.8 {
-                    self.save_frame(i);
-                }
+            if let Some(t) = self.frames[i].dirty_since
+                && self.time - t > 0.8
+            {
+                self.save_frame(i);
             }
         }
     }
@@ -1223,7 +1223,10 @@ impl NlpApp {
     ) {
         // A conversion of a roll that has since closed: its frames are
         // gone, and it is not part of this roll's progress.
-        let mut paths = frames.iter().map(|f| &f.path).chain(errors.iter().map(|e| &e.path));
+        let mut paths = frames
+            .iter()
+            .map(|f| &f.path)
+            .chain(errors.iter().map(|e| &e.path));
         if !(frames.is_empty() && errors.is_empty()) && paths.all(|p| self.index_of(p).is_none()) {
             return;
         }
@@ -2141,7 +2144,6 @@ mod ui_tests {
     #[test]
     #[ignore]
     fn view_bar_moves_between_frames() {
-        use egui_kittest::kittest::Queryable;
         let dir = PathBuf::from(std::env::var("NLP_UI_TEST_DIR").expect("NLP_UI_TEST_DIR"));
         let out = std::env::var("NLP_UI_OUT").ok().map(PathBuf::from);
         let mut h = Harness::builder()

@@ -238,8 +238,11 @@ fn percentile(v: &mut [f64], q: f64) -> f64 {
     *v.select_nth_unstable_by(i, f64::total_cmp).1
 }
 
+/// A print's measures: L* levels, clipping, cast per tone, neutral share, chroma.
+type Measures = ([f64; 3], [f64; 2], [[f64; 2]; 4], [f64; 4], [f64; 2]);
+
 /// Measure a print (encoded sRGB).
-fn measure(px: &[[f32; 3]]) -> ([f64; 3], [f64; 2], [[f64; 2]; 4], [f64; 4], [f64; 2]) {
+fn measure(px: &[[f32; 3]]) -> Measures {
     let labs: Vec<[f64; 3]> = px
         .par_iter()
         .map(|p| {

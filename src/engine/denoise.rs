@@ -42,7 +42,7 @@ pub fn chroma(neg: &mut Negative, amount: f32, scale: f32) {
         return;
     }
     let r = ((RADIUS_MIN + (RADIUS_MAX - RADIUS_MIN) * t) * scale).min((w.max(h) / 2) as f32);
-    if !(r >= RADIUS_SKIP) {
+    if r.is_nan() || r < RADIUS_SKIP {
         return;
     }
     let edge = EDGE_MIN + (EDGE_MAX - EDGE_MIN) * t;
@@ -108,10 +108,7 @@ fn box_blur<const N: usize>(data: &[[f32; N]], w: usize, h: usize, r: f32) -> Ve
             for c in 0..N {
                 out[x][c] = (acc[c] + f * (lo[c] + hi[c])) / n;
             }
-            let (add, sub) = (
-                row[at(xi + ro, w)],
-                row[at(xi - ri, w)],
-            );
+            let (add, sub) = (row[at(xi + ro, w)], row[at(xi - ri, w)]);
             for c in 0..N {
                 acc[c] += add[c] - sub[c];
             }
@@ -270,10 +267,16 @@ mod tests {
                 .collect()
         };
         let diff = |a: &[[f32; 1]], b: &[f32]| {
-            a.iter().zip(b).map(|(a, b)| (a[0] - b).abs()).fold(0.0f32, f32::max)
+            a.iter()
+                .zip(b)
+                .map(|(a, b)| (a[0] - b).abs())
+                .fold(0.0f32, f32::max)
         };
         for r in 0..4 {
-            assert!(diff(&box_blur(&d, w, h, r as f32), &naive(r)) < 1e-5, "r = {r}");
+            assert!(
+                diff(&box_blur(&d, w, h, r as f32), &naive(r)) < 1e-5,
+                "r = {r}"
+            );
             let just_below = box_blur(&d, w, h, r as f32 + 0.999);
             assert!(diff(&just_below, &naive(r + 1)) < 0.01, "r = {r}.999");
         }

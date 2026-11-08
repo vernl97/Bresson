@@ -48,23 +48,6 @@ pub fn lookup<K: PartialEq + Copy, V: Copy>(table: &[(K, V)], key: K) -> Option<
     table.iter().find(|e| e.0 == key).map(|e| e.1)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn python_rounding_and_division() {
-        assert_eq!(py_round(2.5), 2);
-        assert_eq!(py_round(3.5), 4);
-        assert_eq!(py_round(-0.5), 0);
-        assert_eq!(floor_div(-7, 2), -4);
-        assert_eq!(floor_div(7, -2), -4);
-        assert_eq!(floor_div(7, 2), 3);
-        assert_eq!(py_mod(-7, 3), 2);
-        assert_eq!(py_mod(7, -3), -2);
-    }
-}
-
 /// numpy `_lerp` as used by `np.percentile(method="linear")`.
 fn np_lerp(a: f64, b: f64, t: f64) -> f64 {
     let d = b - a;
@@ -292,4 +275,21 @@ pub fn lstsq_line(x: &[f64], y: &[f64], w: &[f64]) -> [f64; 2] {
         return [0.0, if s1 > 0.0 { sy / s1 } else { 0.0 }];
     }
     [(sxy * s1 - sx * sy) / det, (sxx * sy - sx * sxy) / det]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn python_rounding_and_division() {
+        assert_eq!(py_round(2.5), 2);
+        assert_eq!(py_round(3.5), 4);
+        assert_eq!(py_round(-0.5), 0);
+        assert_eq!(floor_div(-7, 2), -4);
+        assert_eq!(floor_div(7, -2), -4);
+        assert_eq!(floor_div(7, 2), 3);
+        assert_eq!(py_mod(-7, 3), 2);
+        assert_eq!(py_mod(7, -3), -2);
+    }
 }

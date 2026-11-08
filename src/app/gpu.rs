@@ -288,8 +288,8 @@ impl GpuPreview {
         }
         let none = LocalData::none();
         let local = view.local.as_deref().unwrap_or(&none);
-        if !self.locals.contains_key(&local.id) {
-            let tex = upload(
+        self.locals.entry(local.id).or_insert_with(|| {
+            upload(
                 device,
                 queue,
                 "preview dodge & burn",
@@ -297,9 +297,8 @@ impl GpuPreview {
                 (local.width, local.height),
                 bytemuck::cast_slice(&local.texels),
                 4,
-            );
-            self.locals.insert(local.id, tex);
-        }
+            )
+        });
         let s = self.slots.entry(slot).or_insert_with(|| Slot {
             view: 0,
             neg: 0,

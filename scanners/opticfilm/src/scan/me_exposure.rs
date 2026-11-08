@@ -64,7 +64,7 @@ pub fn dense_percentiles(
     black_level: f64,
     dense_percentile: f64,
 ) -> [f64; 3] {
-    if rgb.dim().2 < 3 || rgb.len() == 0 {
+    if rgb.dim().2 < 3 || rgb.is_empty() {
         return [0.0; 3];
     }
     let h = channel_hists(rgb);
@@ -85,7 +85,7 @@ pub fn choose_long_exposure(
     if short_exposure <= 0 {
         return Err(Error::Value("short_exposure must be positive".into()));
     }
-    if rgb.len() == 0 {
+    if rgb.is_empty() {
         return Err(Error::Value("short_rgb is empty".into()));
     }
     let dense = dense_percentiles(rgb, black_level, dense_percentile);

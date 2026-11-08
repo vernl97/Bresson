@@ -697,7 +697,7 @@ impl Gl128ScanSession {
             }
             let (rl, ls, lstats) = self.capture_stacked_slot(
                 asic,
-                calibrator.as_deref_mut(),
+                calibrator,
                 req,
                 ctl,
                 &mut st,
@@ -720,7 +720,7 @@ impl Gl128ScanSession {
                     align_shifts: short_shifts,
                     stack_stats: short_stats,
                 },
-                long: req.multi_exposure.then(|| SlotStackDebug {
+                long: req.multi_exposure.then_some(SlotStackDebug {
                     n_passes,
                     align_shifts: long_shifts,
                     stack_stats: long_stats,

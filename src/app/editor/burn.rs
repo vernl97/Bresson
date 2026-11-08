@@ -5,8 +5,8 @@
 
 use eframe::egui::{self, Color32, Rect, pos2};
 
-use super::heal::{CanvasMap, ring};
 use super::Tool;
+use super::heal::{CanvasMap, ring};
 use crate::app::NlpApp;
 use crate::app::widgets::{self, pill, theme};
 use crate::engine::settings::{BurnStroke, Settings};

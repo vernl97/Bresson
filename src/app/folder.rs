@@ -223,10 +223,10 @@ pub fn flat_field_ui(
             if flat.is_some() && ui.add(widgets::ghost("Clear")).clicked() {
                 *flat = None;
             }
-            if ui.add(widgets::ghost("Choose…")).clicked() {
-                if let Some(p) = super::picker::pick_files(start).into_iter().next() {
-                    *flat = Some(p);
-                }
+            if ui.add(widgets::ghost("Choose…")).clicked()
+                && let Some(p) = super::picker::pick_files(start).into_iter().next()
+            {
+                *flat = Some(p);
             }
         });
     });
@@ -665,7 +665,11 @@ impl NlpApp {
                             let label = if self.auto.roll_pass == super::auto::RollPass::Running {
                                 "Balancing the roll…".to_string()
                             } else {
-                                format!("Converting {}/{}", conv.done.min(conv.total), conv.total.max(1))
+                                format!(
+                                    "Converting {}/{}",
+                                    conv.done.min(conv.total),
+                                    conv.total.max(1)
+                                )
                             };
                             ui.add(
                                 egui::ProgressBar::new(conv.fraction())
@@ -680,17 +684,14 @@ impl NlpApp {
                             ui.add_space(12.0);
                             ui.add(
                                 egui::ProgressBar::new(ex.fraction())
-                                .desired_width(120.0)
-                                .desired_height(4.0)
-                                .fill(theme::ACCENT),
+                                    .desired_width(120.0)
+                                    .desired_height(4.0)
+                                    .fill(theme::ACCENT),
                             );
                             ui.label(
-                                RichText::new(format!(
-                                    "Exporting {}/{}",
-                                    ex.done, ex.total
-                                ))
-                                .small()
-                                .color(theme::MUTED),
+                                RichText::new(format!("Exporting {}/{}", ex.done, ex.total))
+                                    .small()
+                                    .color(theme::MUTED),
                             );
                         }
                     });
@@ -900,7 +901,7 @@ impl NlpApp {
     pub fn paste_edit_to(&mut self, idx: Vec<usize>, c: &Settings) {
         self.record(&idx);
         for &i in &idx {
-            self.frames[i].sc.settings.copy_edit_from(&c);
+            self.frames[i].sc.settings.copy_edit_from(c);
             if c.wb_mode != WbMode::Custom {
                 self.frames[i].apply_wb_mode();
             }

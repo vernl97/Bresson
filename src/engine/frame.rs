@@ -317,11 +317,11 @@ fn angle(mask: &[bool], w: usize, h: usize) -> f32 {
         let mut pts = Vec::new();
         for i in n * 3 / 10..n * 7 / 10 {
             let lim = len * 2 / 5;
-            if let Some(e) = (1..lim).find(|&j| (j..j + 3).all(|k| !at(i, k))) {
-                if at(i, 0) {
-                    let e = if rev { (len - e) as f32 } else { e as f32 };
-                    pts.push((i as f32, e));
-                }
+            if let Some(e) = (1..lim).find(|&j| (j..j + 3).all(|k| !at(i, k)))
+                && at(i, 0)
+            {
+                let e = if rev { (len - e) as f32 } else { e as f32 };
+                pts.push((i as f32, e));
             }
         }
         if pts.len() < (n * 4 / 10) / 3 {

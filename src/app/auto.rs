@@ -65,9 +65,10 @@ impl NlpApp {
     /// pass runs.
     pub fn auto_busy(&self) -> bool {
         self.auto.roll_pass == RollPass::Running
-            || self.frames.iter().any(|f| {
-                f.auto == AutoConvert::Queued || f.convert_ticket.is_some_and(|t| t.auto)
-            })
+            || self
+                .frames
+                .iter()
+                .any(|f| f.auto == AutoConvert::Queued || f.convert_ticket.is_some_and(|t| t.auto))
     }
 
     /// The app has work of its own lined up that Stop would cancel.
@@ -135,7 +136,9 @@ impl NlpApp {
             return;
         }
         let roll: Vec<usize> = (0..self.frames.len())
-            .filter(|&i| self.frames[i].auto != AutoConvert::Off && self.frames[i].sc.is_converted())
+            .filter(|&i| {
+                self.frames[i].auto != AutoConvert::Off && self.frames[i].sc.is_converted()
+            })
             .collect();
         if roll.len() < 2 || self.single_mode {
             self.auto.roll_pass = RollPass::Done;
@@ -252,7 +255,10 @@ impl NlpApp {
             self.frames[i].exporting = false;
             self.export_progress.finish(dropped);
             let name = self.frames[i].name.clone();
-            self.toast(format!("Cancelled the export of {name}: it is no longer converted"), true);
+            self.toast(
+                format!("Cancelled the export of {name}: it is no longer converted"),
+                true,
+            );
         }
     }
 

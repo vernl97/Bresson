@@ -427,7 +427,7 @@ pub fn declared_shading_size(entries: usize) -> usize {
 
 /// Pixels covered by a declared AHB shading upload size (inverse of above).
 pub fn shading_entry_count(declared_size: usize) -> Result<usize> {
-    if declared_size % SHADING_PAIR_BYTES != 0 {
+    if !declared_size.is_multiple_of(SHADING_PAIR_BYTES) {
         return Err(Error::Value(format!(
             "Shading declared_size={declared_size} is not a whole number of 4-byte pairs"
         )));
@@ -621,7 +621,7 @@ pub fn validate_color_shading_strip(
             );
         }
     }
-    let floor = (COLOR_SHADING_WHITE_MEAN_MIN as i64 / 4) as i64;
+    let floor = COLOR_SHADING_WHITE_MEAN_MIN as i64 / 4;
     let zero_cols: Vec<i64> = white
         .iter()
         .enumerate()
@@ -1330,7 +1330,7 @@ pub fn pack_shading_table(
     let mut last_dark: u16 = 0;
     for (d, g) in dark.iter().zip(gain) {
         for ch in 0..3 {
-            if pairs != 0 && pairs % SHADING_BLOCK_DATA_PAIRS == 0 {
+            if pairs != 0 && pairs.is_multiple_of(SHADING_BLOCK_DATA_PAIRS) {
                 for _ in 0..SHADING_BLOCK_PAD_PAIRS {
                     out.extend_from_slice(&last_dark.to_le_bytes());
                     out.extend_from_slice(&[0, 0]);

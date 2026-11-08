@@ -106,13 +106,13 @@ pub fn load(path: &Path, max_long_edge: Option<usize>) -> Result<SourceImage> {
     } else {
         load_bitmap(path, &bytes)?
     };
-    if let Some(m) = max_long_edge {
-        if img.long_edge() > m {
-            let (d, w, h) = downscale(&img.data, img.width, img.height, m);
-            img.data = d;
-            img.width = w;
-            img.height = h;
-        }
+    if let Some(m) = max_long_edge
+        && img.long_edge() > m
+    {
+        let (d, w, h) = downscale(&img.data, img.width, img.height, m);
+        img.data = d;
+        img.width = w;
+        img.height = h;
     }
     Ok(img)
 }
@@ -347,7 +347,10 @@ fn develop_full(raw: &rawler::RawImage) -> Result<(Vec<[f32; 3]>, usize, usize)>
     }
 }
 
-fn develop_cfa(raw: &rawler::RawImage) -> Result<Option<(Vec<[f32; 3]>, usize, usize)>> {
+/// Pixels with their width and height.
+type Pixels = (Vec<[f32; 3]>, usize, usize);
+
+fn develop_cfa(raw: &rawler::RawImage) -> Result<Option<Pixels>> {
     use rawler::imgop::sensor::{Demosaic, SensorType};
     use rawler::imgop::{Dim2, Point, Rect};
     let RawPhotometricInterpretation::Cfa(config) = &raw.photometric else {
@@ -504,7 +507,8 @@ fn bin_cfa(
 /// Apply an EXIF orientation.
 pub fn orient_in_place(data: &mut Vec<[f32; 3]>, w: &mut usize, h: &mut usize, o: Orientation) {
     let (sw, sh) = (*w, *h);
-    let map: Option<(usize, usize, Box<dyn Fn(usize, usize) -> (usize, usize)>)> = match o {
+    type PixelMap = Box<dyn Fn(usize, usize) -> (usize, usize)>;
+    let map: Option<(usize, usize, PixelMap)> = match o {
         Orientation::Normal | Orientation::Unknown => None,
         Orientation::HorizontalFlip => Some((sw, sh, Box::new(move |x, y| (sw - 1 - x, y)))),
         Orientation::Rotate180 => Some((sw, sh, Box::new(move |x, y| (sw - 1 - x, sh - 1 - y)))),
@@ -731,7 +735,7 @@ impl GeometryMap {
     }
 
     /// Source pixel to output pixel.
-    pub fn to_view(&self, x: f32, y: f32) -> (f32, f32) {
+    pub fn to_view(self, x: f32, y: f32) -> (f32, f32) {
         let (w, h) = self.src;
         let (mut x, mut y) = match self.rotation {
             1 => (h - 1.0 - y, x),
@@ -754,7 +758,7 @@ impl GeometryMap {
     }
 
     /// Output pixel to source pixel.
-    pub fn to_source(&self, x: f32, y: f32) -> (f32, f32) {
+    pub fn to_source(self, x: f32, y: f32) -> (f32, f32) {
         let (mut x, mut y) = (x + self.offset.0, y + self.offset.1);
         if let Some((c, s)) = self.angle {
             let (dx, dy) = (

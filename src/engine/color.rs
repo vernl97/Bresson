@@ -433,7 +433,7 @@ pub fn make_icc(name: &str, p: &Primaries, trc: Trc) -> Vec<u8> {
     let mut table = (tags.len() as u32).to_be_bytes().to_vec();
     let mut data = Vec::new();
     for (sig, body) in &tags {
-        while (offset + data.len()) % 4 != 0 {
+        while !(offset + data.len()).is_multiple_of(4) {
             data.push(0);
         }
         let off = offset + data.len();
@@ -500,8 +500,11 @@ pub fn icc_for(space: super::settings::OutputSpace) -> Vec<u8> {
     }
 }
 
+/// A linear-to-linear matrix and the space's transfer encoder.
+pub type OutputTransform = ([[f32; 3]; 3], fn(f32) -> f32);
+
 /// Linear MelissaRGB → linear output space matrix + encoder.
-pub fn output_transform(space: super::settings::OutputSpace) -> ([[f32; 3]; 3], fn(f32) -> f32) {
+pub fn output_transform(space: super::settings::OutputSpace) -> OutputTransform {
     use super::settings::OutputSpace::*;
     match space {
         Srgb => (to_f32(&rgb_to_rgb(&MELISSA, &SRGB)), srgb_encode),

@@ -191,7 +191,7 @@ pub fn optimal_dft_size(n: usize) -> usize {
     loop {
         let mut k = m;
         for p in [2, 3, 5] {
-            while k % p == 0 {
+            while k.is_multiple_of(p) {
                 k /= p;
             }
         }
@@ -327,7 +327,7 @@ fn irfft2_forward_norm(spec: &Array2<Complex<f32>>, m: usize, n: usize) -> Array
         }
         // numpy discards the imaginary part of DC / Nyquist bins.
         row_in[0].im = 0.0;
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             row_in[nc - 1].im = 0.0;
         }
         c2r.process(&mut row_in, &mut row_out).expect("irfft");

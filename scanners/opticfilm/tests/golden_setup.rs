@@ -193,6 +193,7 @@ fn collapse_status_polls(txns: &[UsbTransaction]) -> Vec<&UsbTransaction> {
     out
 }
 
+#[allow(clippy::type_complexity)] // the key mirrors the Python tuple
 fn key(
     t: &UsbTransaction,
 ) -> (

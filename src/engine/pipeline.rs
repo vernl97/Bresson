@@ -1488,7 +1488,10 @@ impl Renderer {
         }
         let table = self.lut.hdr_gain_table();
         let gain = |p: &[f32; 3], ev: f32| {
-            CurveLut::gain_at(&table, self.lut.max_print_tone(*p, ev * curve::PRINT_TONE_PER_STOP))
+            CurveLut::gain_at(
+                &table,
+                self.lut.max_print_tone(*p, ev * curve::PRINT_TONE_PER_STOP),
+            )
         };
         Some(match neg.local.as_deref() {
             Some(local) if self.local && local.len() == neg.data.len() => neg
@@ -1817,7 +1820,7 @@ mod tests {
                 } else {
                     Some([0.18; 3])
                 };
-                if !border && y >= 160 && y < 180 && x > 40 && x < w - 40 {
+                if !border && (160..180).contains(&y) && x > 40 && x < w - 40 {
                     grey.push(y * w + x);
                 }
                 data[y * w + x] = match scene {
@@ -1853,8 +1856,10 @@ mod tests {
     #[test]
     fn auto_neutral_keeps_greys_neutral() {
         let (src, grey) = synthetic_negative();
-        let mut s = Settings::default();
-        s.lut = crate::engine::settings::Lut::None;
+        let s = Settings {
+            lut: crate::engine::settings::Lut::None,
+            ..Default::default()
+        };
         let base = resolve_base(&src, &s, None);
         let neg = prepare_negative(&src, &s, base);
         let a = analyze(&neg, &s, base, None);
@@ -2105,8 +2110,10 @@ mod tests {
     #[test]
     fn edit_only_skips_analysis() {
         let (src, _) = synthetic_negative();
-        let mut s = Settings::default();
-        s.image_type = ImageType::EditOnly;
+        let s = Settings {
+            image_type: ImageType::EditOnly,
+            ..Default::default()
+        };
         let base = resolve_base(&src, &s, None);
         let neg = prepare_negative(&src, &s, base);
         let a = analyze(&neg, &s, base, None);
@@ -2282,12 +2289,20 @@ mod tests {
         assert!(g_lamp > 1.5, "lamp {g_lamp}");
         assert!((g_grey - 1.0).abs() < 1e-4 && (g_black - 1.0).abs() < 1e-4);
 
-        assert!(Renderer::new(&s, None, OutputSpace::Srgb).hdr_gain(&neg).is_none());
+        assert!(
+            Renderer::new(&s, None, OutputSpace::Srgb)
+                .hdr_gain(&neg)
+                .is_none()
+        );
         let edit = Settings {
             image_type: ImageType::EditOnly,
             ..s.clone()
         };
-        assert!(Renderer::new(&edit, Some(&l), OutputSpace::Srgb).hdr_gain(&neg).is_none());
+        assert!(
+            Renderer::new(&edit, Some(&l), OutputSpace::Srgb)
+                .hdr_gain(&neg)
+                .is_none()
+        );
     }
 
     /// A flat-field frame divides out uneven illumination.
@@ -2679,9 +2694,11 @@ mod tests {
         };
 
         let uncropped = Settings::default();
-        let mut cropped = Settings::default();
         // Crop out the top 20% containing the border
-        cropped.crop = [20.0, 10.0, 10.0, 10.0];
+        let cropped = Settings {
+            crop: [20.0, 10.0, 10.0, 10.0],
+            ..Default::default()
+        };
 
         let base_uncropped = auto_base(&src, &uncropped);
         let base_cropped = auto_base(&src, &cropped);

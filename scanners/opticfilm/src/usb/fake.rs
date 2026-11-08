@@ -183,7 +183,7 @@ impl<D: FakeDevice> FakeUsbTransport<D> {
             if value & 0xFF == VALUE_SET_REGISTER {
                 let payload = txn.data.as_deref().unwrap_or(&[]);
                 let high = if value & 0x100 != 0 { 0x100 } else { 0 };
-                if payload.len() < 2 || payload.len() % 2 != 0 {
+                if payload.len() < 2 || !payload.len().is_multiple_of(2) {
                     return Err(Error::Usb(format!(
                         "SET_REGISTER payload length {}",
                         payload.len()

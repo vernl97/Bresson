@@ -676,8 +676,8 @@ impl NlpApp {
         // Header: frame number, status markers on the right, the name while hovered.
         let row_y = cell.top() + HEADER_H / 2.0;
         let mut x = cell.right() - 8.0;
-        let converting = f.auto == super::auto::AutoConvert::Queued
-            || f.convert_ticket.is_some_and(|t| t.auto);
+        let converting =
+            f.auto == super::auto::AutoConvert::Queued || f.convert_ticket.is_some_and(|t| t.auto);
         let markers_right = x;
         if f.exporting {
             let a = ((now * 4.0).sin() * 0.35 + 0.65) as f32;

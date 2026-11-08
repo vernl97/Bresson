@@ -959,6 +959,7 @@ pub fn stock_combo(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> e
 /// Slim slider: label + value on one row, track below. Double-click the
 /// track or click the label to reset; the value can be typed past the range.
 /// `origin` optionally defines where the track fill highlight starts (defaulting to `default`).
+#[allow(clippy::too_many_arguments)] // one call per slider row, all parameters read at the call
 pub fn fl_slider_origin(
     ui: &mut Ui,
     label: &str,
@@ -1165,23 +1166,23 @@ fn slider_row(
     if resp.double_clicked() {
         *v = default;
         changed = true;
-    } else if resp.dragged() || resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            // Shift while dragging: relative moves at a tenth of the speed.
-            let fine = resp.dragged() && ui.input(|i| i.modifiers.shift);
-            let mut nv = if fine {
-                (*v + resp.drag_delta().x / track.width() * (hi - lo) * 0.1).clamp(lo, hi)
-            } else {
-                let t = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
-                lo + t * (hi - lo)
-            };
-            let places = decimals + usize::from(fine);
-            let m = 10f32.powi(places as i32);
-            nv = (nv * m).round() / m;
-            if (nv - *v).abs() > 1e-6 {
-                *v = nv;
-                changed = true;
-            }
+    } else if (resp.dragged() || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        // Shift while dragging: relative moves at a tenth of the speed.
+        let fine = resp.dragged() && ui.input(|i| i.modifiers.shift);
+        let mut nv = if fine {
+            (*v + resp.drag_delta().x / track.width() * (hi - lo) * 0.1).clamp(lo, hi)
+        } else {
+            let t = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
+            lo + t * (hi - lo)
+        };
+        let places = decimals + usize::from(fine);
+        let m = 10f32.powi(places as i32);
+        nv = (nv * m).round() / m;
+        if (nv - *v).abs() > 1e-6 {
+            *v = nv;
+            changed = true;
         }
     }
     let hot = resp.hovered() || resp.dragged();
@@ -1231,6 +1232,7 @@ fn slider_row(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn fl_slider(
     ui: &mut Ui,
     label: &str,
@@ -1775,10 +1777,7 @@ mod tests {
         );
         h.run();
         let label = h.get_by_label("Exposure").rect();
-        let dot = egui::pos2(
-            label.min.x as f32 - 9.0,
-            (label.min.y + label.max.y) as f32 / 2.0,
-        );
+        let dot = egui::pos2(label.min.x - 9.0, (label.min.y + label.max.y) / 2.0);
         h.event(egui::Event::PointerMoved(dot));
         h.run();
         for pressed in [true, false] {

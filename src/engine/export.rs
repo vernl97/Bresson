@@ -194,19 +194,16 @@ pub fn export_frame(
             let jpeg = encode_jpeg(neg.width, neg.height, &px, ex.jpeg_quality, &icc, meta)?;
             let gain = ex.hdr.then(|| r.hdr_gain(&neg)).flatten();
             let map = gain.and_then(|g| gainmap::encode_gain_map(&g, neg.width, neg.height));
-            let bytes = match map {
-                Some((q, w, h, m)) => {
-                    let mut g = Vec::new();
-                    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut g, 90).write_image(
-                        &q,
-                        w as u32,
-                        h as u32,
-                        image::ExtendedColorType::L8,
-                    )?;
-                    gainmap::assemble(&jpeg, &g, m)
-                }
-                None => jpeg,
-            };
+            let bytes =
+                match map {
+                    Some((q, w, h, m)) => {
+                        let mut g = Vec::new();
+                        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut g, 90)
+                            .write_image(&q, w as u32, h as u32, image::ExtendedColorType::L8)?;
+                        gainmap::assemble(&jpeg, &g, m)
+                    }
+                    None => jpeg,
+                };
             std::fs::write(&out, bytes).with_context(|| format!("write {}", out.display()))?;
         }
     }
@@ -579,10 +576,12 @@ mod tests {
     #[test]
     fn output_path_uses_custom_output_dir() {
         let src = Path::new("/path/to/scans/test-01.nef");
-        let mut ex = ExportSettings::default();
-        ex.format = ExportFormat::Jpeg;
-        ex.suffix = "-positive".into();
-        ex.output_dir = Some(PathBuf::from("/Users/abe/Pictures/ExportDir"));
+        let ex = ExportSettings {
+            format: ExportFormat::Jpeg,
+            suffix: "-positive".into(),
+            output_dir: Some(PathBuf::from("/Users/abe/Pictures/ExportDir")),
+            ..Default::default()
+        };
 
         let meta = FilmMetadata::default();
         let p = output_path(src, &ex, &NameCtx { n: 1, meta: &meta });
@@ -595,12 +594,14 @@ mod tests {
     #[test]
     fn output_path_defaults_when_output_dir_none() {
         let src = Path::new("/path/to/scans/test-01.nef");
-        let mut ex = ExportSettings::default();
-        ex.format = ExportFormat::Tiff;
-        ex.placement = Placement::Subfolder;
-        ex.subfolder = "Positives".into();
-        ex.suffix = "-positive".into();
-        ex.output_dir = None;
+        let ex = ExportSettings {
+            format: ExportFormat::Tiff,
+            placement: Placement::Subfolder,
+            subfolder: "Positives".into(),
+            suffix: "-positive".into(),
+            output_dir: None,
+            ..Default::default()
+        };
 
         let meta = FilmMetadata::default();
         let p = output_path(src, &ex, &NameCtx { n: 1, meta: &meta });

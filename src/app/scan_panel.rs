@@ -46,7 +46,9 @@ pub enum ScanPhase {
     Switching(String),
     Prescanning,
     /// Scan: the framed areas not saved yet.
-    Scanning { left: usize },
+    Scanning {
+        left: usize,
+    },
 }
 
 #[derive(Default)]

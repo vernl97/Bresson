@@ -1282,10 +1282,8 @@ impl NlpApp {
         }
         if enter && self.editor.crop().is_some() {
             self.apply_crop(i);
-        } else if enter {
-            if self.editor.heal().is_some() || self.editor.burn().is_some() {
-                self.editor.close_tool();
-            }
+        } else if enter && (self.editor.heal().is_some() || self.editor.burn().is_some()) {
+            self.editor.close_tool();
         }
         if q {
             self.toggle_heal(i);
@@ -1738,11 +1736,11 @@ impl NlpApp {
                 self.editor.pan = a.from_pan + (a.to_pan - a.from_pan) * e;
                 ui.ctx().request_repaint();
             }
-        } else if let Some(z) = self.editor.zoom {
-            if z <= fit {
-                self.editor.zoom = None;
-                self.editor.pan = egui::Vec2::ZERO;
-            }
+        } else if let Some(z) = self.editor.zoom
+            && z <= fit
+        {
+            self.editor.zoom = None;
+            self.editor.pan = egui::Vec2::ZERO;
         }
         // Zoom with ⌘/Ctrl + scroll or pinch (about the cursor); scroll pans
         // when zoomed. Applied before the geometry below so it takes effect
@@ -1843,11 +1841,10 @@ impl NlpApp {
             if h.hovered() || h.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
-            if h.dragged() {
-                if let Some(pos) = h.interact_pointer_pos() {
-                    self.editor.split_pos =
-                        ((pos.x - rect.left()) / rect.width()).clamp(0.02, 0.98);
-                }
+            if h.dragged()
+                && let Some(pos) = h.interact_pointer_pos()
+            {
+                self.editor.split_pos = ((pos.x - rect.left()) / rect.width()).clamp(0.02, 0.98);
             }
         }
 
@@ -1863,12 +1860,12 @@ impl NlpApp {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
             if resp.clicked() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    if rect.contains(pos) {
-                        let u = (pos.x - rect.left()) / rect.width();
-                        let v = (pos.y - rect.top()) / rect.height();
-                        self.do_pick(i, pick, u, v);
-                    }
+                if let Some(pos) = resp.interact_pointer_pos()
+                    && rect.contains(pos)
+                {
+                    let u = (pos.x - rect.left()) / rect.width();
+                    let v = (pos.y - rect.top()) / rect.height();
+                    self.do_pick(i, pick, u, v);
                 }
                 self.editor.close_tool();
             }
@@ -1884,11 +1881,11 @@ impl NlpApp {
             } else if resp.hovered() && self.editor.zoom.is_some() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
-            if resp.double_clicked() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    self.editor.zoom_req = Some(ZoomReq::Toggle(pos));
-                    ui.ctx().request_repaint();
-                }
+            if resp.double_clicked()
+                && let Some(pos) = resp.interact_pointer_pos()
+            {
+                self.editor.zoom_req = Some(ZoomReq::Toggle(pos));
+                ui.ctx().request_repaint();
             }
         }
         if !cropping

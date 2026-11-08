@@ -140,10 +140,10 @@ impl Scanner {
         if self.closed {
             return;
         }
-        if self.asic.initialized() {
-            if let Err(e) = self.asic.lamp_off().and_then(|()| self.asic.stop_motor()) {
-                debug!("close cleanup: {e}");
-            }
+        if self.asic.initialized()
+            && let Err(e) = self.asic.lamp_off().and_then(|()| self.asic.stop_motor())
+        {
+            debug!("close cleanup: {e}");
         }
         self.closed = true;
     }

@@ -213,7 +213,7 @@ pub fn prepare_profile(
     if k > 1 {
         changed.extend([(0x38, lp >> 8), (0x39, lp & 0xFF), (0x20, 0x08)]);
     } else if line_sel != recorded {
-        let maxwd = vi(&mframe["pixels"]) * 6 >> 1;
+        let maxwd = (vi(&mframe["pixels"]) * 6) >> 1;
         changed.extend([
             (0x35, maxwd >> 16),
             (0x36, (maxwd >> 8) & 0xFF),
@@ -227,8 +227,8 @@ pub fn prepare_profile(
         lines /= 2;
         changed.extend([
             (0x25, (2 * lines) >> 16),
-            (0x26, (2 * lines >> 8) & 0xFF),
-            (0x27, 2 * lines & 0xFF),
+            (0x26, ((2 * lines) >> 8) & 0xFF),
+            (0x27, (2 * lines) & 0xFF),
         ]);
         let n = vi(&mframe["pixels"]) * lines * 6;
         if vi(&new_ops[first_read]["length"]) != vi(&mframe["bytes"]) {
@@ -1096,7 +1096,7 @@ pub fn run_profile(
         (rp.h.check)()?;
         match kind(op) {
             "delay" => {
-                if !op.get("timedStop").is_some_and(|v| vi(v) != 0) {
+                if op.get("timedStop").is_none_or(|v| vi(v) == 0) {
                     sleep(op["ms"].as_f64().unwrap_or(0.0) / 1000.0);
                     continue;
                 }
@@ -1122,17 +1122,17 @@ pub fn run_profile(
                 rp.control(&op2)?;
             }
             "write" => {
-                let payload = if calibration.is_some()
+                let payload = if let Some(cal) = calibration.as_mut()
                     && (rp.regs.get(&0x5B), rp.regs.get(&0x5C)) == (Some(&0x10), Some(&0))
                 {
                     let size = match op.get("length").map(vi).filter(|&l| l != 0) {
                         Some(l) => l as usize,
                         None => decode(&op["data"])?.len(),
                     };
-                    calibration.as_mut().unwrap().upload(size)?
+                    cal.upload(size)?
                 } else if let Some(sh) = op.get("shading") {
                     let (f, start) = (vi(&sh["frame"]), vi(&sh["offset"]) as usize);
-                    if !shading.contains_key(&f) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = shading.entry(f) {
                         let fdata = result
                             .frames
                             .get(&f)
@@ -1147,7 +1147,7 @@ pub fn run_profile(
                             ),
                             None => white_shading(fdata, px),
                         };
-                        shading.insert(f, t);
+                        e.insert(t);
                     }
                     let t = &shading[&f];
                     let end = (start + vi(&op["length"]) as usize).min(t.len());

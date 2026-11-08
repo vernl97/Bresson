@@ -28,7 +28,11 @@ pub struct GainMeta {
 
 /// The quarter-size log2 gain map of a `w` × `h` gain buffer, as 8-bit
 /// values with its range; `None` when nothing in the frame is lifted.
-pub fn encode_gain_map(gain: &[f32], w: usize, h: usize) -> Option<(Vec<u8>, usize, usize, GainMeta)> {
+pub fn encode_gain_map(
+    gain: &[f32],
+    w: usize,
+    h: usize,
+) -> Option<(Vec<u8>, usize, usize, GainMeta)> {
     let (gw, gh) = (w.div_ceil(SCALE), h.div_ceil(SCALE));
     let mut log = vec![0f32; gw * gh];
     for gy in 0..gh {
@@ -253,7 +257,8 @@ mod tests {
         let tiff = find(&file, b"MPF\0").unwrap() + 4;
         let at = |i: usize| u32::from_be_bytes(file[i..i + 4].try_into().unwrap()) as usize;
         let entries = tiff + 50;
-        let (primary_len, gain_len, gain_off) = (at(entries + 4), at(entries + 20), at(entries + 24));
+        let (primary_len, gain_len, gain_off) =
+            (at(entries + 4), at(entries + 20), at(entries + 24));
         assert_eq!(at(entries + 8), 0);
         assert_eq!(primary_len + gain_len, file.len());
         assert_eq!(tiff + gain_off, primary_len);

@@ -350,7 +350,9 @@ fn trim_cache(dir: Option<&Path>, ext: &str, cap: u64) {
         let Ok(m) = e.metadata() else { continue };
         let Ok(modified) = m.modified() else { continue };
         let stale_tmp = x == "tmp"
-            && now.duration_since(modified).is_ok_and(|d| d.as_secs() > 3600);
+            && now
+                .duration_since(modified)
+                .is_ok_and(|d| d.as_secs() > 3600);
         if x == "json" || x == "thumb" || stale_tmp {
             let _ = std::fs::remove_file(&p);
         } else if x == ext {
@@ -388,12 +390,12 @@ pub fn read_cached_proxy(image: &Path) -> Option<SourceImage> {
 pub fn load_proxy_and_thumb(path: &Path) -> anyhow::Result<(SourceImage, SourceImage)> {
     let proxy = load_proxy(path)?;
     let thumb = make_thumb(&proxy);
-    if let Some(c) = thumb_cache_path(path) {
-        if !c.exists() {
-            let _ = std::fs::create_dir_all(sidecar::project_dir(path));
-            write_cache(&c, &thumb);
-            sidecar::remove_stale_thumbs(path, &c);
-        }
+    if let Some(c) = thumb_cache_path(path)
+        && !c.exists()
+    {
+        let _ = std::fs::create_dir_all(sidecar::project_dir(path));
+        write_cache(&c, &thumb);
+        sidecar::remove_stale_thumbs(path, &c);
     }
     Ok((proxy, thumb))
 }
@@ -451,7 +453,10 @@ pub struct ConvertedFrame {
 /// roll's frames by their EXIF exposure (`commonEV`).
 pub fn convert(items: Vec<ConvertItem>, as_roll: bool, use_exposure: bool) -> JobResult {
     use rayon::prelude::*;
-    let tickets: HashMap<PathBuf, u64> = items.iter().map(|it| (it.path.clone(), it.ticket)).collect();
+    let tickets: HashMap<PathBuf, u64> = items
+        .iter()
+        .map(|it| (it.path.clone(), it.ticket))
+        .collect();
     let ticket = |p: &PathBuf| tickets.get(p).copied().unwrap_or_default();
     let auto = !items.is_empty() && items.iter().all(|it| it.auto);
     type Loaded = (PathBuf, Arc<SourceImage>, Settings);
@@ -609,7 +614,8 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, vec![0u8; len]).unwrap();
         let f = std::fs::File::options().write(true).open(&p).unwrap();
-        f.set_modified(SystemTime::now() - Duration::from_secs(age_secs)).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(age_secs))
+            .unwrap();
         p
     }
 

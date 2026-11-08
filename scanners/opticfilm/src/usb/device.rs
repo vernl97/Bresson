@@ -312,16 +312,14 @@ impl UsbDeviceHandle {
         }
         // Configure only an unconfigured device: setting it again resets the host's bulk
         // data toggles but not the 7600i's GL843, so the next session lost its first packet.
-        if device.active_configuration().is_err() {
-            if let Some(v) = device
+        if device.active_configuration().is_err()
+            && let Some(v) = device
                 .configurations()
                 .next()
                 .map(|c| c.configuration_value())
-            {
-                if let Err(e) = device.set_configuration(v).wait() {
-                    debug!("set_configuration: {e}");
-                }
-            }
+            && let Err(e) = device.set_configuration(v).wait()
+        {
+            debug!("set_configuration: {e}");
         }
         let (iface_num, eps) = {
             let cfg = device

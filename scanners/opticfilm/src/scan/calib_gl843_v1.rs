@@ -56,7 +56,7 @@ pub fn dark_reference(data: &[u8], pixels: usize, stride: usize) -> Array2<i64> 
 /// Dark and gain words for R, G, B per pixel, 42 pixels per 512-byte block.
 pub fn shading_table(dark: &Array2<i64>, gain: &Array2<i64>) -> Vec<u8> {
     let px = dark.nrows();
-    let n = (px + 41) / 42;
+    let n = px.div_ceil(42);
     let mut out = vec![0u8; n * 512];
     for x in 0..px {
         let (blk, k) = (x / 42, x % 42);

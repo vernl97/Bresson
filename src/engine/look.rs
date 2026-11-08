@@ -198,6 +198,141 @@ impl Look {
     }
 }
 
+/// Separable Gaussian blur of a single channel.
+pub fn gaussian_blur_1(data: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+    use rayon::prelude::*;
+    if sigma <= 0.05 || w == 0 || h == 0 {
+        return data.to_vec();
+    }
+    let r = (sigma * 3.0).ceil() as isize;
+    let kernel: Vec<f32> = (-r..=r)
+        .map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let ks: f32 = kernel.iter().sum();
+    let kernel: Vec<f32> = kernel.iter().map(|v| v / ks).collect();
+    let mut tmp = vec![0.0f32; w * h];
+    tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let mut acc = 0.0;
+            for (i, k) in kernel.iter().enumerate() {
+                let xx = (x as isize + i as isize - r).clamp(0, w as isize - 1) as usize;
+                acc += data[y * w + xx] * k;
+            }
+            row[x] = acc;
+        }
+    });
+    let mut out = vec![0.0f32; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let mut acc = 0.0;
+            for (i, k) in kernel.iter().enumerate() {
+                let yy = (y as isize + i as isize - r).clamp(0, h as isize - 1) as usize;
+                acc += tmp[yy * w + x] * k;
+            }
+            row[x] = acc;
+        }
+    });
+    out
+}
+
+/// Separable Gaussian blur of RGB data.
+pub fn gaussian_blur_3(data: &[[f32; 3]], w: usize, h: usize, sigma: f32) -> Vec<[f32; 3]> {
+    let mut out = vec![[0.0f32; 3]; data.len()];
+    for c in 0..3 {
+        let ch: Vec<f32> = data.iter().map(|p| p[c]).collect();
+        let b = gaussian_blur_1(&ch, w, h, sigma);
+        for (o, v) in out.iter_mut().zip(b) {
+            o[c] = v;
+        }
+    }
+    out
+}
+
+/// The saturation scale `sat` for a colour of hue `h` (degrees) and
+/// saturation `s`, eased back to 1 on skin tones, like the Frontier's
+/// Bright Mode: primaries get more (or less) colour, faces keep theirs.
+/// Skin: orange hues (about 5–45°) of low to middle saturation.
+#[inline]
+pub fn skin_kept(h: f32, s: f32, sat: f32) -> f32 {
+    let dh = ((h - 25.0 + 180.0).rem_euclid(360.0) - 180.0).abs();
+    let hue = (1.0 - dh / 20.0).clamp(0.0, 1.0);
+    let chroma = ((0.75 - s) / 0.25).clamp(0.0, 1.0);
+    let skin = hue * hue * (3.0 - 2.0 * hue) * chroma;
+    sat + (1.0 - sat) * skin
+}
+
+/// Grain-aware sharpening on encoded output pixels, after the Frontier's
+/// Hyper Sharpness (Fuji, US 6,445,831 / US 5,739,922). Detail is split
+/// into a fine band (edges, at the radius) and a middle band (two to three
+/// times coarser, where film grain sits). An edge shows in all three
+/// channels at once; grain does not, because each dye layer has its own
+/// grain. So the local red-green-blue correlation of the bands says how
+/// much of a pixel's detail is edge: edges are sharpened (luminance, like
+/// an unsharp mask), grain-only areas get their middle band softened a
+/// little instead. `scale` < 1 shrinks the radius for downscaled previews.
+pub fn sharpen(data: &mut [[f32; 3]], w: usize, h: usize, def: SharpenDef, scale: f32) {
+    use rayon::prelude::*;
+    let radius = def.radius * scale;
+    if radius < 0.35 {
+        return;
+    }
+    let blur = |c: usize, sigma: f32| {
+        let ch: Vec<f32> = data.iter().map(|p| p[c]).collect();
+        gaussian_blur_1(&ch, w, h, sigma)
+    };
+    // Per channel: fine band (detail) and fine + middle band (for the
+    // correlation, which needs the grain's scale too).
+    let mut fine = Vec::with_capacity(3);
+    let mut band = Vec::with_capacity(3);
+    for c in 0..3 {
+        let (b1, b2) = (blur(c, radius), blur(c, radius * GRAIN_SCALE));
+        fine.push(
+            data.iter()
+                .zip(&b1)
+                .map(|(p, b)| p[c] - b)
+                .collect::<Vec<f32>>(),
+        );
+        band.push(
+            data.iter()
+                .zip(&b2)
+                .map(|(p, b)| p[c] - b)
+                .collect::<Vec<f32>>(),
+        );
+    }
+    // Local (co)variances of the bands.
+    let window = radius * GRAIN_SCALE;
+    let local = |a: usize, b: usize| {
+        let prod: Vec<f32> = band[a].iter().zip(&band[b]).map(|(x, y)| x * y).collect();
+        gaussian_blur_1(&prod, w, h, window)
+    };
+    let (rr, gg, bb) = (local(0, 0), local(1, 1), local(2, 2));
+    let (rg, gb, rb) = (local(0, 1), local(1, 2), local(0, 2));
+    let th = def.threshold;
+    data.par_iter_mut().enumerate().for_each(|(i, p)| {
+        let corr = |xy: f32, xx: f32, yy: f32| xy / (xx * yy).sqrt().max(1e-12);
+        let r = (corr(rg[i], rr[i], gg[i]) + corr(gb[i], gg[i], bb[i]) + corr(rb[i], rr[i], bb[i]))
+            / 3.0;
+        // 0 for grain (uncorrelated) … 1 for an edge.
+        let t = ((r - 0.3) / 0.5).clamp(0.0, 1.0);
+        let edge = t * t * (3.0 - 2.0 * t);
+        let f = [0, 1, 2].map(|c| fine[c][i]);
+        let m = [0, 1, 2].map(|c| band[c][i] - fine[c][i]);
+        let mut d = luma(f);
+        if th > 0.0 && d.abs() < th {
+            d *= d.abs() / th;
+        }
+        let a = def.amount * edge * d;
+        for c in 0..3 {
+            p[c] = (p[c] + a - GRAIN_DAMP * (1.0 - edge) * m[c]).clamp(0.0, 1.0);
+        }
+    });
+}
+
+/// The grain band's blur, in multiples of the sharpening radius.
+const GRAIN_SCALE: f32 = 2.5;
+/// Share of the grain band taken out where there is no edge.
+const GRAIN_DAMP: f32 = 0.25;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,138 +474,3 @@ mod tests {
         assert!(half > 0.0 && half < full, "{half} {full}");
     }
 }
-
-/// Separable Gaussian blur of a single channel.
-pub fn gaussian_blur_1(data: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
-    use rayon::prelude::*;
-    if sigma <= 0.05 || w == 0 || h == 0 {
-        return data.to_vec();
-    }
-    let r = (sigma * 3.0).ceil() as isize;
-    let kernel: Vec<f32> = (-r..=r)
-        .map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp())
-        .collect();
-    let ks: f32 = kernel.iter().sum();
-    let kernel: Vec<f32> = kernel.iter().map(|v| v / ks).collect();
-    let mut tmp = vec![0.0f32; w * h];
-    tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (i, k) in kernel.iter().enumerate() {
-                let xx = (x as isize + i as isize - r).clamp(0, w as isize - 1) as usize;
-                acc += data[y * w + xx] * k;
-            }
-            row[x] = acc;
-        }
-    });
-    let mut out = vec![0.0f32; w * h];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (i, k) in kernel.iter().enumerate() {
-                let yy = (y as isize + i as isize - r).clamp(0, h as isize - 1) as usize;
-                acc += tmp[yy * w + x] * k;
-            }
-            row[x] = acc;
-        }
-    });
-    out
-}
-
-/// Separable Gaussian blur of RGB data.
-pub fn gaussian_blur_3(data: &[[f32; 3]], w: usize, h: usize, sigma: f32) -> Vec<[f32; 3]> {
-    let mut out = vec![[0.0f32; 3]; data.len()];
-    for c in 0..3 {
-        let ch: Vec<f32> = data.iter().map(|p| p[c]).collect();
-        let b = gaussian_blur_1(&ch, w, h, sigma);
-        for (o, v) in out.iter_mut().zip(b) {
-            o[c] = v;
-        }
-    }
-    out
-}
-
-/// The saturation scale `sat` for a colour of hue `h` (degrees) and
-/// saturation `s`, eased back to 1 on skin tones, like the Frontier's
-/// Bright Mode: primaries get more (or less) colour, faces keep theirs.
-/// Skin: orange hues (about 5–45°) of low to middle saturation.
-#[inline]
-pub fn skin_kept(h: f32, s: f32, sat: f32) -> f32 {
-    let dh = ((h - 25.0 + 180.0).rem_euclid(360.0) - 180.0).abs();
-    let hue = (1.0 - dh / 20.0).clamp(0.0, 1.0);
-    let chroma = ((0.75 - s) / 0.25).clamp(0.0, 1.0);
-    let skin = hue * hue * (3.0 - 2.0 * hue) * chroma;
-    sat + (1.0 - sat) * skin
-}
-
-/// Grain-aware sharpening on encoded output pixels, after the Frontier's
-/// Hyper Sharpness (Fuji, US 6,445,831 / US 5,739,922). Detail is split
-/// into a fine band (edges, at the radius) and a middle band (two to three
-/// times coarser, where film grain sits). An edge shows in all three
-/// channels at once; grain does not, because each dye layer has its own
-/// grain. So the local red-green-blue correlation of the bands says how
-/// much of a pixel's detail is edge: edges are sharpened (luminance, like
-/// an unsharp mask), grain-only areas get their middle band softened a
-/// little instead. `scale` < 1 shrinks the radius for downscaled previews.
-pub fn sharpen(data: &mut [[f32; 3]], w: usize, h: usize, def: SharpenDef, scale: f32) {
-    use rayon::prelude::*;
-    let radius = def.radius * scale;
-    if radius < 0.35 {
-        return;
-    }
-    let blur = |c: usize, sigma: f32| {
-        let ch: Vec<f32> = data.iter().map(|p| p[c]).collect();
-        gaussian_blur_1(&ch, w, h, sigma)
-    };
-    // Per channel: fine band (detail) and fine + middle band (for the
-    // correlation, which needs the grain's scale too).
-    let mut fine = Vec::with_capacity(3);
-    let mut band = Vec::with_capacity(3);
-    for c in 0..3 {
-        let (b1, b2) = (blur(c, radius), blur(c, radius * GRAIN_SCALE));
-        fine.push(
-            data.iter()
-                .zip(&b1)
-                .map(|(p, b)| p[c] - b)
-                .collect::<Vec<f32>>(),
-        );
-        band.push(
-            data.iter()
-                .zip(&b2)
-                .map(|(p, b)| p[c] - b)
-                .collect::<Vec<f32>>(),
-        );
-    }
-    // Local (co)variances of the bands.
-    let window = radius * GRAIN_SCALE;
-    let local = |a: usize, b: usize| {
-        let prod: Vec<f32> = band[a].iter().zip(&band[b]).map(|(x, y)| x * y).collect();
-        gaussian_blur_1(&prod, w, h, window)
-    };
-    let (rr, gg, bb) = (local(0, 0), local(1, 1), local(2, 2));
-    let (rg, gb, rb) = (local(0, 1), local(1, 2), local(0, 2));
-    let th = def.threshold;
-    data.par_iter_mut().enumerate().for_each(|(i, p)| {
-        let corr = |xy: f32, xx: f32, yy: f32| xy / (xx * yy).sqrt().max(1e-12);
-        let r = (corr(rg[i], rr[i], gg[i]) + corr(gb[i], gg[i], bb[i]) + corr(rb[i], rr[i], bb[i]))
-            / 3.0;
-        // 0 for grain (uncorrelated) … 1 for an edge.
-        let t = ((r - 0.3) / 0.5).clamp(0.0, 1.0);
-        let edge = t * t * (3.0 - 2.0 * t);
-        let f = [0, 1, 2].map(|c| fine[c][i]);
-        let m = [0, 1, 2].map(|c| band[c][i] - fine[c][i]);
-        let mut d = luma(f);
-        if th > 0.0 && d.abs() < th {
-            d *= d.abs() / th;
-        }
-        let a = def.amount * edge * d;
-        for c in 0..3 {
-            p[c] = (p[c] + a - GRAIN_DAMP * (1.0 - edge) * m[c]).clamp(0.0, 1.0);
-        }
-    });
-}
-
-/// The grain band's blur, in multiples of the sharpening radius.
-const GRAIN_SCALE: f32 = 2.5;
-/// Share of the grain band taken out where there is no edge.
-const GRAIN_DAMP: f32 = 0.25;

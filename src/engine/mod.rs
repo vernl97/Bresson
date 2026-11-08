@@ -1,6 +1,10 @@
 //! Negative inversion engine — a standalone port of the Negative Conversion
 //! Plugin (Lightroom) processing pipeline.
 
+// Per-channel and per-pixel index loops over parallel arrays read like the
+// formulas in docs/conversion-engine.md; iterator chains would hide them.
+#![allow(clippy::needless_range_loop)]
+
 pub mod burn;
 pub mod color;
 pub mod contact;
