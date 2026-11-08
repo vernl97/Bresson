@@ -12,6 +12,7 @@ use tiff::tags::Tag;
 
 use super::color;
 use super::decode;
+use super::gainmap;
 use super::pipeline::{self, Analysis, Renderer};
 use super::settings::{ExportFormat, ExportSettings, FilmMetadata, Placement, Settings};
 use super::sidecar::RollData;
@@ -189,15 +190,25 @@ pub fn export_frame(
             meta,
             &src.info,
         )?,
-        ExportFormat::Jpeg => write_jpeg(
-            &out,
-            neg.width,
-            neg.height,
-            &px,
-            ex.jpeg_quality,
-            &icc,
-            meta,
-        )?,
+        ExportFormat::Jpeg => {
+            let jpeg = encode_jpeg(neg.width, neg.height, &px, ex.jpeg_quality, &icc, meta)?;
+            let gain = ex.hdr.then(|| r.hdr_gain(&neg)).flatten();
+            let map = gain.and_then(|g| gainmap::encode_gain_map(&g, neg.width, neg.height));
+            let bytes = match map {
+                Some((q, w, h, m)) => {
+                    let mut g = Vec::new();
+                    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut g, 90).write_image(
+                        &q,
+                        w as u32,
+                        h as u32,
+                        image::ExtendedColorType::L8,
+                    )?;
+                    gainmap::assemble(&jpeg, &g, m)
+                }
+                None => jpeg,
+            };
+            std::fs::write(&out, bytes).with_context(|| format!("write {}", out.display()))?;
+        }
     }
     Ok(out)
 }
@@ -282,26 +293,25 @@ pub fn write_tiff(
     Ok(())
 }
 
-pub fn write_jpeg(
-    path: &Path,
+/// The encoded JPEG of encoded output pixels, with ICC and EXIF.
+pub fn encode_jpeg(
     w: usize,
     h: usize,
     px: &[[f32; 3]],
     quality: u8,
     icc: &[u8],
     meta: &FilmMetadata,
-) -> Result<()> {
+) -> Result<Vec<u8>> {
     let data: Vec<u8> = px
         .iter()
         .flat_map(|p| p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
         .collect();
-    let f =
-        BufWriter::new(File::create(path).with_context(|| format!("create {}", path.display()))?);
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(f, quality.clamp(1, 100));
+    let mut v = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut v, quality.clamp(1, 100));
     let _ = enc.set_icc_profile(icc.to_vec());
     let _ = enc.set_exif_metadata(build_exif(meta));
     enc.write_image(&data, w as u32, h as u32, image::ExtendedColorType::Rgb8)?;
-    Ok(())
+    Ok(v)
 }
 
 // ---- EXIF ------------------------------------------------------------------------

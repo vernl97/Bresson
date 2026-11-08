@@ -575,6 +575,27 @@ impl CurveLut {
         rgb_tone(x, |v| lerp_table(&self.profile, profile_index(v))).map(|v| v.clamp(0.0, 1.0))
     }
 
+    /// The print tone that decides a colour's brightness through the
+    /// profile: its largest channel ([`rgb_tone`]), moved by `shift`.
+    #[inline]
+    pub fn max_print_tone(&self, d: [f32; 3], shift: f32) -> f32 {
+        (0..3)
+            .map(|c| lerp_table(&self.tone[c], Self::index(d[c])))
+            .fold(f32::MIN, f32::max)
+            + shift
+    }
+
+    /// The HDR gain table over the profile's print tones ([`hdr_gain`]).
+    pub fn hdr_gain_table(&self) -> Vec<f32> {
+        hdr_gain(&self.profile)
+    }
+
+    /// The linear-light gain of print tone `x` in a [`Self::hdr_gain_table`].
+    #[inline]
+    pub fn gain_at(table: &[f32], x: f32) -> f32 {
+        lerp_table(table, profile_index(x))
+    }
+
     /// Curves sampled for display: x 0..1 across the analysed density span
     /// (thin to dense), y per channel.
     pub fn sample(&self, n: usize) -> Vec<[f32; 4]> {
@@ -605,6 +626,40 @@ fn profile_x(i: usize) -> f64 {
 #[inline]
 fn profile_index(x: f32) -> f32 {
     (x - PROFILE_XMIN as f32) / (PROFILE_XMAX - PROFILE_XMIN) as f32 * (LUT_SIZE - 1) as f32
+}
+
+/// Encoded print value above which an HDR rendition leaves the paper's
+/// shoulder: below it, HDR and SDR are the same print.
+pub const HDR_KNEE: f32 = 0.75;
+/// Stops above paper white an HDR rendition can reach.
+pub const HDR_HEADROOM: f32 = 2.0;
+
+/// Linear-light gain from the SDR print to its HDR rendition, per entry of
+/// the profile table `sdr` (encoded values by [`profile_x`]). The HDR print
+/// follows the SDR up to [`HDR_KNEE`]; above it, it carries on at the knee's
+/// slope in stops instead of easing into paper white (the negative's
+/// straight line instead of the paper's shoulder), rolled off smoothly
+/// (tanh, so the slope is kept at the knee) to [`HDR_HEADROOM`] above
+/// white. The gain is 1 below the knee, never below 1, and never falls.
+pub fn hdr_gain(sdr: &[f32]) -> Vec<f32> {
+    let n = sdr.len();
+    let mut gain = vec![1.0f32; n];
+    let Some(k) = sdr.iter().position(|&v| v >= HDR_KNEE).filter(|&k| k >= 16) else {
+        return gain;
+    };
+    let lin = |v: f32| color::srgb_decode(v.clamp(0.0, 1.0)).max(1e-6);
+    let dx = (PROFILE_XMAX - PROFILE_XMIN) as f32 / (n - 1) as f32;
+    // Stops per unit of print tone just below the knee.
+    let slope = (lin(sdr[k]) / lin(sdr[k - 16])).log2() / (16.0 * dx);
+    let base = lin(sdr[k]);
+    let cap = (2f32.powf(HDR_HEADROOM) / base).log2();
+    for i in k..n {
+        let u = slope * (i - k) as f32 * dx;
+        let hdr = base * 2f32.powf(cap * (u / cap).tanh());
+        gain[i] = (hdr / lin(sdr[i])).max(1.0);
+    }
+    monotonic(&mut gain);
+    gain
 }
 
 fn identity_profile() -> Vec<f32> {
@@ -668,6 +723,33 @@ mod tests {
                 bow: 0.0,
             },
         ]
+    }
+
+    /// The HDR gain leaves the print below the knee alone, never falls, stays
+    /// within the headroom, and lifts paper white and beyond for every profile.
+    #[test]
+    fn hdr_gain_lifts_only_the_highlights() {
+        for &p in ToneProfile::ALL {
+            let s = Settings {
+                tone_profile: p,
+                ..Settings::default()
+            };
+            let lut = CurveLut::new(&levels(), &s);
+            let g = lut.hdr_gain_table();
+            let max = 2f32.powf(HDR_HEADROOM);
+            for i in 0..LUT_SIZE {
+                assert!(g[i] >= 1.0 && g[i] <= max + 1e-4, "{p:?} at {i}: {}", g[i]);
+                if i > 0 {
+                    assert!(g[i] >= g[i - 1], "{p:?} falls at {i}");
+                }
+                if lut.profile[i] < HDR_KNEE {
+                    assert_eq!(g[i], 1.0, "{p:?} below the knee at {i}");
+                }
+            }
+            assert!(CurveLut::gain_at(&g, 1.0) > 1.0, "{p:?} at white");
+            assert!(CurveLut::gain_at(&g, 1.5) > 1.5, "{p:?} beyond white");
+            assert_eq!(CurveLut::gain_at(&g, 0.5), 1.0, "{p:?} mid grey");
+        }
     }
 
     fn mid_grey(l: &Levels, c: usize) -> f32 {

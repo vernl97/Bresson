@@ -31,6 +31,8 @@ CONVERT OPTIONS:
   --aspect NAME        Crop shape for --auto-crop: Original (default), Free, 1:1, 2:3, 4:5, ...
   --flat FILE          Flat-field frame (bare light or clear film leader, shot like the negatives)
   --jpg                Write JPEG instead of 16-bit TIFF
+  --hdr                Write JPEG with an HDR gain map (Ultra HDR): up to two stops
+                       of extra highlight on HDR screens
   --long-edge PX       Resize so the long edge is at most PX (default: full size)
   --name TEMPLATE      File name: {name} {suffix} {n} {n:03} {stock} {iso} {date}
                        (default \"{name}{suffix}\")
@@ -123,6 +125,10 @@ fn convert(args: Vec<String>) -> Result<()> {
             "--aspect" => s.crop_aspect = find(CropAspect::ALL, CropAspect::label, &val()?)?,
             "--flat" => s.flat_field = Some(PathBuf::from(val()?)),
             "--jpg" => ex.format = ExportFormat::Jpeg,
+            "--hdr" => {
+                ex.format = ExportFormat::Jpeg;
+                ex.hdr = true;
+            }
             "--long-edge" => ex.long_edge = val()?.parse()?,
             "--name" => ex.name_template = val()?,
             "--out" => out = Some(PathBuf::from(val()?)),

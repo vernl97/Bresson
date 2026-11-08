@@ -621,6 +621,36 @@ Presets: Lab = amount 0.9, radius 1.3, threshold 0.012; Scanner = 0.6, 1.0,
 strength capped at the equivalent of Lightroom 150, radius 1–3 px; the radius
 also scales with any export downsizing.
 
+### 8.4 HDR gain map — `curve::hdr_gain`, `Renderer::hdr_gain`, `gainmap.rs`
+
+With `ExportSettings::hdr` (the export dialog's "HDR (gain map)", `--hdr`)
+a JPEG export also carries a gain map: viewers without HDR show the SDR
+print unchanged, HDR displays brighten the highlights as far as their
+headroom allows. The negative holds that headroom. Density thinner than
+`levels.hi` and the tone profile's shoulder (`tone_curve` above x = 1) are
+what the paper rolls into white.
+
+**The gain.** `hdr_gain` turns the profile table into a linear‑light gain
+per print tone. Below `HDR_KNEE = 0.75` (encoded) the HDR print *is* the SDR
+print, so the gain is exactly 1 for shadows, midtones and skin. Above it the
+HDR print carries on at the knee's slope in stops, the negative's straight
+line instead of the paper's shoulder, rolled off with `tanh` (so the slope
+is continuous at the knee) towards `HDR_HEADROOM = 2` stops above paper
+white. The gain never falls and never goes below 1. Per pixel,
+`Renderer::hdr_gain` looks it up at the brightest channel's print tone,
+the one that sets brightness through the hue‑preserving profile (§6.4), with
+dodge & burn's shift included. Unconverted and already positive prints have
+no gain map. One scalar gain in linear light keeps hue and is independent of
+the output primaries.
+
+**The file** (`gainmap.rs`). log2 gain is averaged over 4 × 4 blocks and
+stored as an 8‑bit greyscale JPEG from 0 to the frame's maximum (gamma 1,
+offsets 1/64). If the maximum is below 0.05 stop, a plain JPEG is written.
+The primary image gets the `hdrgm` XMP with the Container directory, an ISO
+21496‑1 version block and an MPF index. The gain map gets the `hdrgm` values
+and the ISO 21496‑1 record. Each fraction has its own denominator, because
+macOS ImageIO doesn't read the common‑denominator form.
+
 ---
 
 ## 9. Rolls — `aggregate_roll`, `levels_for`

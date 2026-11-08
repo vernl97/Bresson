@@ -566,6 +566,8 @@ pub struct ExportSettings {
     pub output_dir: Option<PathBuf>,
     /// Export sharpening; Leave As Set keeps the frame's own setting.
     pub sharpening: Sharpening,
+    /// JPEG with an HDR gain map (`engine::gainmap`).
+    pub hdr: bool,
 }
 
 impl Default for ExportSettings {
@@ -583,6 +585,7 @@ impl Default for ExportSettings {
             long_edge: 0,
             output_dir: None,
             sharpening: Sharpening::LeaveAsSet,
+            hdr: false,
         }
     }
 }

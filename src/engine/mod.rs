@@ -11,6 +11,7 @@ pub mod denoise;
 pub mod export;
 pub mod flat;
 pub mod frame;
+pub mod gainmap;
 pub mod heal;
 pub mod icc;
 pub mod look;

@@ -1352,6 +1352,8 @@ pub struct Renderer {
     sharpen: Option<presets::SharpenDef>,
     /// Draws the negative's dodge & burn map.
     local: bool,
+    /// A converted print, whose highlights an HDR rendition can lift.
+    hdr: bool,
 }
 
 impl Renderer {
@@ -1370,6 +1372,7 @@ impl Renderer {
             out_enc: color::EncodeLut::new(f),
             sharpen: presets::sharpening(s.sharpening),
             local: true,
+            hdr: levels.is_some() && s.image_type != ImageType::EditOnly,
         }
     }
 
@@ -1470,6 +1473,29 @@ impl Renderer {
             look::sharpen(&mut out, neg.width, neg.height, sd, sharpen_scale);
         }
         out
+    }
+
+    /// Per pixel, the linear-light gain from [`Self::render`]'s print to its
+    /// HDR rendition (`curve::hdr_gain`, by each pixel's brightest print
+    /// tone, dodge & burn included). `None` when the print has no HDR:
+    /// unconverted or already positive.
+    pub fn hdr_gain(&self, neg: &Negative) -> Option<Vec<f32>> {
+        if !self.hdr {
+            return None;
+        }
+        let table = self.lut.hdr_gain_table();
+        let gain = |p: &[f32; 3], ev: f32| {
+            CurveLut::gain_at(&table, self.lut.max_print_tone(*p, ev * curve::PRINT_TONE_PER_STOP))
+        };
+        Some(match neg.local.as_deref() {
+            Some(local) if self.local && local.len() == neg.data.len() => neg
+                .data
+                .par_iter()
+                .zip(local)
+                .map(|(p, &ev)| gain(p, ev))
+                .collect(),
+            _ => neg.data.par_iter().map(|p| gain(p, 0.0)).collect(),
+        })
     }
 }
 
@@ -2232,6 +2258,40 @@ mod tests {
         eprintln!("mid grey L*: normal {normal:.1}, holder {h:.1}, lamp {l:.1}");
         assert!((h - normal).abs() < 3.0, "holder: L* {h} vs {normal}");
         assert!((l - normal).abs() < 6.0, "lamp: L* {l} vs {normal}");
+    }
+
+    /// The HDR gain lifts a lamp beyond paper white and leaves mid grey and
+    /// the scene's darker tones alone; unconverted and already positive
+    /// prints have none.
+    #[test]
+    fn hdr_gain_lifts_light_sources_only() {
+        use crate::engine::testchart::{negative, with_light};
+        let s = chart_settings();
+        let mut lamp = negative(0.0);
+        with_light(&mut lamp, 0.0);
+        let a = analyse_chart(&lamp, &s);
+        let neg = prepare_negative(&lamp.src, &s, a.base);
+        let l = levels_for(&s, Some(&a), None).unwrap();
+        let r = Renderer::new(&s, Some(&l), OutputSpace::Srgb);
+        let gain = r.hdr_gain(&neg).unwrap();
+        let mean = |px: &[usize]| px.iter().map(|&i| gain[i]).sum::<f32>() / px.len() as f32;
+        let w = lamp.src.width;
+        let strip: Vec<usize> = (0..gain.len())
+            .filter(|i| (i % w) * 20 == w && (i / w) * 2 == lamp.src.height)
+            .collect();
+        let g_lamp = mean(&strip);
+        let g_grey = mean(&lamp.patches[21].pixels);
+        let g_black = mean(&lamp.patches[23].pixels);
+        eprintln!("gain: lamp {g_lamp:.2}, mid grey {g_grey:.3}, black {g_black:.3}");
+        assert!(g_lamp > 1.5, "lamp {g_lamp}");
+        assert!((g_grey - 1.0).abs() < 1e-4 && (g_black - 1.0).abs() < 1e-4);
+
+        assert!(Renderer::new(&s, None, OutputSpace::Srgb).hdr_gain(&neg).is_none());
+        let edit = Settings {
+            image_type: ImageType::EditOnly,
+            ..s.clone()
+        };
+        assert!(Renderer::new(&edit, Some(&l), OutputSpace::Srgb).hdr_gain(&neg).is_none());
     }
 
     /// A flat-field frame divides out uneven illumination.

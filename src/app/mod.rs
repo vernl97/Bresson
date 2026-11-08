@@ -853,6 +853,13 @@ impl NlpApp {
                         Some(0.0),
                         "JPEG compression quality (1-100)",
                     );
+                    ui.add_space(6.0);
+                    save |= widgets::checkbox(ui, &mut ex.hdr, "HDR (gain map)")
+                        .on_hover_text(
+                            "Up to two stops of extra highlight on HDR screens; \
+                             other viewers show the standard image",
+                        )
+                        .changed();
                 }
 
                 ui.add_space(6.0);
