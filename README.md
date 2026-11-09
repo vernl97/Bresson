@@ -1,138 +1,121 @@
 # NLP Studio
 
-A standalone film negative converter in Rust. It reads camera RAW negatives (camera scans) or TIFF/JPEG/PNG and scanner DNG scans, or scans film itself from Plustek OpticFilm scanners and SANE flatbeds, converts them with a density-based print engine, and writes positive copies. It started as a port of the Negative Lab Pro Lightroom plugin; it keeps the plugin's tone profiles and looks (as native data) but needs no Lightroom or plugin files.
+**Scan, convert and manage film negatives in one fast native app.**
 
-## Build & run
+NLP Studio turns camera scans and film-scanner output into finished positives. It reads RAW negatives (a camera pointed at a light table), TIFF/JPEG/PNG scans and scanner DNGs, or scans film itself from Plustek OpticFilm scanners and SANE flatbeds. A density-based print engine converts each frame, and you edit, cull and export from a Lightroom-style interface. There is also a headless CLI for batch work.
+
+It is a single cross-platform Rust binary: no Lightroom, no catalog database, no subscription. Edits live in small human-readable JSON sidecars next to your scans, so a roll folder stays portable.
+
+![A roll as a grid of converted frames](docs/images/roll-grid.png)
+
+## Why it exists
+
+Film photographers digitise rolls, not single images. Generic photo editors treat a scan as a digital photo; NLP Studio treats it as a negative that belongs to a roll.
+
+- **Density-based conversion.** A scan becomes per-channel density above the film base, and that density is printed onto a paper curve, the way a lab print is made. Neutrals stay neutral from shadows to highlights; the film's crossover and dye crosstalk are modelled rather than fought with sliders.
+- **Roll-aware.** Frames are analysed together. *Lab* mode gives each frame its own colour and density, like a lab scanner. *Darkroom* mode prints the whole roll at one setting. Roll info (film stock, ISO, push/pull, lab, developer) is shared across frames and ends up in EXIF and file names.
+- **Automatic frame prep.** Film rebate and holder are detected and trimmed; frames are cropped and straightened for you. Unconverted frames convert automatically when a folder opens.
+- **Scan straight into a roll.** Native Rust driver for Plustek OpticFilm scanners (no vendor software) and SANE support for flatbeds with a transparency unit.
+- **Non-destructive and open.** Settings go to `NLP/<file>.nlp.json`, roll metadata to `NLP/roll.json`.
+
+## Tour
+
+### Rolls and the grid
+
+The start screen lists your rolls with a mosaic of three frames each. Opening one shows a uniform grid with pick / reject flags (`P` / `X` / `U`), filters (All, Picks, Unflagged, Rejected), box selection, and a Space quick look. Export and the contact sheet act on the selection, or on the frames on show.
+
+Hold `N` to see the raw negatives behind the grid:
+
+![The same roll shown as negatives](docs/images/roll-negatives.png)
+
+### Editor
+
+A single-frame editor with a histogram / curves panel, tone profile, white balance (presets, neutral eyedropper, temperature and tint), exposure and tone sliders, colour toning and looks, before / after and split views, and a clipping overlay. A filmstrip runs along the bottom.
+
+Tools: **Crop & Straighten** (aspect lock, level line, auto frame detection), **Heal** (dust and scratch spots, Lightroom-style), and **Dodge & Burn** (a local print-time brush).
+
+![The editor](docs/images/editor.png)
+
+### Scanning
+
+**Scan** in a roll's top bar opens the scan panel beside the grid. Prescan the holder or bed, frame the shot (one box for a film scanner, one per frame on a flatbed), and scan. Each frame is saved as a linear DNG in the roll folder, joins the grid, and converts with the roll. OpticFilm infrared dust planes are kept alongside. A simulated scanner is built into debug builds, so you can try the panel without hardware.
+
+![The scan panel on a simulated OpticFilm](docs/images/scan-panel.png)
+
+### Export
+
+Positives as TIFF (8/16-bit) or JPEG in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile and EXIF, optional HDR gain-map JPEGs, presets, size limits and a file-name template. A contact sheet JPEG of a roll is one click.
+
+## Install and run
+
+You need a recent stable [Rust toolchain](https://rustup.rs).
 
 ```bash
-cargo run --release                     # GUI, reopens the last folder
-cargo run --release -- /path/to/scans   # GUI on a folder (or a single file)
+cargo run --release                      # GUI, starting on the Rolls list
+cargo run --release -- /path/to/scans    # GUI on a folder or single file
 cargo run --release -- help
-NLP_FAKE_SCANNERS=1 cargo run --release -- /path/to/roll   # Scan panel with simulated scanners
 ```
 
-### Command line
+SANE scanners need `libsane` (`brew install sane-backends` on macOS, or your distribution's `sane-backends`); the app runs fine without it. Try the Scan panel with simulated scanners:
+
+```bash
+NLP_FAKE_SCANNERS=1 cargo run --release -- /path/to/roll
+```
+
+## Command line
 
 ```bash
 cargo run --release -- convert [--roll] [--roll-process NAME] [--tone NAME] [--wb NAME] \
-    [--lut NAME] [--auto-crop] [--aspect NAME] [--flat FILE] [--jpg] [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
-cargo run --release -- scan-prep FILES              # gamma-encode linear TIF scans (no longer needed: set the source to Linear Scan)
-cargo run --release -- synth [out.tif] [ev]         # write the modelled ColorChecker negative (ev = stops over)
+    [--lut NAME] [--auto-crop] [--aspect NAME] [--flat FILE] [--jpg] [--hdr] \
+    [--long-edge PX] [--name TEMPLATE] [--out DIR] FILES
+cargo run --release -- scan-prep FILES     # gamma-encode linear TIF scans
+cargo run --release -- synth [out.tif] [ev]  # write the modelled ColorChecker negative
 ```
 
-`--roll` analyses the files together (needs 2+ frames); `--roll-process` picks Lab (each frame's own colour and density, default) or Darkroom (one setting for the roll). `--auto-crop` crops and straightens each frame to its detected frame before analysis, in the shape given by `--aspect` (Original by default, Free, 1:1, 1:2, 2:3, 3:4, 4:5, 5:7, 8.5:11, 9:16). `--flat` divides out uneven light with a flat-field frame. `--tone` and `--roll-process` also accept the last or first word of a name (`--tone Standard`, `--roll-process Darkroom`). `--name` takes the export file name template (see Export below).
+- `--roll` analyses the files together (2+ frames); `--roll-process` is `Lab` (default) or `Darkroom`.
+- `--auto-crop` crops and straightens to the detected frame, in the shape given by `--aspect` (Original, Free, 1:1, 2:3, 4:5, …).
+- `--flat` divides out uneven light with a flat-field frame.
+- `--name` takes the export file-name template (`{name}`, `{n:03}`, `{stock}`, `{iso}`, `{date}`).
 
-## GUI
+## Keyboard
 
-**Folder View**
-- Browse a folder of RAW and TIFF files as a thumbnail grid. Select with click, ⌘/Ctrl-click, Shift-click or ⌘A; double-click (or Enter) opens the editor.
-- Actions take the selection, or else the frames on show (with nothing selected, Export and the contact sheet leave rejected frames out):
-  - **Convert** (⋯ menu or right-click) opens a dialog with the conversion inputs: source, colour model, film base, flat field, white balance, *Auto-crop frames* and, with *Balance as a roll* on (2+ frames), the roll process (Lab: each frame's own colour and density, or Darkroom: one setting for the roll).
-  - **Copy settings** / **Paste settings** (⋯ menu or right-click): copy the edit from the selected frame and paste it onto the selection (⌘C / ⌘V).
-  - **Export** (top right): positive copies as TIF (8/16-bit, ZIP) or JPG, in sRGB, AdobeRGB or ProPhoto, with an embedded ICC profile and EXIF.
-    - Presets: *Lab JPEG M/L* (3000/6000 px) and *Archive TIFF*, plus your own (*Save as…*).
-    - Size: full or a long edge of 2000–6000 px.
-    - File name template: `{name}`, `{suffix}`, `{n}` / `{n:03}` (position in the export), `{stock}`, `{iso}`, `{date}` (scan date). Clashing names get `-2`, `-3`, ….
-  - **Contact sheet**: the grid's "…" menu saves a JPEG of the same frames Export would take to `NLP/<folder>_contact_sheet.jpg`: every frame landscape on black with its file name beneath.
-- Right-click a frame for open, convert, export, detect frame, copy/paste settings and unconvert.
-- Lab correction keys act on the selected converted frames; the offsets show under each thumbnail (see below).
+Press `?` in the app for the full shortcut sheet. A few to start: `Enter` opens a frame, `Space` quick-looks, `P` / `X` / `U` flag, `C` crop, `Q` heal, `K` dodge & burn, `B` before / after, `J` clipping, `⌘Z` undo.
 
-**Scanning**
-- **Scan** in the roll's top bar opens the Scan panel beside the grid. A new, empty roll folder opens on its (empty) grid, so you can scan straight into it.
-- Scanners:
-  - **Plustek OpticFilm** film scanners, driven natively over USB by the `opticfilm` crate (no vendor driver). The OpticFilm 8200i SE, 8100 (V2), 8300i SE and 7600i v1/v2 scan; other models open for status only until they are validated.
-  - **SANE devices** (macOS and Linux), such as flatbeds with a transparency unit, through the `sane` crate. It loads libsane at runtime (`brew install sane-backends`, or your distribution's sane-backends package; `NLP_SANE_LIB` points at another copy), so the app runs without it.
-  - **Simulated scanners** in debug builds or with `NLP_FAKE_SCANNERS=1`: every OpticFilm model and a flatbed, for trying the panel without hardware.
-- Options follow the scanner: resolution; for OpticFilms the infrared dust plane, multi-exposure and passes; for flatbeds the source (flatbed, transparency unit, …) and *Gamma-encoded* for scanners that still apply a tone curve at 16 bit.
-- **Prescan** scans the holder or bed at low resolution and shows it as a positive. Frame the shot by dragging: one box on a film scanner (advance the holder between frames, **Scan next** / ⌘R), a box per frame on a flatbed (drag inside a box to move it, a corner to resize it, × or Delete to remove it), scanned in turn with **Scan N frames**.
-- Each frame is saved in the roll folder as `scan_NNN.dng`, a linear (LinearRaw) DNG that opens as a scanner DNG, joins the grid and converts with the roll. Gamma-encoded flatbeds save `scan_NNN.tif` instead. The OpticFilm infrared plane goes to `NLP/scan_NNN.ir.tif`, kept for dust removal.
-- For film, flatbeds are set to colour, 16-bit, positive film type (no inversion by the scanner) and gamma off. Closing the panel turns the scanner's lamp off.
+## How the conversion works
 
-**Editor View**
-- Toolbar:
-  - Left: back (Space), previous/next (←/→, wraps; skips unconverted frames when the current one is converted), zoom (+/−, ⌘-scroll or double-click), undo/redo (⌘Z / ⇧⌘Z).
-  - Centre: file name, tone profile and the lab correction offsets (`D+2 C−1 M0 Y+1`).
-  - Right: before/after (B; ⇧B for a split view with a draggable divider), rotate, flip, crop/straighten (C), export.
-- J shows clipping: red where a channel is blown, blue where the shadows are blocked. The histogram marks clipped channels in its corners.
-- Hovering the image shows the output RGB and the negative's density above the film base.
-- Crop & Straighten (C, the first tool under the histogram), laid out like Lightroom's: a panel opens under the tools. Drag the frame edges and corners on the canvas. Aspect (Original by default; Free, 1:1, 1:2, 2:3, 3:4, 4:5, 5:7, 8.5:11, 9:16) sets the shape and its lock switches between Free and the last fixed shape. Rotate, flip and the level line (draw along something that should be level) sit below it; Auto finds the frame inside the film rebate and holder; the Angle slider straightens. Reset goes back to the whole frame, Close or Done (Enter) applies, Esc cancels. The bar under the picture holds Tool Overlay (when the thirds grid shows: Always, Auto, Never) and Done.
-- Spot healing (Q, the second tool under the histogram), laid out like Lightroom's: a Spot Edit panel opens under the tools with Clone / Heal, Size, Opacity, Reset and Close. Click a speck and it is healed from the best matching clean area nearby; an arrow points from the spot to its source. Drag a circle to move the spot or its source, its rim to resize; `[` `]` set the size and Delete removes the selected spot. The bar under the picture holds Tool Overlay (Always, Auto, Selected, Never), Visualize Spots with its sensitivity (black and white detail, so dust stands out) and Done. Spots stay with their frame (paste skips them), follow rotation and crop, and apply to thumbnails and exports. The tool stays on from frame to frame; Esc or Enter leaves it.
-- A single-column sidebar, with a histogram on top (the crop and heal tools are just under it):
-  - **Histogram**: a Histogram / Curves toggle. The histogram marks clipped channels and its regions drag Blacks, Shadows, Exposure, Highlights and Whites.
-  - **Basic**: the tone profile, white balance (presets, a neutral eyedropper, Temp and Tint, stored as yellow and magenta filtration), Exposure, Brightness, Contrast, Highlights, Shadows, Whites and Blacks.
-  - **Colour**: colour toning for midtones, highlights and shadows, a look (LUT) with its amount, and look saturation.
-  - **Finishing** (closed until opened): Glow/Fade and Burn / Dodge for large areas (the Hyper Tone local burning and dodging, off by default).
-  - Each section header marks edits and resets just that section.
-  - The bar at the bottom holds Convert while the frame needs it, otherwise Copy from last (the settings of the frame you edited before) and Reset. The top bar shows the roll, frame and film stock, with Export and the ⋯ menu in its corner: copy / paste settings, save / apply default, **Film & roll…** (film stock, ISO, developer and camera details for the EXIF and file name tokens, *Apply to roll/folder*, *Use roll analysis* and the roll process), keyboard shortcuts, Re-convert and Unconvert.
-  - Sharpening (Lab or Scanner) is set in the export dialog.
-- Film-base eyedropper for sampling the unexposed border.
+For each frame: decode to linear RGB, find the film base, convert to density, remove dye crosstalk, analyse levels on a 600 px proxy (neutral-axis fit, crossover bend, skin-aware midtone), then print through a tone profile with white-balance filtration, looks and an output colour space. The roll supplies the film's properties; Lab mode fades each frame towards the roll balance as its own confidence drops.
 
-Settings are saved inside the `NLP/` subfolder as `<file>.nlp.json`.
+Conversion quality is measured on a physically modelled ColorChecker negative (`testchart.rs`) and on real rolls. See [docs/conversion-engine.md](docs/conversion-engine.md) for the stage-by-stage walkthrough.
 
-## Engine (`src/engine`)
+## Repository layout
 
-The engine started as a port of the Lightroom plugin and now models the film itself: a scan becomes density, density is printed onto a paper curve.
-
-1. **Density.** `pipeline::prepare_negative` divides out uneven light with an optional flat-field frame (`flat.rs`), takes linear camera RGB through the camera matrix, divides out the film base and stores `log10(base / transmittance)` per channel, unclamped. A C-41 dye crosstalk correction (the dyes' unwanted absorptions) and the colour model's calibration are applied in density.
-2. **Levels.** `pipeline::analyze` trims film rebate, holder (within 0.2 D of the frame's densest area) and light past the film off the edges, then measures each channel's density range (exact 0.05 % / 99.99 % quantiles and the median) on the 600 px, border-cropped, blurred analysis buffer. Red and blue are placed on the image's neutral axis, fitted through ten tonal steps; each step's grey is the cluster of near-grey pixels on the axis, so a large skin, sand or wood surface can't pull it, and steps far off the line are dropped. With enough steps the axis bends to follow the film's crossover (Fuji US 6,160,634). The white end stays within twice the shadow-to-median span above the median, so a lamp or specular in the frame can't print the scene dark; in a dark frame whose bright area spans many tones (a flash at night) only the top 3 % may clip instead. Normalising every channel along its neutral curve keeps neutrals neutral from shadows to highlights.
-3. **Print.** `curve.rs` shapes the normalised density (brightness, contrast, lights/darks, whites/blacks, toning), turns it into paper log exposure plus printing filtration (white balance and the C·M·Y keys, in CC) and print time (EV), and prints it with the tone profile, applied as Lightroom applies a master curve so colours keep their hue (a per-channel curve would pull dark greens and blues towards the primaries). The 14 profiles are the plugin's (tuned on real rolls), measured on the test chart as curves over this engine's normalised density. A base saturation of 0.85 in density keeps colours at the scene's chroma. The per-channel part is baked into density-indexed LUTs, then the look (`look.rs`) and the output space are applied.
-4. **Auto colour and density.** Auto-Neutral is the filtration that prints the neutral axis grey. Like the Frontier's Auto Setup, compact skin areas found on the grey-balanced frame (`skin.rs`) pull the midtone towards a good skin density, so backlit and flash portraits print the face right.
-5. **Rolls.** The roll supplies the film's properties: its channel slopes are the median of the frames' neutral-axis slopes (a single frame's fit also follows its light). Its crossover is the median of the frames' bends. *Lab* (default) then gives each frame its own colour balance and density, like a lab scanner, fading to the roll's balance as a frame has fewer neutral tones. *Darkroom* prints the whole roll at one balance and one exposure. EXIF exposure differences are exact density offsets (`log10 2` per stop).
-
-6. **Hyper Tone** (`dodge.rs`, after Fuji US 6,807,316) compresses large areas far from the frame's key, dodging dark areas and burning bright ones, while the detail on top of them stays. It uses a two-scale low-pass of green density so it doesn't halo at edges.
-7. **Sharpening** (after Fuji's Hyper Sharpness) sharpens edges and leaves grain alone: an edge shows in all three channels at once, each dye layer's grain does not, so the local R/G/B correlation of the detail decides.
-
-`testchart.rs` models a ColorChecker shot on C-41 film (plus a film with crossover, scenes dominated by one colour and portraits); `chart_quality`, `crossover_film_stays_neutral`, `dominated_scenes_stay_neutral`, `faces_print_at_their_density` and `lit_subjects_at_night_keep_their_tones` measure the engine against them.
-
-| Module | Role |
+| Path | Contents |
 |---|---|
-| `decode.rs` | RAW (rawler) and bitmap loading, proxies, geometry |
-| `curve.rs` | Print engine: normalisation, tone and colour shaping, tone profiles, LUTs, eyedropper |
-| `pipeline.rs` | Film base, density, crosstalk, analysis, auto colour, roll aggregation, renderer |
-| `skin.rs` | Skin detection and skin-keyed print density |
-| `dodge.rs` | Hyper Tone dodging and burning |
-| `presets.rs` | Colour models, film WB presets, sharpening |
-| `look.rs` | Native looks (`assets/looks.json`, measured from the plugin's looks), grain-aware sharpening |
-| `color.rs` | Working and output spaces, CIELAB / CIEDE2000, generated ICC profiles |
-| `flat.rs` | Flat-field gain maps |
-| `demosaic.rs` | Bayer demosaic for full-resolution exports |
-| `testchart.rs` | Physically modelled test negative and quality metrics |
-| `frame.rs` | Frame detection (crop and straighten) |
-| `sidecar.rs` | Sidecars, roll info, defaults |
-| `export.rs` | Positive copies with ICC and EXIF, TIF scan prep |
-| `contact.rs` | Contact sheet JPEG (landscape tiles, file names) |
-| `scan_dng.rs` | Scanner output as LinearRaw DNG (or 16-bit TIFF) |
-
-The GUI is in `src/app` (eframe/egui); `gpu.rs` and `preview.wgsl` draw the editor preview, `scanner.rs` and `scan_panel.rs` the scanning.
-
-## Scanner drivers (`scanners/`)
-
-| Crate | Role |
-|---|---|
-| `scanners/opticfilm` | Plustek OpticFilm driver (GPL-3): a Rust port of pyopticfilm over nusb, checked against the Python driver for byte-identical USB traffic and identical images (see its README) |
-| `scanners/sane` | SANE 1.0 bindings with libsane loaded at runtime, film-scan setup (source, colour, 16-bit, positive film type, gamma off) and a simulated flatbed |
-
-`scanners/pyopticfilm` is the Python reference the OpticFilm driver was ported from (not tracked). Linking the GPL-3 driver makes distributed builds GPL-3.
-
-### Notes
-- **GPU preview.** With wgpu (the default), the editor draws its preview in a fragment shader (`app/gpu.rs`, `app/preview.wgsl`): the density image is a texture (its alpha holds the Hyper Tone low-pass), the print curves and the native look are buffers. It matches the CPU renderer within 0.1/255 and stays at full editor resolution while sliders move; while the straighten angle is dragged it works on a 1024 px copy and the histogram waits for the release. The histogram, readout and clipping view come from a 1024 px CPU render. Exports, thumbnails and the no-wgpu fallback use the CPU renderer. The preview leaves out output sharpening.
-- **Raw processing.** `rawler` decodes the raw files and supplies the camera matrix. Full-resolution exports demosaic Bayer sensors with an RCD-style ratio-corrected method (`demosaic.rs`) and X-Trans with Markesteijn, instead of rawler's PPG and bilinear. Previews bin the mosaic instead. Scanner DNGs (LinearRaw) need no demosaic.
-- **No plugin assets.** The conversion uses no camera profiles (DCP) or look files (XMP). VueScan / SilverFast DNGs are set as the scan source by hand; the app's own scans are recognised as linear DNGs (and the `opticfilm` CLI's TIFFs, by their Software tag, as Linear Scan).
-- **Scanning status.** The OpticFilm driver matches pyopticfilm on its mock scanners, including calibrated GL128 scans on a simulated analog front end, but has not yet run on a real scanner. The SANE layer is tested against its simulated flatbed and, where sane-backends is installed, against real libsane (`cargo test -p sane --release -- --ignored`: SANE's `test` backend through a private config, plus the full system backend list surviving thread exit); it has not yet driven a real flatbed.
-- **Film base.** *Auto* uses the brightest 1 % of the frame; *Sampled* uses the eyedropper. In density a wrong base is a constant per-channel offset that the levels absorb, so the conversion barely depends on it (tested on a chart cropped tight with no rebate).
-- **Flat field.** A frame of the bare light source or clear film leader, shot with the same camera, lens and light (Convert dialog, the editor's Source section, or `--flat FILE`). Uneven light varies across the frame, which the levels can't absorb.
-- **Sidecars** from before the density engine keep their settings and metadata but need a new Convert.
-- **Looks.** Natural, Frontier, Crystal and Pakon are native data measured from the plugin's looks: grey curves plus a hue/saturation/value map (24 × 5 × 8). They reproduce the plugin's looks to a mean of 2–4.5 out of 255. Saturation levels 1–10 rise smoothly (the plugin's level 5 was more saturated than 6–8).
-- **Sharpening** stays in the perceptual (encoded) space: in linear light the bright side of halos gets stronger.
+| `src/engine/` | Pure image processing: decode, density, analysis, print engine, looks, export |
+| `src/app/` | The eframe / egui GUI: rolls, grid, editor, scan panel, GPU preview |
+| `src/cli.rs` | The `convert`, `scan-prep` and `synth` commands |
+| `scanners/opticfilm` | Plustek OpticFilm driver: a parity-tested Rust port of pyopticfilm (GPL-3) |
+| `scanners/sane` | SANE bindings (libsane loaded at runtime) and a simulated flatbed |
+| `crosstalk/` | Film dye crosstalk matrices (see its README) |
+| `docs/` | Engine documentation |
 
 ## Tests
 
 ```bash
-cargo test --release                                  # includes the chart quality metrics and a GPU-vs-CPU check
-cargo test --release chart_quality -- --nocapture     # print the conversion quality numbers
-NLP_UI_TEST_DIR=<scans> NLP_UI_OUT=<dir> cargo test --release ui_screens -- --ignored   # headless UI screenshots
-NLP_UI_OUT=<dir> cargo test --release scan_panel     # Scan panel tests on simulated scanners, with screenshots
-cargo test -p opticfilm --release                     # OpticFilm driver: parity with pyopticfilm
-cargo test -p sane --release                          # SANE layer against its simulated flatbed
-cargo test -p sane --release -- --ignored             # against real libsane (needs sane-backends; uses its `test` backend)
+cargo test --release                        # engine + app, including conversion quality metrics
+cargo test --release chart_quality -- --nocapture
+cargo test -p opticfilm --release           # driver parity with pyopticfilm
+cargo test -p sane --release                # SANE layer against its simulated flatbed
 ```
+
+Headless UI screenshots (what this README's pictures come from):
+
+```bash
+NLP_UI_TEST_DIR=<scans> NLP_UI_OUT=<dir> cargo test --release ux_tour -- --ignored
+NLP_UI_TEST_DIR=<scans> NLP_UI_OUT=<dir> cargo test --release grid_tour -- --ignored
+NLP_UI_OUT=<dir> cargo test --release scan_panel
+```
+
+## Status and licence
+
+Scanning has been validated against mock and simulated scanners (and real libsane's `test` backend) but has not yet run on real hardware. Linking the GPL-3 OpticFilm driver makes distributed builds GPL-3. Film crosstalk data comes from NegPy (GPL-3, personal use).
