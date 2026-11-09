@@ -1,8 +1,8 @@
-# NLP Studio
+# Bresson
 
 **Scan, convert and manage film negatives in one fast native app.**
 
-NLP Studio turns camera scans and film-scanner output into finished positives. It reads RAW negatives (a camera pointed at a light table), TIFF/JPEG/PNG scans and scanner DNGs, or scans film itself from Plustek OpticFilm scanners and SANE flatbeds. A density-based print engine converts each frame, and you edit, cull and export from a Lightroom-style interface. There is also a headless CLI for batch work.
+Bresson turns camera scans and film-scanner output into finished positives. It reads RAW negatives (a camera pointed at a light table), TIFF/JPEG/PNG scans and scanner DNGs, or scans film itself from Plustek OpticFilm scanners and SANE flatbeds. A density-based print engine converts each frame, and you edit, cull and export from a Lightroom-style interface. There is also a headless CLI for batch work.
 
 It is a single cross-platform Rust binary: no Lightroom, no catalog database, no subscription. Edits live in small human-readable JSON sidecars next to your scans, so a roll folder stays portable.
 
@@ -10,7 +10,7 @@ It is a single cross-platform Rust binary: no Lightroom, no catalog database, no
 
 ## Why it exists
 
-Film photographers digitise rolls, not single images. Generic photo editors treat a scan as a digital photo; NLP Studio treats it as a negative that belongs to a roll.
+Film photographers digitise rolls, not single images. Generic photo editors treat a scan as a digital photo; Bresson treats it as a negative that belongs to a roll.
 
 - **Density-based conversion.** A scan becomes per-channel density above the film base, and that density is printed onto a paper curve, the way a lab print is made. Neutrals stay neutral from shadows to highlights; the film's crossover and dye crosstalk are modelled rather than fought with sliders.
 - **Roll-aware.** Frames are analysed together. *Lab* mode gives each frame its own colour and density, like a lab scanner. *Darkroom* mode prints the whole roll at one setting. Roll info (film stock, ISO, push/pull, lab, developer) is shared across frames and ends up in EXIF and file names.
